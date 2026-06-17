@@ -49,7 +49,7 @@ platforms that have no known channels, and a send-only platform never discovers
 one from inbound traffic, so this seed is what makes Fetch addressable.)
 
 Combined with the home channel (`HERMES_INBOX_HOME_CHANNEL`), the agent can reach
-your phone the same ways it reaches Telegram:
+your phone the same way it reaches Telegram:
 
 - `send_message(target="hermes_inbox", …)` → your Fetch app (home channel)
 - `hermes cron create … --deliver hermes_inbox` → scheduled pushes
