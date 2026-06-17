@@ -264,11 +264,16 @@ def _seed_channel_alias() -> None:
         if path.exists():
             with open(path, encoding="utf-8") as fh:
                 loaded = json.load(fh)
-            if isinstance(loaded, dict):
-                aliases = loaded
+            if not isinstance(loaded, dict):
+                logger.debug("Hermes Inbox alias seed skipped: channel_aliases top-level is not a dict")
+                return
+            aliases = loaded
         entries = aliases.get(PLATFORM_NAME)
-        if not isinstance(entries, dict):
+        if entries is None:
             entries = {}
+        elif not isinstance(entries, dict):
+            logger.debug("Hermes Inbox alias seed skipped: platform aliases entry is not a dict")
+            return
         channel = _home_channel()
         # Drop stale auto-generated Fetch aliases for any other channel; keep
         # user-renamed ones (value != CHANNEL_LABEL) and the current channel.

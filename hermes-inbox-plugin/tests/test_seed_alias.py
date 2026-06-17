@@ -101,6 +101,32 @@ def test_reseed_keeps_user_renamed_alias_when_home_channel_changes(tmp_path, mon
     assert data == {"hermes_inbox": {"default": "My Phone", "leads": "Fetch"}}
 
 
+def test_seed_skips_when_aliases_top_level_is_not_dict(tmp_path, monkeypatch):
+    plugin = _load_plugin()
+    monkeypatch.setattr(plugin, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_INBOX_HOME_CHANNEL", "default")
+    original = ["unexpected", "shape"]
+    (tmp_path / ALIASES).write_text(json.dumps(original))
+
+    plugin._seed_channel_alias()
+
+    data = json.loads((tmp_path / ALIASES).read_text())
+    assert data == original
+
+
+def test_seed_skips_when_platform_aliases_entry_is_not_dict(tmp_path, monkeypatch):
+    plugin = _load_plugin()
+    monkeypatch.setattr(plugin, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_INBOX_HOME_CHANNEL", "default")
+    existing = {"telegram": {"6927549812": "Brent"}, "hermes_inbox": ["unexpected", "shape"]}
+    (tmp_path / ALIASES).write_text(json.dumps(existing))
+
+    plugin._seed_channel_alias()
+
+    data = json.loads((tmp_path / ALIASES).read_text())
+    assert data == existing
+
+
 def test_register_seeds_when_enabled(tmp_path, monkeypatch):
     plugin = _load_plugin()
     monkeypatch.setattr(plugin, "get_hermes_home", lambda: tmp_path)
