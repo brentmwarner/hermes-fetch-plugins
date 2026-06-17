@@ -1,0 +1,15 @@
+name: fetch
+label: Fetch Push
+version: 0.1.0
+description: "Push notifications for the Fetch iOS app. Sends a push when a turn finishes or the agent needs your attention, via the hosted Fetch push relay. No Apple Developer credentials live on this host."
+author: Fetch
+hooks:
+  - post_llm_call
+  - pre_approval_request
+optional_env:
+  - name: HERMES_FETCH_RELAY_URL
+    description: Override the Fetch push relay base URL (defaults to the hosted relay). Point at a locally-run relay during development.
+    password: false
+  - name: HERMES_FETCH_RELAY_REGISTRATION_TOKEN
+    description: Enrollment token for the Fetch push relay, if the relay requires one.
+    password: true

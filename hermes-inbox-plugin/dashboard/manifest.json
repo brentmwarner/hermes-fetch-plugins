@@ -1,0 +1,13 @@
+{
+  "name": "hermes-inbox",
+  "label": "Hermes Inbox",
+  "description": "Configure Hermes Inbox delivery from the dashboard API.",
+  "icon": "MessageSquare",
+  "version": "0.1.0",
+  "tab": {
+    "path": "/hermes-inbox",
+    "hidden": true
+  },
+  "entry": "index.js",
+  "api": "plugin_api.py"
+}

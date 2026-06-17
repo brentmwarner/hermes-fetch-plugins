@@ -1,0 +1,13 @@
+{
+  "name": "fetch",
+  "label": "Fetch Push",
+  "description": "Device-token registration endpoint for Fetch iOS push notifications.",
+  "icon": "Bell",
+  "version": "0.1.0",
+  "tab": {
+    "path": "/fetch-push",
+    "hidden": true
+  },
+  "entry": "index.js",
+  "api": "plugin_api.py"
+}
