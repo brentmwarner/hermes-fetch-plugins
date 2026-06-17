@@ -251,6 +251,12 @@ def _seed_channel_alias() -> None:
 
     Idempotent and non-destructive: add the channel only when absent; never
     overwrite a name the user changed, nor other platforms' aliases.
+
+    An auto-generated alias is one whose value is still ``CHANNEL_LABEL`` — a
+    user rename gives it a different value. When the configured home channel
+    changes, prune stale auto-generated ``Fetch`` aliases pointing at other
+    channels so friendly-name lookup can't keep resolving ``Fetch`` to a stale
+    channel; user-renamed aliases are left untouched.
     """
     try:
         path = get_hermes_home() / "channel_aliases.json"
@@ -264,10 +270,19 @@ def _seed_channel_alias() -> None:
         if not isinstance(entries, dict):
             entries = {}
         channel = _home_channel()
-        if channel in entries:
-            return  # respect an existing (possibly user-renamed) entry
-        entries[channel] = CHANNEL_LABEL
-        aliases[PLATFORM_NAME] = entries
+        # Drop stale auto-generated Fetch aliases for any other channel; keep
+        # user-renamed ones (value != CHANNEL_LABEL) and the current channel.
+        pruned = {
+            key: value
+            for key, value in entries.items()
+            if key == channel or value != CHANNEL_LABEL
+        }
+        already_current = channel in pruned
+        if pruned == entries and already_current:
+            return  # nothing to prune and the current channel is already present
+        if not already_current:
+            pruned[channel] = CHANNEL_LABEL  # respect an existing user rename above
+        aliases[PLATFORM_NAME] = pruned
         tmp = path.with_name(path.name + ".tmp")
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(aliases, fh, indent=2)
