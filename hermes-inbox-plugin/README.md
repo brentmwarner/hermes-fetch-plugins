@@ -4,7 +4,7 @@
 webhook direct-delivery routes send messages into the Hermes iOS app instead
 of Telegram, Slack, or email.
 
-## Install Locally
+## Install
 
 ```bash
 hermes plugins install brentmwarner/hermes-fetch-plugins/fetch-plugin --enable
