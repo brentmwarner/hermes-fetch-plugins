@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import logging
 import os
 import re
@@ -64,6 +65,7 @@ HOME_CHANNEL_ENV = "HERMES_INBOX_HOME_CHANNEL"
 ENABLED_ENV = "HERMES_INBOX_ENABLED"
 DEFAULT_CHANNEL = "default"
 DEFAULT_TITLE = "Hermes Inbox"
+CHANNEL_LABEL = "Fetch"  # friendly name the agent sees for this channel in its target list
 
 
 @dataclass(frozen=True)
@@ -237,7 +239,46 @@ def hermes_home_env_path() -> str:
     return str(get_hermes_home() / ".env")
 
 
+def _seed_channel_alias() -> None:
+    """Advertise the inbox to the agent as a named, addressable channel.
+
+    Hermes' channel directory skips any platform with no discovered channels
+    (``format_directory_for_display``), and a send-only platform never discovers
+    one from inbound traffic — so without help the agent never *sees* Fetch in
+    ``send_message(action="list")`` and won't proactively message it. Registering
+    the home channel in ``channel_aliases.json`` makes Hermes inject it as a named
+    target even before the first message arrives.
+
+    Idempotent and non-destructive: add the channel only when absent; never
+    overwrite a name the user changed, nor other platforms' aliases.
+    """
+    try:
+        path = get_hermes_home() / "channel_aliases.json"
+        aliases: dict[str, Any] = {}
+        if path.exists():
+            with open(path, encoding="utf-8") as fh:
+                loaded = json.load(fh)
+            if isinstance(loaded, dict):
+                aliases = loaded
+        entries = aliases.get(PLATFORM_NAME)
+        if not isinstance(entries, dict):
+            entries = {}
+        channel = _home_channel()
+        if channel in entries:
+            return  # respect an existing (possibly user-renamed) entry
+        entries[channel] = CHANNEL_LABEL
+        aliases[PLATFORM_NAME] = entries
+        tmp = path.with_name(path.name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(aliases, fh, indent=2)
+        os.replace(tmp, path)
+    except Exception:
+        logger.debug("Hermes Inbox channel alias seeding failed", exc_info=True)
+
+
 def register(ctx):
+    if _is_enabled():
+        _seed_channel_alias()
     ctx.register_platform(
         name=PLATFORM_NAME,
         label="Hermes Inbox",
