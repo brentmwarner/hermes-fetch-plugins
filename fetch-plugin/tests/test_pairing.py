@@ -1,6 +1,7 @@
 """Tests for the Fetch pairing link/QR builders (agent-side onboarding)."""
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -53,3 +54,37 @@ def test_render_qr_returns_string_or_none() -> None:
     if out is not None:
         assert isinstance(out, str)
         assert out.strip()  # non-empty
+
+
+def test_is_pairing_configured_false_without_credentials(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(pairing, "_saved_dashboard_token", lambda: "")
+
+    assert not pairing.is_pairing_configured()
+
+
+def test_is_pairing_configured_true_with_relay_pairing(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(pairing, "_saved_dashboard_token", lambda: "")
+    push_dir = tmp_path / "push"
+    push_dir.mkdir()
+    (push_dir / "fetch-relay.json").write_text(
+        json.dumps(
+            {
+                "agent_id": "agent-1",
+                "agent_secret": "secret",
+                "pairing": "pairing-token",
+                "relay_url": pairing._DEFAULT_RELAY_URL,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert pairing.is_pairing_configured()
+
+
+def test_is_pairing_configured_true_with_saved_dashboard_token(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(pairing, "_saved_dashboard_token", lambda: "direct-token")
+
+    assert pairing.is_pairing_configured()

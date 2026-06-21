@@ -64,7 +64,7 @@ PLATFORM_NAME = "hermes_inbox"
 HOME_CHANNEL_ENV = "HERMES_INBOX_HOME_CHANNEL"
 ENABLED_ENV = "HERMES_INBOX_ENABLED"
 DEFAULT_CHANNEL = "default"
-DEFAULT_TITLE = "Hermes Inbox"
+DEFAULT_TITLE = "Fetch Inbox"
 CHANNEL_LABEL = "Fetch"  # friendly name the agent sees for this channel in its target list
 
 
@@ -113,7 +113,7 @@ def _env_enablement() -> dict[str, Any] | None:
     if not channel:
         return None
     return {
-        "home_channel": {"chat_id": channel, "name": "Hermes Inbox"},
+        "home_channel": {"chat_id": channel, "name": DEFAULT_TITLE},
         "channel": channel,
     }
 
@@ -301,7 +301,7 @@ def register(ctx):
         _seed_channel_alias()
     ctx.register_platform(
         name=PLATFORM_NAME,
-        label="Hermes Inbox",
+        label=DEFAULT_TITLE,
         adapter_factory=lambda cfg: HermesInboxAdapter(cfg),
         check_fn=check_requirements,
         validate_config=validate_config,
@@ -310,6 +310,6 @@ def register(ctx):
         cron_deliver_env_var=HOME_CHANNEL_ENV,
         standalone_sender_fn=_standalone_send,
         max_message_length=8000,
-        platform_hint="Hermes Inbox delivers messages into the Hermes iOS app.",
-        emoji="H",
+        platform_hint="Fetch Inbox delivers messages into the Fetch iOS app.",
+        emoji="📱",
     )

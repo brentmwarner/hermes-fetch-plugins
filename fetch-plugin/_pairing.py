@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import os
 import secrets
 import socket
@@ -112,6 +113,36 @@ def _ensure_stable_token() -> str:
         # Config helpers unavailable (shouldn't happen under `hermes setup`) —
         # fall back to a process-local token so the flow still completes.
         return secrets.token_urlsafe(24)
+
+
+def _saved_dashboard_token() -> str:
+    existing = (os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN") or "").strip()
+    if existing:
+        return existing
+    try:
+        from hermes_cli.config import get_env_value
+
+        return (get_env_value("HERMES_DASHBOARD_SESSION_TOKEN") or "").strip()
+    except Exception:
+        return ""
+
+
+def _has_relay_pairing_credentials() -> bool:
+    try:
+        path = _hermes_home() / "push" / "fetch-relay.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    agent_id = str(data.get("agent_id") or "").strip()
+    pairing = str(data.get("pairing") or "").strip()
+    return bool(agent_id and pairing)
+
+
+def is_pairing_configured() -> bool:
+    """True when setup can be re-run as a reconfiguration flow."""
+    return _has_relay_pairing_credentials() or bool(_saved_dashboard_token())
 
 
 def _dashboard_base_url(host: str) -> str:
@@ -207,6 +238,7 @@ def interactive_setup() -> None:
     """
     from hermes_cli.cli_output import (
         prompt,
+        prompt_yes_no,
         print_header,
         print_info,
         print_success,
@@ -231,6 +263,12 @@ def interactive_setup() -> None:
         print()
 
     print_header("Fetch")
+    if is_pairing_configured():
+        print_info("Fetch: already configured")
+        if not prompt_yes_no("Reconfigure Fetch?", False):
+            return
+        print()
+
     print_info("Pair the Fetch iOS app to this agent — like linking WhatsApp Web.")
     print()
 

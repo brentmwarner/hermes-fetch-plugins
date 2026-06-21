@@ -1,4 +1,4 @@
-"""Dashboard API for the Hermes Inbox plugin.
+"""Dashboard API for the Fetch Inbox plugin.
 
 Mounted by Hermes at ``/api/plugins/hermes-inbox/``.
 """
@@ -30,7 +30,7 @@ class EnableInboxBody(BaseModel):
 
 class TestInboxBody(BaseModel):
     channel: str = Field(default=DEFAULT_CHANNEL, max_length=80)
-    message: str = Field(default="Hermes Inbox is ready.", max_length=1000)
+    message: str = Field(default="Fetch Inbox is ready.", max_length=1000)
 
 
 @router.get("/status")
@@ -69,7 +69,7 @@ def enable(body: EnableInboxBody) -> dict:
 @router.post("/test")
 def test(body: TestInboxBody) -> dict:
     if not _truthy(os.environ.get(ENABLED_ENV, "")):
-        raise HTTPException(status_code=400, detail="Hermes Inbox is not enabled")
+        raise HTTPException(status_code=400, detail="Fetch Inbox is not enabled")
     try:
         delivery = deliver_to_inbox(
             channel=(body.channel or DEFAULT_CHANNEL).strip() or DEFAULT_CHANNEL,

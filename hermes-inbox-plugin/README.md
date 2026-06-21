@@ -1,7 +1,7 @@
-# Hermes Inbox Plugin
+# Fetch Inbox Plugin
 
 `hermes_inbox` is a Hermes Agent platform plugin that lets cron jobs and
-webhook direct-delivery routes send messages into the Hermes iOS app instead
+webhook direct-delivery routes send messages into the Fetch iOS app instead
 of Telegram, Slack, or email.
 
 ## Install
