@@ -31,6 +31,7 @@ import asyncio
 import base64
 import json
 import logging
+from typing import Any
 
 import httpx
 
@@ -60,6 +61,23 @@ def _http_to_ws(url: str) -> str:
 def _is_textual(content_type: str) -> bool:
     ct = (content_type or "").lower()
     return any(ct.startswith(p) for p in _TEXTUAL_PREFIXES)
+
+
+def _ws_connect(url: str, headers: dict[str, str] | None = None) -> Any:
+    """Return an awaitable WebSocket connection compatible with websockets 12–15.
+
+    websockets ≥ 14 ships ``websockets.asyncio.client`` and uses
+    ``additional_headers``; older releases expose only the top-level
+    ``websockets.connect`` which accepts ``extra_headers``.
+    """
+    try:
+        from websockets.asyncio.client import connect  # websockets ≥ 14
+        kw: dict = {"additional_headers": headers} if headers else {}
+        return connect(url, **kw)
+    except ImportError:
+        import websockets  # websockets ≤ 13
+        kw = {"extra_headers": headers} if headers else {}
+        return websockets.connect(url, **kw)
 
 
 class _LocalSession:
@@ -140,6 +158,10 @@ class AgentTunnel:
                 await self._dispatch(ws, frame)
         finally:
             await self._close_all_sessions()
+            try:
+                await ws.close()
+            except Exception:
+                pass
 
     # --- dispatch ---
 
@@ -245,12 +267,10 @@ class AgentTunnel:
     # --- default production transports ---
 
     async def _default_relay_connect(self, url: str, headers: dict[str, str]):
-        from websockets.asyncio.client import connect
-        return await connect(url, additional_headers=headers)
+        return await _ws_connect(url, headers)
 
     async def _default_local_ws_connect(self, dashboard_base: str, token: str | None):
-        from websockets.asyncio.client import connect
         ws_url = _http_to_ws(dashboard_base).rstrip("/") + "/api/ws"
         if token:
             ws_url += f"?token={token}"
-        return await connect(ws_url)
+        return await _ws_connect(ws_url)

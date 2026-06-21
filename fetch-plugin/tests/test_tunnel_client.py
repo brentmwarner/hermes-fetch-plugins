@@ -135,7 +135,14 @@ async def test_ws_open_pumps_local_frames_back():
     ws = FakeRelayWS()
     await t._ensure_session(ws, "c1")
     fake.feed(json.dumps({"jsonrpc": "2.0", "method": "event", "params": {"type": "gateway.ready"}}))
-    await asyncio.sleep(0.05)  # let the pump task run
+
+    # Bounded wait: poll until the pump task delivers the expected frame.
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + 2.0
+    while not any(f["t"] == "ws-frame" for f in ws.sent):
+        if loop.time() >= deadline:
+            break
+        await asyncio.sleep(0)
 
     frames = [f for f in ws.sent if f["t"] == "ws-frame"]
     assert frames and frames[0]["cid"] == "c1"
