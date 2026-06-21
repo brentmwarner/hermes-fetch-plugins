@@ -77,6 +77,20 @@ def _runtime_module():
     return module
 
 
+def _inbox_module():
+    """Load the Fetch inbox helper by file path."""
+    existing = sys.modules.get("fetch_plugin_inbox")
+    if existing is not None:
+        return existing
+    path = Path(__file__).resolve().parent / "_inbox.py"
+    spec = importlib.util.spec_from_file_location("fetch_plugin_inbox", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _hermes_home() -> Path:
     try:
         from hermes_cli.config import get_hermes_home
@@ -278,6 +292,7 @@ def interactive_setup() -> None:
 
     print_header("Fetch")
     if is_pairing_configured():
+        _inbox_module().enable_delivery_for_future_starts()
         print_info("Fetch: already configured")
         if not prompt_yes_no("Reconfigure Fetch?", False):
             return
@@ -289,6 +304,7 @@ def interactive_setup() -> None:
     relay_link = _try_build_relay_link()
 
     if relay_link:
+        _inbox_module().enable_delivery_for_future_starts()
         runtime = _runtime_module()
         runtime.enable_tunnel_for_future_starts()
         runtime_status = runtime.ensure_relay_runtime()
@@ -330,6 +346,7 @@ def interactive_setup() -> None:
 
     # Relay unavailable — degrade to a full direct pairing (QR + link), prompting
     # for the reachable host as the original direct flow did.
+    _inbox_module().enable_delivery_for_future_starts()
     print_warning(
         "Relay pairing unavailable (relay unreachable) — using direct pairing. "
         "The app reaches this machine over your LAN or Tailscale."

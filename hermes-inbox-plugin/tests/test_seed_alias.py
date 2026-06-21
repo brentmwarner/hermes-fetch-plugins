@@ -127,7 +127,7 @@ def test_seed_skips_when_platform_aliases_entry_is_not_dict(tmp_path, monkeypatc
     assert data == existing
 
 
-def test_register_seeds_when_enabled(tmp_path, monkeypatch):
+def test_register_hides_legacy_platform_by_default(tmp_path, monkeypatch):
     plugin = _load_plugin()
     monkeypatch.setattr(plugin, "get_hermes_home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_INBOX_ENABLED", "true")
@@ -137,8 +137,23 @@ def test_register_seeds_when_enabled(tmp_path, monkeypatch):
 
     plugin.register(ctx)
 
+    assert not (tmp_path / ALIASES).exists()
+    assert captured == {}
+
+
+def test_register_seeds_and_registers_when_legacy_platform_enabled(tmp_path, monkeypatch):
+    plugin = _load_plugin()
+    monkeypatch.setattr(plugin, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_INBOX_ENABLED", "true")
+    monkeypatch.setenv("HERMES_INBOX_HOME_CHANNEL", "default")
+    monkeypatch.setenv("HERMES_INBOX_REGISTER_LEGACY_PLATFORM", "1")
+    captured = {}
+    ctx = types.SimpleNamespace(register_platform=lambda **kw: captured.update(kw))
+
+    plugin.register(ctx)
+
     assert (tmp_path / ALIASES).exists()
-    assert captured["name"] == "hermes_inbox"  # platform still registered
+    assert captured["name"] == "hermes_inbox"
 
 
 def test_register_skips_seed_when_disabled(tmp_path, monkeypatch):

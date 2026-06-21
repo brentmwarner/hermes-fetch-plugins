@@ -2,8 +2,9 @@
 
 The platform's ``send`` operation persists a message into Hermes' canonical
 session database and emits an iOS proactive push tied to that session. This
-lets cron jobs and webhook direct-delivery routes target ``hermes_inbox``
-instead of external chat apps.
+lets cron jobs and webhook direct-delivery routes target the Fetch iOS app.
+The visible platform moved to ``fetch``; this plugin keeps the old
+``hermes_inbox`` target available only when explicitly opted in.
 """
 
 from __future__ import annotations
@@ -63,6 +64,7 @@ def _load_relay():
 PLATFORM_NAME = "hermes_inbox"
 HOME_CHANNEL_ENV = "HERMES_INBOX_HOME_CHANNEL"
 ENABLED_ENV = "HERMES_INBOX_ENABLED"
+LEGACY_PLATFORM_ENV = "HERMES_INBOX_REGISTER_LEGACY_PLATFORM"
 DEFAULT_CHANNEL = "default"
 DEFAULT_TITLE = "Fetch Inbox"
 CHANNEL_LABEL = "Fetch"  # friendly name the agent sees for this channel in its target list
@@ -220,6 +222,11 @@ def _is_enabled() -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
+def _legacy_platform_enabled() -> bool:
+    value = os.environ.get(LEGACY_PLATFORM_ENV, "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
 def _normalize_channel(channel: str) -> str:
     clean = (channel or DEFAULT_CHANNEL).strip()
     return clean or DEFAULT_CHANNEL
@@ -297,8 +304,15 @@ def _seed_channel_alias() -> None:
 
 
 def register(ctx):
-    if _is_enabled():
+    if _is_enabled() and _legacy_platform_enabled():
         _seed_channel_alias()
+    if not _legacy_platform_enabled():
+        logger.info(
+            "Fetch Inbox legacy platform hidden; use the unified `fetch` platform "
+            "or set %s=1 to expose `hermes_inbox`.",
+            LEGACY_PLATFORM_ENV,
+        )
+        return
     ctx.register_platform(
         name=PLATFORM_NAME,
         label=DEFAULT_TITLE,

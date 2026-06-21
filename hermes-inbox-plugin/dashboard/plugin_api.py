@@ -13,7 +13,6 @@ from pydantic import BaseModel, Field
 
 from hermes_plugins.hermes_inbox import (
     DEFAULT_CHANNEL,
-    DEFAULT_TITLE,
     ENABLED_ENV,
     HOME_CHANNEL_ENV,
     deliver_to_inbox,
@@ -21,6 +20,8 @@ from hermes_plugins.hermes_inbox import (
 )
 
 router = APIRouter()
+DELIVERY_TARGET = "fetch"
+DISPLAY_TITLE = "Fetch"
 
 
 class EnableInboxBody(BaseModel):
@@ -30,7 +31,7 @@ class EnableInboxBody(BaseModel):
 
 class TestInboxBody(BaseModel):
     channel: str = Field(default=DEFAULT_CHANNEL, max_length=80)
-    message: str = Field(default="Fetch Inbox is ready.", max_length=1000)
+    message: str = Field(default="Fetch is ready.", max_length=1000)
 
 
 @router.get("/status")
@@ -40,7 +41,7 @@ def status() -> dict:
     return {
         "installed": True,
         "enabled": enabled,
-        "delivery_target": "hermes_inbox",
+        "delivery_target": DELIVERY_TARGET,
         "home_channel": channel,
         "home_channel_env": HOME_CHANNEL_ENV,
     }
@@ -59,7 +60,7 @@ def enable(body: EnableInboxBody) -> dict:
         "ok": True,
         "installed": True,
         "enabled": body.enabled,
-        "delivery_target": "hermes_inbox",
+        "delivery_target": DELIVERY_TARGET,
         "home_channel": channel,
         "home_channel_env": HOME_CHANNEL_ENV,
         "restart_required": True,
@@ -74,7 +75,7 @@ def test(body: TestInboxBody) -> dict:
         delivery = deliver_to_inbox(
             channel=(body.channel or DEFAULT_CHANNEL).strip() or DEFAULT_CHANNEL,
             content=body.message,
-            title=DEFAULT_TITLE,
+            title=DISPLAY_TITLE,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
