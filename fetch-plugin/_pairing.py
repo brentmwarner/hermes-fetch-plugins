@@ -36,11 +36,9 @@ import sys
 from pathlib import Path
 from urllib.parse import quote
 
-# Universal-link host the app is entitled for (``applinks:tryfetchapp.com``).
-# A link under this host opens the Fetch app directly when tapped, and
-# ``SetupLink.parseFetchSetupURL`` accepts both the relay (``?agent=&pairing=``)
-# and direct (``?url=&token=``) shapes.
-_SETUP_LINK_HOST = "https://tryfetchapp.com/setup"
+# Custom URL scheme registered by the app. It is shorter than the universal-link
+# host and ``SetupLink.parseFetchSetupURL`` accepts the same relay/direct shapes.
+_SETUP_LINK_HOST = "fetch://setup"
 # Mirrors ``SetupLink.defaultRelayURL`` in the app: when the relay link points at
 # the hosted relay we omit ``&relay=`` (smaller QR; the app fills in this same
 # default). Override only adds the param when a custom relay is in use.
