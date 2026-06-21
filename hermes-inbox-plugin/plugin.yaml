@@ -1,13 +1,16 @@
 name: hermes-inbox
-label: Fetch Inbox
+label: Fetch Compatibility Bridge
 kind: platform
-version: 0.1.1
-description: Deliver cron and webhook messages into the Fetch iOS app as first-class chat threads.
+version: 0.1.2
+description: Legacy Fetch Inbox compatibility bridge. The visible Hermes platform is now Fetch (`fetch`); set HERMES_INBOX_REGISTER_LEGACY_PLATFORM=1 only if you still need the old `hermes_inbox` target.
 author: Fetch
 optional_env:
   - name: HERMES_INBOX_ENABLED
-    description: Enable Fetch Inbox as a cron/webhook delivery target.
+    description: Enable Fetch as a cron/webhook delivery target.
     password: false
   - name: HERMES_INBOX_HOME_CHANNEL
-    description: Default inbox channel used by deliver=hermes_inbox.
+    description: Default inbox channel used by Fetch delivery.
+    password: false
+  - name: HERMES_INBOX_REGISTER_LEGACY_PLATFORM
+    description: Opt in to exposing the legacy hermes_inbox platform alongside Fetch.
     password: false

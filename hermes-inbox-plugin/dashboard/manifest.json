@@ -1,9 +1,9 @@
 {
   "name": "hermes-inbox",
-  "label": "Fetch Inbox",
-  "description": "Configure Fetch Inbox delivery from the dashboard API.",
+  "label": "Fetch",
+  "description": "Configure Fetch delivery from the dashboard API.",
   "icon": "MessageSquare",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "tab": {
     "path": "/hermes-inbox",
     "hidden": true

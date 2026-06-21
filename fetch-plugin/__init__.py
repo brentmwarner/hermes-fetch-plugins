@@ -21,12 +21,11 @@ Each push hook fires-and-forgets an HTTPS POST to the Fetch relay, which holds
 the single APNs key and fans out to registered devices. Device-token
 registration is handled by the dashboard half (``dashboard/plugin_api.py``).
 
-The platform's transport *adapter* is intentionally inert here — the live path
-is the reverse tunnel above, selected by the app's relay pairing, not a gateway
-connect adapter. Pairing writes no ``platforms.fetch`` config block, and
-``check_fn`` reports no gateway adapter availability so runtime auto-enable
-never instantiates one. ``is_connected`` only reports whether setup has saved
-pairing material, which lets ``hermes setup`` offer a reconfigure prompt.
+The platform's app control path is the reverse tunnel above, selected by the
+app's relay pairing, not a gateway inbound adapter. The same ``fetch`` platform
+also owns send-only inbox delivery so Hermes setup, cron delivery, and
+``send_message`` expose one user-facing Fetch entry instead of a separate
+``Fetch Inbox`` platform.
 
 This file is imported by the Hermes ``PluginManager`` as ``hermes_plugins.fetch``
 and its ``register(ctx)`` is called once at agent startup.
@@ -81,6 +80,7 @@ def _load_sibling(module_name: str, filename: str):
 _relay = _load_sibling("fetch_plugin_relay", "_relay.py")
 _pairing = _load_sibling("fetch_plugin_pairing", "_pairing.py")
 _runtime = _load_sibling("fetch_plugin_runtime", "_runtime.py")
+_inbox = _load_sibling("fetch_plugin_inbox", "_inbox.py")
 
 
 def _on_post_llm_call(*, session_id: str = "", assistant_response: str = "", **_kwargs) -> None:
@@ -105,24 +105,12 @@ def _on_pre_approval_request(
     )
 
 
-def _inert_adapter(_config):
-    """Adapter factory for the Fetch platform — deliberately not implemented.
-
-    The live transport is the reverse tunnel (``_spawn_tunnel``), selected by the
-    app's relay pairing — not a gateway connect adapter. Pairing writes no
-    ``platforms.fetch`` config, so the gateway never selects Fetch for connect
-    and never calls this. If something ever does, fail loudly rather than
-    half-connect a non-existent transport.
-    """
-    raise NotImplementedError(
-        "Fetch transport adapter is not available — Fetch reaches the agent via "
-        "the reverse tunnel (relay pairing), not a gateway connect adapter."
-    )
+def _fetch_is_connected(config) -> bool:
+    return bool(_pairing.is_pairing_configured() or _inbox.validate_config(config))
 
 
-def _gateway_adapter_available() -> bool:
-    """False because Fetch does not expose a gateway transport adapter."""
-    return False
+def _fetch_env_enablement():
+    return _inbox.env_enablement(force=_pairing.is_pairing_configured())
 
 
 def _spawn_tunnel() -> None:
@@ -172,14 +160,22 @@ def register(ctx) -> None:
             register_platform(
                 name="fetch",
                 label="Fetch",
-                adapter_factory=_inert_adapter,
-                check_fn=_gateway_adapter_available,
-                is_connected=lambda _cfg: _pairing.is_pairing_configured(),
+                adapter_factory=_inbox.adapter_factory,
+                check_fn=_inbox.check_requirements,
+                validate_config=_inbox.validate_config,
+                is_connected=_fetch_is_connected,
                 setup_fn=_pairing.interactive_setup,
+                env_enablement_fn=_fetch_env_enablement,
+                cron_deliver_env_var=_inbox.HOME_CHANNEL_ENV,
+                standalone_sender_fn=_inbox.standalone_send,
+                max_message_length=8000,
+                platform_hint="Fetch delivers messages into the Fetch iOS app.",
                 emoji="📱",
                 install_hint="",
             )
-            log.info("Fetch platform registered (pairing setup_fn; transport adapter inert)")
+            if _inbox.is_delivery_enabled():
+                _inbox.seed_channel_alias()
+            log.info("Fetch platform registered (pairing setup_fn + inbox delivery)")
         except Exception:
             log.warning("Fetch platform registration failed; push hooks still active", exc_info=True)
     else:
