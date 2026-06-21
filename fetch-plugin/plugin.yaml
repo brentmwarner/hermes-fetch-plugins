@@ -1,8 +1,8 @@
 name: fetch
 label: Fetch
 kind: platform
-version: 0.3.3
-description: "Fetch iOS app channel for Hermes. Pairs the app to this agent (link + QR), like linking WhatsApp Web — relay pairing reaches the agent through the hosted relay with no inbound port / no Tailscale, or a direct LAN/Tailscale link as a fallback. Also sends a push when a turn finishes or the agent needs attention, and owns the Fetch inbox delivery target for cron/webhooks. No Apple Developer credentials live on this host."
+version: 0.3.4
+description: "Fetch iOS app channel for Hermes. Pairs the app to this agent (link + QR), like linking WhatsApp Web — relay pairing reaches the agent through the hosted relay with no inbound port / no Tailscale. Also sends a push when a turn finishes or the agent needs attention, and owns the Fetch inbox delivery target for cron/webhooks. No Apple Developer credentials live on this host."
 author: Fetch
 hooks:
   - post_llm_call

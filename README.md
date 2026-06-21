@@ -22,9 +22,9 @@ hermes gateway restart
 hermes setup
 ```
 
-In setup, choose Fetch and scan/paste the generated link in the iOS app. Relay setup starts the local headless runtime automatically; if you run `hermes dashboard` separately, restart it only if you want the visible dashboard process to pick up plugin changes too.
+In setup, choose Fetch and scan/paste the generated relay link in the iOS app. Relay setup starts the local headless runtime automatically; if you run `hermes dashboard` separately, restart it only if you want the visible dashboard process to pick up plugin changes too.
 
-Use `fetch` for scheduled or direct delivery:
+Use `fetch` for scheduled or message delivery:
 
 ```bash
 hermes cron create "every 15m" "Send my summary to Fetch." --deliver fetch

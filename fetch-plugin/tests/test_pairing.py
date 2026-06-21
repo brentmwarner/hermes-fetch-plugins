@@ -18,15 +18,6 @@ def _query(link: str) -> dict:
     return {k: v[0] for k, v in parse_qs(urlsplit(link).query).items()}
 
 
-def test_build_setup_link_direct_carries_url_and_token() -> None:
-    link = pairing.build_setup_link(base_url="http://192.168.1.5:9119", token="tok 123")
-    assert link.startswith("https://tryfetchapp.com/setup?")
-    q = _query(link)
-    assert q["url"] == "http://192.168.1.5:9119"
-    assert q["token"] == "tok 123"  # decoded back; the raw link percent-encodes it
-    assert "agent" not in q and "pairing" not in q
-
-
 def test_build_relay_link_omits_relay_param_for_hosted_default() -> None:
     link = pairing.build_relay_link(
         agent_id="agent-1", pairing="cap-token", relay_url=pairing._DEFAULT_RELAY_URL
@@ -58,14 +49,12 @@ def test_render_qr_returns_string_or_none() -> None:
 
 def test_is_pairing_configured_false_without_credentials(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)
-    monkeypatch.setattr(pairing, "_saved_dashboard_token", lambda: "")
 
     assert not pairing.is_pairing_configured()
 
 
 def test_is_pairing_configured_true_with_relay_pairing(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)
-    monkeypatch.setattr(pairing, "_saved_dashboard_token", lambda: "")
     push_dir = tmp_path / "push"
     push_dir.mkdir()
     (push_dir / "fetch-relay.json").write_text(
@@ -83,8 +72,8 @@ def test_is_pairing_configured_true_with_relay_pairing(tmp_path, monkeypatch) ->
     assert pairing.is_pairing_configured()
 
 
-def test_is_pairing_configured_true_with_saved_dashboard_token(tmp_path, monkeypatch) -> None:
+def test_is_pairing_configured_false_with_only_saved_dashboard_token(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)
-    monkeypatch.setattr(pairing, "_saved_dashboard_token", lambda: "direct-token")
+    monkeypatch.setenv("HERMES_DASHBOARD_SESSION_TOKEN", "direct-token")
 
-    assert pairing.is_pairing_configured()
+    assert not pairing.is_pairing_configured()
