@@ -11,9 +11,9 @@ wipes and which required each user to hold the `.p8`).
 ```
  iPhone (Fetch app)        User's Hermes agent (this plugin)         Your infra
  ─────────────────         ─────────────────────────────────        ──────────────
-  register token  ──▶  /api/plugins/fetch/register ──┐
-   (session token)     (dashboard half, plugin_api.py)│ proxy        ┌────────────┐
-                                                       └────────────▶│ push relay │
+  register token  ──▶  relay tunnel ──▶ /api/plugins/fetch/register ─┐
+   (session token)     (headless API)    (dashboard half)             │ proxy        ┌────────────┐
+                                                                      └────────────▶│ push relay │
    🔔  banner    ◀───────  post_llm_call hook  ───────────POST──────▶│ holds the  │──▶ APNs
                           (turn finished → "replied")   /push/events │ one .p8    │
                           pre_approval_request hook ────────────────▶│ fans out   │
@@ -36,6 +36,10 @@ processes**, coupled only through the relay:
   `/api/plugins/fetch/`, behind the dashboard's session-token auth. `/register`
   and `/unregister` proxy device tokens straight to the relay (no token DB on
   the host).
+- **Headless relay runtime** (`_runtime.py`): successful relay setup starts a
+  background loopback-only Hermes dashboard/API process with no browser window.
+  The reverse tunnel stays alive after `hermes setup` exits, so the phone does
+  not need a public dashboard, Tailscale, or an open browser tab.
 - `_relay.py` is the shared relay client, loaded **by file path** from both
   halves (they don't share a Python import).
 
@@ -48,12 +52,12 @@ first use.
 
 ```bash
 hermes plugins install brentmwarner/hermes-fetch-plugins/fetch-plugin --enable
-# Restart BOTH so the hooks load and the route mounts (neither hot-reloads):
 hermes gateway restart      # (and restart `hermes dashboard` if running separately)
+hermes setup                # choose Fetch, then scan/paste the setup link
 ```
 
 Then open Fetch on the phone and allow notifications. No Apple account, no
-`.p8`, no core edits.
+`.p8`, no core edits, no public dashboard URL, and no browser tab to keep open.
 
 ## Configuration
 
@@ -61,16 +65,18 @@ Then open Fetch on the phone and allow notifications. No Apple account, no
 | --- | --- | --- |
 | `HERMES_FETCH_RELAY_URL` | hosted relay (`https://push.tryfetchapp.com`) | Point at a different / local relay. |
 | `HERMES_FETCH_RELAY_REGISTRATION_TOKEN` | _(none)_ | Enrollment token, if the relay requires one. |
+| `HERMES_FETCH_TUNNEL_ENABLED` | enabled by Fetch relay setup | Keep the agent-side reverse tunnel active for relay pairing. |
+| `HERMES_FETCH_TUNNEL_DISABLE_DASHBOARD_AUTOSTART` | _(unset)_ | Opt out if you manage the local Hermes dashboard/API process yourself. |
 
 For local development, run the relay from `server/push-relay/` and set
 `HERMES_FETCH_RELAY_URL=http://127.0.0.1:8787`.
 
 ## Notes & limits
 
-- **Dual restart required.** Hooks load once at agent startup; the dashboard
-  route mounts once at `web_server` import. Installing does nothing until both
-  processes restart. The iOS app shows a "plugin not installed / restart Hermes"
-  state when `/api/plugins/fetch/register` returns 404.
+- **Restart required after install.** Hooks load once at agent startup. Fetch
+  relay setup starts a headless dashboard/API process for the app path; restart
+  a separately managed `hermes dashboard` only if you deliberately disabled
+  Fetch autostart.
 - **Under-notification.** `post_llm_call` only fires when a turn ends with a
   non-empty final response and wasn't interrupted. Tool-only / interrupted /
   empty turns don't push; genuine "needs attention" stalls are covered by the

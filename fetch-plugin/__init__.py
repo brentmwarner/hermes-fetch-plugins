@@ -12,9 +12,10 @@ credentials on this host:
       - ``post_llm_call``        — a turn finished anywhere → "Fetch replied".
       - ``pre_approval_request`` — agent waiting on approval/question/secret →
                                    "needs attention".
-  * **Reverse tunnel** (optional) — a persistent outbound WebSocket to the relay
-    so the app can reach this NAT'd agent with no inbound port / no Tailscale.
-    Gated behind ``HERMES_FETCH_TUNNEL_ENABLED`` (default off).
+  * **Reverse tunnel** — a persistent outbound WebSocket to the relay so the app
+    can reach this NAT'd agent with no inbound port / no Tailscale. Fetch setup
+    enables it and starts a headless relay runtime; manual hosts can still gate
+    it with ``HERMES_FETCH_TUNNEL_ENABLED``.
 
 Each push hook fires-and-forgets an HTTPS POST to the Fetch relay, which holds
 the single APNs key and fans out to registered devices. Device-token
@@ -79,6 +80,7 @@ def _load_sibling(module_name: str, filename: str):
 
 _relay = _load_sibling("fetch_plugin_relay", "_relay.py")
 _pairing = _load_sibling("fetch_plugin_pairing", "_pairing.py")
+_runtime = _load_sibling("fetch_plugin_runtime", "_runtime.py")
 
 
 def _on_post_llm_call(*, session_id: str = "", assistant_response: str = "", **_kwargs) -> None:
@@ -130,6 +132,8 @@ def _spawn_tunnel() -> None:
     blocks plugin load. The tunnel module + its `websockets` dep are imported
     lazily here, so a host without them is unaffected unless the flag is set."""
     if not _truthy(os.environ.get("HERMES_FETCH_TUNNEL_ENABLED")):
+        return
+    if _runtime.ensure_relay_runtime() in {"started", "already-running"}:
         return
 
     def _run() -> None:

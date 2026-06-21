@@ -63,6 +63,20 @@ def _relay_module():
     return module
 
 
+def _runtime_module():
+    """Load the relay runtime helper by file path."""
+    existing = sys.modules.get("fetch_plugin_runtime")
+    if existing is not None:
+        return existing
+    path = Path(__file__).resolve().parent / "_runtime.py"
+    spec = importlib.util.spec_from_file_location("fetch_plugin_runtime", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _hermes_home() -> Path:
     try:
         from hermes_cli.config import get_hermes_home
@@ -275,17 +289,28 @@ def interactive_setup() -> None:
     relay_link = _try_build_relay_link()
 
     if relay_link:
+        runtime = _runtime_module()
+        runtime.enable_tunnel_for_future_starts()
+        runtime_status = runtime.ensure_relay_runtime()
+
         # Relay is the headline path: works anywhere, no Tailscale. QR + link.
         _print_pairing(
             "Fetch pairing ready — Relay (works anywhere, no Tailscale).",
             relay_link,
             with_qr=True,
         )
-        print_info(
-            "Relay pairing needs the agent's reverse tunnel — run the dashboard with:\n"
-            "      HERMES_FETCH_TUNNEL_ENABLED=1 hermes dashboard\n"
-            "  (and a relay started with HERMES_RELAY_ENABLE_TUNNEL)."
-        )
+        if runtime_status in {"started", "already-running", "self"}:
+            print_info("Fetch relay runtime is running in the background (no browser required).")
+        elif runtime_status == "disabled":
+            print_warning(
+                "Fetch relay runtime autostart is disabled. Keep this running yourself:\n"
+                "      HERMES_FETCH_TUNNEL_ENABLED=1 hermes dashboard --no-open"
+            )
+        else:
+            print_warning(
+                "Fetch could not start the relay runtime automatically. Keep this running yourself:\n"
+                "      HERMES_FETCH_TUNNEL_ENABLED=1 hermes dashboard --no-open"
+            )
         print()
 
         # Direct as a text-only fallback for LAN / Tailscale users — no second
