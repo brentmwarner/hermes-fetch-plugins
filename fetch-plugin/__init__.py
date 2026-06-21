@@ -4,10 +4,9 @@ Makes Fetch a first-class Hermes channel with NO core patches and NO Apple
 credentials on this host:
 
   * **Platform registration** — registers ``fetch`` as a gateway platform so it
-    appears in ``hermes setup`` next to Telegram/Discord, with a pairing flow
-    (``setup_fn``) that prints a setup link + QR for the iOS app (relay pairing
-    when the tunnel is reachable, direct LAN/Tailscale otherwise). Same plugin
-    extension point Discord uses (``ctx.register_platform``).
+    appears in ``hermes setup`` next to Telegram/Discord, with a relay pairing
+    flow (``setup_fn``) that prints a setup link + QR for the iOS app. Same
+    plugin extension point Discord uses (``ctx.register_platform``).
   * **Push hooks** — two agent hooks notify the app like a messaging app:
       - ``post_llm_call``        — a turn finished anywhere → "Fetch replied".
       - ``pre_approval_request`` — agent waiting on approval/question/secret →
