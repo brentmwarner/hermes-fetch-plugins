@@ -1,7 +1,7 @@
 name: fetch
 label: Fetch
 kind: platform
-version: 0.3.1
+version: 0.3.2
 description: "Fetch iOS app channel for Hermes. Pairs the app to this agent (link + QR), like linking WhatsApp Web — relay pairing reaches the agent through the hosted relay with no inbound port / no Tailscale, or a direct LAN/Tailscale link as a fallback. Also sends a push when a turn finishes or the agent needs attention. No Apple Developer credentials live on this host."
 author: Fetch
 hooks:
@@ -15,5 +15,8 @@ optional_env:
     description: Enrollment token for the Fetch push relay, if the relay requires one.
     password: true
   - name: HERMES_FETCH_TUNNEL_ENABLED
-    description: "Set to 1/true to hold a persistent reverse-tunnel WebSocket to the relay so the app can reach this agent without Tailscale (the live path for relay pairing). Requires the `websockets` package in the agent env, and the relay running with HERMES_RELAY_ENABLE_TUNNEL."
+    description: "Set to 1/true to hold a persistent reverse-tunnel WebSocket to the relay so the app can reach this agent without Tailscale. Fetch setup enables this automatically for relay pairing."
+    password: false
+  - name: HERMES_FETCH_TUNNEL_DISABLE_DASHBOARD_AUTOSTART
+    description: "Set to 1/true only if you manage the local Hermes dashboard/API process yourself and do not want Fetch to start a headless relay runtime."
     password: false
