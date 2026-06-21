@@ -20,7 +20,7 @@ def _query(link: str) -> dict:
 
 def test_build_setup_link_direct_carries_url_and_token() -> None:
     link = pairing.build_setup_link(base_url="http://192.168.1.5:9119", token="tok 123")
-    assert link.startswith("fetch://setup?")
+    assert link.startswith("https://tryfetchapp.com/setup?")
     q = _query(link)
     assert q["url"] == "http://192.168.1.5:9119"
     assert q["token"] == "tok 123"  # decoded back; the raw link percent-encodes it
@@ -49,7 +49,7 @@ def test_build_relay_link_includes_custom_relay() -> None:
 
 
 def test_render_qr_returns_string_or_none() -> None:
-    out = pairing.render_qr("fetch://setup?agent=x&pairing=y")
+    out = pairing.render_qr("https://tryfetchapp.com/setup?agent=x&pairing=y")
     # qrcode is optional; when present we get printable block art, else None.
     if out is not None:
         assert isinstance(out, str)
