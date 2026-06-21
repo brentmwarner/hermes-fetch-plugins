@@ -1,0 +1,41 @@
+# Fly.io deploy for the Fetch push relay.
+#
+# 1) fly launch --no-deploy --copy-config --name fetch-push-relay
+# 2) fly volumes create relay_data --size 1 --region iad
+# 3) Set secrets (NEVER commit the .p8):
+#      fly secrets set \
+#        HERMES_RELAY_APNS_KEY="$(cat AuthKey_XXXXXXXXXX.p8)" \
+#        HERMES_RELAY_APNS_KEY_ID=XXXXXXXXXX \
+#        HERMES_RELAY_APNS_TEAM_ID=XXXXXXXXXX \
+#        HERMES_RELAY_REGISTRATION_TOKEN="$(openssl rand -hex 24)" \
+#        HERMES_RELAY_SECRET_PEPPER="$(openssl rand -hex 24)"
+# 4) fly deploy
+app = "fetch-push-relay"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  HERMES_RELAY_DATABASE_PATH = "/data/push-relay.db"
+  HERMES_RELAY_ALLOWED_BUNDLE_IDS = "com.brentwarner.fetch"
+  HERMES_RELAY_ALLOW_CUSTOM_BODY = "true"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[mounts]]
+  source = "relay_data"
+  destination = "/data"
+
+[[http_service.checks]]
+  method = "get"
+  path = "/healthz"
+  interval = "15s"
+  timeout = "2s"
+  grace_period = "5s"

@@ -2,6 +2,12 @@
 
 Public Hermes Agent plugins used by the Fetch iOS app.
 
+## Services
+
+- `server/push-relay`: public Fetch relay service. It owns APNs delivery,
+  agent enrollment, pairing-token minting, and the reverse WebSocket tunnel used
+  by the iOS app when `HERMES_RELAY_ENABLE_TUNNEL=true`.
+
 ## Plugins
 
 - `fetch-plugin`: registers the Fetch app for iOS push notifications and sends reply/attention/proactive events through the hosted Fetch relay.
