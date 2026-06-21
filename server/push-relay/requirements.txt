@@ -1,0 +1,9 @@
+fastapi>=0.104.0,<1
+uvicorn[standard]>=0.24.0,<1
+# Explicit (also pulled by uvicorn[standard]) — first-class transport for the
+# reverse-tunnel WebSocket broker, not just an incidental extra.
+websockets>=12,<17
+httpx[http2]>=0.28.0,<1
+PyJWT[crypto]>=2.8.0,<3
+# Pinned to 0.x: AppAttestVerifier targets the 0.x Attestation/AppleConfig API.
+pyattest>=0.0.6,<1

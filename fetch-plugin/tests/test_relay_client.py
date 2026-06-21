@@ -107,3 +107,43 @@ async def test_400_without_attestation_word_does_not_raise_needs_attestation(mon
         await client.register_device(token="t", platform="ios", environment="sandbox",
                                      bundle_id="com.brentwarner.fetch", preferences={},
                                      attestation={"attestation": "AAAA", "key_id": "k1", "challenge": "ch"})
+
+
+async def test_relay_pairing_captured_at_registration(monkeypatch, tmp_path):
+    posted = []
+    def handler(request):
+        posted.append(request.url.path)
+        if request.url.path == "/v1/agents/register":
+            return httpx.Response(200, json={"agent_id": "a1", "agent_secret": "s1", "pairing_secret": "p1"})
+        return httpx.Response(404)
+    _patch_transport(monkeypatch, handler)
+    creds_path = tmp_path / "c.json"
+    client = relay.RelayClient(relay_url="https://relay.test", credentials_path=creds_path)
+
+    relay_url, agent_id, pairing = await client.relay_pairing()
+
+    assert (relay_url, agent_id, pairing) == ("https://relay.test", "a1", "p1")
+    assert "/v1/agents/pairing" not in posted        # reused the token from registration
+    assert json.loads(creds_path.read_text())["pairing"] == "p1"  # persisted
+
+
+async def test_relay_pairing_mints_on_demand_when_missing(monkeypatch, tmp_path):
+    posted = []
+    def handler(request):
+        posted.append(request.url.path)
+        if request.url.path == "/v1/agents/pairing":
+            return httpx.Response(200, json={"pairing_secret": "p2"})
+        return httpx.Response(404)   # registration must NOT be hit — identity is cached
+    _patch_transport(monkeypatch, handler)
+    creds_path = tmp_path / "c.json"
+    client = relay.RelayClient(relay_url="https://relay.test", credentials_path=creds_path)
+    # Agent enrolled before pairing capture existed: identity present, no token.
+    client._write_credentials(relay.RelayCredentials(
+        relay_url="https://relay.test", agent_id="a1", agent_secret="s1"))
+
+    relay_url, agent_id, pairing = await client.relay_pairing()
+
+    assert (relay_url, agent_id, pairing) == ("https://relay.test", "a1", "p2")
+    assert "/v1/agents/register" not in posted       # used cached identity
+    assert "/v1/agents/pairing" in posted            # minted on demand
+    assert json.loads(creds_path.read_text())["pairing"] == "p2"  # persisted for reuse

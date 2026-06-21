@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+server/push-relay/data/
+*.db
+*.db-wal
+*.db-shm
