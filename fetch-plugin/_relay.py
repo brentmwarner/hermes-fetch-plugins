@@ -89,6 +89,12 @@ class RelayCredentials:
     relay_url: str
     agent_id: str
     agent_secret: str
+    # App-tunnel pairing capability token (plaintext). Minted by the relay and
+    # returned once at registration; the relay keeps only its hash, so this is
+    # the agent's only copy. Carried in the relay setup link / QR so a device can
+    # reach this agent through the tunnel. None for agents enrolled before
+    # pairing capture existed — re-minted on demand via ``relay_pairing()``.
+    pairing: str | None = None
 
 
 class RelayClient:
@@ -189,15 +195,50 @@ class RelayClient:
                 raise NeedsAttestation("relay requires attestation to enroll")
         response.raise_for_status()
         data = response.json()
+        pairing = data.get("pairing_secret")
         creds = RelayCredentials(
             relay_url=self.relay_url,
             agent_id=str(data["agent_id"]),
             agent_secret=str(data["agent_secret"]),
+            pairing=str(pairing) if pairing else None,
         )
         self._write_credentials(creds)
         # Re-read so two processes that mint concurrently converge on whichever
         # identity won the atomic file write.
         return self._read_credentials() or creds
+
+    async def relay_pairing(self) -> tuple[str, str, str]:
+        """Return ``(relay_url, agent_id, pairing)`` for building a relay setup
+        link. Reuses the pairing token captured at registration; mints a fresh
+        one via the relay for agents enrolled before pairing capture existed
+        (the relay only stores the hash, so it can never hand back the original).
+        """
+        creds = await self._credentials()
+        pairing = creds.pairing or await self._mint_pairing(creds)
+        return self.relay_url, creds.agent_id, pairing
+
+    async def _mint_pairing(self, creds: RelayCredentials) -> str:
+        """Rotate + fetch a fresh pairing token for an already-enrolled agent."""
+        headers = {
+            "X-Hermes-Agent-Id": creds.agent_id,
+            "Authorization": f"Bearer {creds.agent_secret}",
+        }
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{self.relay_url}/v1/agents/pairing", headers=headers, json={}
+            )
+        response.raise_for_status()
+        pairing = str(response.json()["pairing_secret"])
+        # Persist alongside the existing identity so the next setup reuses it.
+        self._write_credentials(
+            RelayCredentials(
+                relay_url=creds.relay_url,
+                agent_id=creds.agent_id,
+                agent_secret=creds.agent_secret,
+                pairing=pairing,
+            )
+        )
+        return pairing
 
     def _read_credentials(self) -> RelayCredentials | None:
         try:
@@ -210,17 +251,26 @@ class RelayClient:
         agent_secret = str(data.get("agent_secret") or "")
         if not agent_id or not agent_secret:
             return None
-        return RelayCredentials(relay_url=self.relay_url, agent_id=agent_id, agent_secret=agent_secret)
+        pairing = data.get("pairing")
+        return RelayCredentials(
+            relay_url=self.relay_url,
+            agent_id=agent_id,
+            agent_secret=agent_secret,
+            pairing=str(pairing) if pairing else None,
+        )
 
     def _write_credentials(self, creds: RelayCredentials) -> None:
         self.credentials_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.credentials_path.with_suffix(".tmp")
+        payload = {
+            "relay_url": creds.relay_url,
+            "agent_id": creds.agent_id,
+            "agent_secret": creds.agent_secret,
+        }
+        if creds.pairing:
+            payload["pairing"] = creds.pairing
         tmp.write_text(
-            json.dumps(
-                {"relay_url": creds.relay_url, "agent_id": creds.agent_id, "agent_secret": creds.agent_secret},
-                indent=2,
-                sort_keys=True,
-            ),
+            json.dumps(payload, indent=2, sort_keys=True),
             encoding="utf-8",
         )
         try:
