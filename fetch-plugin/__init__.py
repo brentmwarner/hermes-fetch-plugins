@@ -22,10 +22,10 @@ registration is handled by the dashboard half (``dashboard/plugin_api.py``).
 
 The platform's transport *adapter* is intentionally inert here — the live path
 is the reverse tunnel above, selected by the app's relay pairing, not a gateway
-connect adapter. Pairing writes no ``platforms.fetch`` config block, so the
-gateway never adds Fetch to its connect set; the registered ``adapter_factory``/
-``is_connected`` are belt-and-suspenders that keep an unconfigured Fetch out of
-the live transport path.
+connect adapter. Pairing writes no ``platforms.fetch`` config block, and
+``check_fn`` reports no gateway adapter availability so runtime auto-enable
+never instantiates one. ``is_connected`` only reports whether setup has saved
+pairing material, which lets ``hermes setup`` offer a reconfigure prompt.
 
 This file is imported by the Hermes ``PluginManager`` as ``hermes_plugins.fetch``
 and its ``register(ctx)`` is called once at agent startup.
@@ -118,6 +118,11 @@ def _inert_adapter(_config):
     )
 
 
+def _gateway_adapter_available() -> bool:
+    """False because Fetch does not expose a gateway transport adapter."""
+    return False
+
+
 def _spawn_tunnel() -> None:
     """Start the agent-side reverse-tunnel client on a daemon thread, so the
     phone can reach this NAT'd agent with no inbound port. Gated behind
@@ -164,10 +169,10 @@ def register(ctx) -> None:
                 name="fetch",
                 label="Fetch",
                 adapter_factory=_inert_adapter,
-                check_fn=lambda: True,            # pairing has no host deps
-                is_connected=lambda _cfg: False,  # never join the connect set (tunnel is the path)
+                check_fn=_gateway_adapter_available,
+                is_connected=lambda _cfg: _pairing.is_pairing_configured(),
                 setup_fn=_pairing.interactive_setup,
-                emoji="📲",
+                emoji="📱",
                 install_hint="",
             )
             log.info("Fetch platform registered (pairing setup_fn; transport adapter inert)")
