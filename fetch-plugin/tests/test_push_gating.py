@@ -11,7 +11,6 @@ monkeypatch the relay client to capture pushes.
 
 import importlib.util
 import sys
-import types
 from pathlib import Path
 
 import pytest

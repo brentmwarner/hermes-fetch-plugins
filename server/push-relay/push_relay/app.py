@@ -170,6 +170,7 @@ class PushEventBody(BaseModel):
     session_id: str | None = Field(default=None, max_length=160)
     title: str | None = Field(default=None, max_length=120)
     body: str | None = Field(default=None, max_length=500)
+    source: str | None = Field(default=None, max_length=80)
 
 
 def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
@@ -674,6 +675,7 @@ class PushService:
         session_id: str | None,
         title: str | None,
         body: str | None,
+        source: str | None,
     ) -> dict:
         devices = self._store.list_devices(agent_id=agent_id, category=kind)
         event_id = self._store.record_event(
@@ -707,6 +709,7 @@ class PushService:
                 body=push_body,
                 session_id=session_id,
                 sound=device.sound,
+                source=source,
             )
             # No apns-collapse-id: each reply/attention/proactive message is its own
             # notification. Grouping is handled by aps "thread-id" (see _payload), so
@@ -932,6 +935,7 @@ def create_app(
             session_id=body.session_id,
             title=body.title,
             body=body.body,
+            source=body.source,
         )
 
     if settings.enable_tunnel:
@@ -1023,6 +1027,7 @@ def _payload(
     body: str,
     session_id: str | None,
     sound: bool,
+    source: str | None,
 ) -> dict:
     aps = {
         "alert": {"title": title, "body": body[:160]},
@@ -1032,7 +1037,7 @@ def _payload(
         aps["interruption-level"] = "time-sensitive"
     if sound:
         aps["sound"] = "default"
-    return {"aps": aps, "session_id": session_id or "", "type": kind}
+    return {"aps": aps, "session_id": session_id or "", "type": kind, "source": source}
 
 
 app = create_app()

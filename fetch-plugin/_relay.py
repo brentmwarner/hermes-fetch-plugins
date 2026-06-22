@@ -37,6 +37,9 @@ _DEDUPE_WINDOW_S = 10.0
 
 
 def _hermes_home() -> Path:
+    store_home = os.environ.get("HERMES_INBOX_STORE_HOME", "").strip()
+    if store_home:
+        return Path(os.path.expanduser(store_home))
     try:
         from hermes_cli.config import get_hermes_home
 

@@ -81,6 +81,18 @@ def test_channel_from_chat_id_parsing(chat_id, expected):
     assert plugin._session_id_for_channel(plugin._channel_from_chat_id(chat_id)) == expected
 
 
+def test_channel_from_chat_id_uses_configured_home(monkeypatch):
+    plugin = _load_plugin()
+    monkeypatch.setenv("HERMES_INBOX_HOME_CHANNEL", "researcher")
+    assert plugin._channel_from_chat_id(None) == "researcher"
+    assert plugin._channel_from_chat_id("hermes_inbox:") == "researcher"
+
+
+def test_deliver_to_inbox_accepts_prefixed_channel():
+    plugin = _load_plugin()
+    assert plugin._session_id_for_channel(plugin._normalize_channel("hermes_inbox:researcher")) == "inbox_researcher"
+
+
 def test_store_home_override_writes_to_relay_home(monkeypatch, tmp_path):
     """A delivery under a worker profile must persist into the override home,
     not the worker's HERMES_HOME, so it's visible to the relay-paired phone."""

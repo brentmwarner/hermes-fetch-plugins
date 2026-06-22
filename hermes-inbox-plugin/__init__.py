@@ -259,11 +259,11 @@ def _channel_from_chat_id(chat_id) -> str:
     """
     raw = str(chat_id or "").strip()
     if not raw or raw == PLATFORM_NAME:
-        return DEFAULT_CHANNEL
+        return _home_channel()
     prefix = f"{PLATFORM_NAME}:"
     if raw.startswith(prefix):
         raw = raw[len(prefix):].strip()
-    return raw or DEFAULT_CHANNEL
+    return raw or _home_channel()
 
 
 def _is_enabled() -> bool:
@@ -278,6 +278,9 @@ def _legacy_platform_enabled() -> bool:
 
 def _normalize_channel(channel: str) -> str:
     clean = (channel or DEFAULT_CHANNEL).strip()
+    prefix = f"{PLATFORM_NAME}:"
+    if clean.startswith(prefix):
+        clean = clean[len(prefix):].strip()
     return clean or DEFAULT_CHANNEL
 
 
