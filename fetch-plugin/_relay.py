@@ -131,10 +131,12 @@ class RelayClient:
     async def unregister_device(self, *, token: str) -> None:
         await self._post("/v1/devices/unregister", {"token": token}, authenticated=True)
 
-    async def send_event(self, *, kind: str, session_id: str | None, title: str, body: str) -> None:
+    async def send_event(self, *, kind: str, session_id: str | None, title: str, body: str,
+                         source: str | None = None) -> None:
         await self._post(
             "/v1/push/events",
-            {"type": kind, "session_id": session_id, "title": title, "body": body},
+            {"type": kind, "session_id": session_id, "title": title, "body": body,
+             "source": source},
             authenticated=True,
         )
 
@@ -322,21 +324,32 @@ def _is_duplicate(key: str) -> bool:
     return last is not None and (now - last) < _DEDUPE_WINDOW_S
 
 
-def send_event_background(*, kind: str, session_id: str | None, title: str, body: str) -> None:
+def send_event_background(*, kind: str, session_id: str | None, title: str, body: str,
+                          source: str | None = None) -> None:
     """Fire-and-forget a push event to the relay. Never blocks the caller.
 
     Runs the HTTPS POST on a daemon thread so a finished turn is never delayed by
     push delivery, and de-dupes a short window so the same reply can't double-fire.
+
+    ``source`` is the Hermes session's channel (e.g. "telegram", "" for a gateway
+    Fetch chat, "inbox" for a proactive inbox delivery). It rides the push to the
+    device so the phone can decide inbox membership agent-agnostically (only
+    Fetch-channel pushes become inbox threads) instead of maintaining a
+    Hermes-specific denylist.
     """
     if _is_duplicate(f"{kind}:{session_id or ''}:{(body or '')[:80]}"):
         return
     threading.Thread(
-        target=_send_sync, args=(kind, session_id, title, body), daemon=True, name=f"fetch-push-{kind}"
+        target=_send_sync, args=(kind, session_id, title, body, source),
+        daemon=True, name=f"fetch-push-{kind}"
     ).start()
 
 
-def _send_sync(kind: str, session_id: str | None, title: str, body: str) -> None:
+def _send_sync(kind: str, session_id: str | None, title: str, body: str,
+               source: str | None) -> None:
     try:
-        asyncio.run(relay_client().send_event(kind=kind, session_id=session_id, title=title, body=body))
+        asyncio.run(relay_client().send_event(
+            kind=kind, session_id=session_id, title=title, body=body, source=source
+        ))
     except Exception:
         log.debug("Fetch push event delivery failed", exc_info=True)

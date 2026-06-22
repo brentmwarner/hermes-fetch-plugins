@@ -58,6 +58,57 @@ def _is_kanban_worker() -> bool:
     return bool(os.environ.get("HERMES_KANBAN_TASK"))
 
 
+# Channels that are conversations with the user *through the Fetch app*. A reply
+# in one of these is a Fetch conversation the phone should show in its inbox.
+# Empty string = an untagged gateway chat (the Fetch app's dashboard-WS sessions
+# carry no channel tag). ``inbox`` = a hermes-inbox proactive delivery. Other
+# channels (``telegram``, ``discord``, ``cli``, ``tui``, ``cron`` for a cron
+# *run*, …) are not Fetch conversations, so their replies don't push to the
+# phone — the user is already on that surface, or it's an automated run.
+#
+# This is the app's own channel identity, not a Hermes job-type denylist: it says
+# "is this one of MY channels" rather than enumerating Hermes internals to
+# exclude. It can't rot when Hermes adds a new background job type, because a
+# new job type is simply not in this set.
+FETCH_CHANNELS: frozenset[str] = frozenset({"", "fetch", "ios", "mobile", "inbox"})
+
+
+def _session_source(session_id: str | None) -> str | None:
+    """Look up a session's ``source`` channel from the agent's state.db.
+
+    Returns None when the session can't be found (e.g. a profile-scoped db the
+    launch home doesn't see, or a brand-new session whose row hasn't persisted
+    yet). Callers treat None as "unknown — fall back to current behavior" so a
+    lookup miss never accidentally suppresses a Fetch notification.
+    """
+    if not session_id:
+        return None
+    try:
+        from hermes_state import SessionDB
+        row = SessionDB().get_session(session_id)
+    except Exception:
+        log.debug("Fetch plugin source lookup failed", exc_info=True)
+        return None
+    if not row:
+        return None
+    source = row.get("source")
+    return source if isinstance(source, str) else None
+
+
+def _platform_from_session_key(session_key: str) -> str | None:
+    """Extract the platform segment from a gateway session key.
+
+    ``agent:main:telegram:private:123456789`` -> ``telegram``. An empty platform
+    segment (``agent:main::private:…``) is an untagged gateway chat = a Fetch
+    conversation, and returns ``""``. Returns None for empty/unexpected shapes
+    so the device treats it as unknown.
+    """
+    parts = (session_key or "").split(":")
+    if len(parts) >= 3 and parts[0] == "agent":
+        return parts[2]
+    return None
+
+
 def _load_sibling(module_name: str, filename: str):
     """Load a sibling module by file path (no plugin-namespace dependency).
 
@@ -86,9 +137,18 @@ def _on_post_llm_call(*, session_id: str = "", assistant_response: str = "", **_
     """A turn completed (final_response present, not interrupted)."""
     if _is_kanban_worker():
         return  # FET-5: dispatched workers report on the task, never push.
+    # Only push for Fetch-channel conversations. A reply on Telegram/Discord/CLI
+    # is not a Fetch conversation — the user is on that surface already — so it
+    # must not ring the phone or create a Fetch inbox thread. If the source
+    # can't be resolved, fall back to pushing (preserves prior behavior) rather
+    # than risk suppressing a real Fetch notification on a lookup miss.
+    source = _session_source(session_id or None)
+    if source is not None and source not in FETCH_CHANNELS:
+        return
     body = (assistant_response or "").strip() or "Finished working."
     _relay.send_event_background(
-        kind="replies", session_id=session_id or None, title="Fetch replied", body=body
+        kind="replies", session_id=session_id or None, title="Fetch replied",
+        body=body, source=source,
     )
 
 
@@ -99,8 +159,13 @@ def _on_pre_approval_request(
     if _is_kanban_worker():
         return  # FET-5: a worker's approval prompt is automation, not a message.
     detail = (description or command or "").strip() or "Open Fetch to continue."
+    # Approvals always notify (the agent needs the user regardless of surface).
+    # Carry the channel parsed from the session_key so the device can later
+    # decide inbox membership; session_key shape is ``agent:<profile>:<platform>:<type>:<id>``.
+    source = _platform_from_session_key(session_key)
     _relay.send_event_background(
-        kind="attention", session_id=session_key or None, title="Fetch needs your attention", body=detail
+        kind="attention", session_id=session_key or None,
+        title="Fetch needs your attention", body=detail, source=source,
     )
 
 
