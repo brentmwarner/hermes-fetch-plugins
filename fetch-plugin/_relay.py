@@ -36,7 +36,9 @@ DEFAULT_RELAY_URL = "https://push.tryfetchapp.com"
 _DEDUPE_WINDOW_S = 10.0
 
 
-def _hermes_home() -> Path:
+def _hermes_home(hermes_home: Path | None = None) -> Path:
+    if hermes_home is not None:
+        return Path(hermes_home).expanduser()
     store_home = os.environ.get("HERMES_INBOX_STORE_HOME", "").strip()
     if store_home:
         return Path(os.path.expanduser(store_home))
@@ -74,12 +76,12 @@ def _parse_env_file(path: Path) -> dict[str, str]:
     return values
 
 
-def _config_value(name: str, default: str | None = None) -> str | None:
-    """Read a config value from the environment, falling back to ~/.hermes/.env."""
+def _config_value(name: str, default: str | None = None, *, hermes_home: Path | None = None) -> str | None:
+    """Read a config value from the environment, falling back to a Hermes home's .env."""
     val = os.environ.get(name)
     if val:
         return val
-    file_val = _parse_env_file(_hermes_home() / ".env").get(name)
+    file_val = _parse_env_file(_hermes_home(hermes_home) / ".env").get(name)
     return file_val if file_val else default
 
 
@@ -293,22 +295,26 @@ class RelayClient:
             log.debug("Could not remove stale Fetch relay credentials", exc_info=True)
 
 
-_client_singleton: RelayClient | None = None
+_client_singletons: dict[Path, RelayClient] = {}
 _client_lock = threading.RLock()
 
 
-def relay_client() -> RelayClient:
-    global _client_singleton
+def relay_client(*, hermes_home: Path | None = None) -> RelayClient:
+    home = _hermes_home(hermes_home)
     with _client_lock:
-        if _client_singleton is None:
-            relay_url = _config_value("HERMES_FETCH_RELAY_URL", DEFAULT_RELAY_URL) or DEFAULT_RELAY_URL
-            token = _config_value("HERMES_FETCH_RELAY_REGISTRATION_TOKEN")
-            _client_singleton = RelayClient(
+        client = _client_singletons.get(home)
+        if client is None:
+            relay_url = _config_value(
+                "HERMES_FETCH_RELAY_URL", DEFAULT_RELAY_URL, hermes_home=home
+            ) or DEFAULT_RELAY_URL
+            token = _config_value("HERMES_FETCH_RELAY_REGISTRATION_TOKEN", hermes_home=home)
+            client = RelayClient(
                 relay_url=relay_url,
-                credentials_path=_hermes_home() / "push" / "fetch-relay.json",
+                credentials_path=home / "push" / "fetch-relay.json",
                 registration_token=token,
             )
-        return _client_singleton
+            _client_singletons[home] = client
+        return client
 
 
 _recent: dict[str, float] = {}
@@ -327,8 +333,15 @@ def _is_duplicate(key: str) -> bool:
     return last is not None and (now - last) < _DEDUPE_WINDOW_S
 
 
-def send_event_background(*, kind: str, session_id: str | None, title: str, body: str,
-                          source: str | None = None) -> None:
+def send_event_background(
+    *,
+    kind: str,
+    session_id: str | None,
+    title: str,
+    body: str,
+    source: str | None = None,
+    hermes_home: Path | None = None,
+) -> None:
     """Fire-and-forget a push event to the relay. Never blocks the caller.
 
     Runs the HTTPS POST on a daemon thread so a finished turn is never delayed by
@@ -343,15 +356,15 @@ def send_event_background(*, kind: str, session_id: str | None, title: str, body
     if _is_duplicate(f"{kind}:{session_id or ''}:{(body or '')[:80]}"):
         return
     threading.Thread(
-        target=_send_sync, args=(kind, session_id, title, body, source),
+        target=_send_sync, args=(kind, session_id, title, body, source, hermes_home),
         daemon=True, name=f"fetch-push-{kind}"
     ).start()
 
 
 def _send_sync(kind: str, session_id: str | None, title: str, body: str,
-               source: str | None) -> None:
+               source: str | None, hermes_home: Path | None) -> None:
     try:
-        asyncio.run(relay_client().send_event(
+        asyncio.run(relay_client(hermes_home=hermes_home).send_event(
             kind=kind, session_id=session_id, title=title, body=body, source=source
         ))
     except Exception:

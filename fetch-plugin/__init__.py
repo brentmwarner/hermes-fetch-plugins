@@ -83,16 +83,21 @@ def _session_source(session_id: str | None) -> str | None:
     """
     if not session_id:
         return None
+    db = None
     try:
         from hermes_state import SessionDB
+
         db = SessionDB()
-        try:
-            row = db.get_session(session_id)
-        finally:
-            db.close()
+        row = db.get_session(session_id)
     except Exception:
         log.debug("Fetch plugin source lookup failed", exc_info=True)
         return None
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                log.debug("Fetch plugin could not close SessionDB", exc_info=True)
     if not row:
         return None
     source = row.get("source")

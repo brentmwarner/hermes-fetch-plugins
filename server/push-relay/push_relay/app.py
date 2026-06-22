@@ -675,7 +675,7 @@ class PushService:
         session_id: str | None,
         title: str | None,
         body: str | None,
-        source: str | None,
+        source: str | None = None,
     ) -> dict:
         devices = self._store.list_devices(agent_id=agent_id, category=kind)
         event_id = self._store.record_event(

@@ -203,6 +203,7 @@ def _notify_proactive(*, session_id: str, title: str, body: str) -> None:
             # push so the device routes it into the phone-owned inbox without a
             # source lookup or a Hermes-specific denylist.
             source="inbox",
+            hermes_home=_store_home(),
         )
     except Exception:
         logger.debug("Hermes Inbox proactive push failed", exc_info=True)
@@ -277,11 +278,11 @@ def _legacy_platform_enabled() -> bool:
 
 
 def _normalize_channel(channel: str) -> str:
-    clean = (channel or DEFAULT_CHANNEL).strip()
+    clean = (channel or "").strip()
     prefix = f"{PLATFORM_NAME}:"
     if clean.startswith(prefix):
         clean = clean[len(prefix):].strip()
-    return clean or DEFAULT_CHANNEL
+    return clean or _home_channel()
 
 
 def _session_id_for_channel(channel: str) -> str:

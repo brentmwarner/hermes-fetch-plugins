@@ -81,16 +81,17 @@ def test_channel_from_chat_id_parsing(chat_id, expected):
     assert plugin._session_id_for_channel(plugin._channel_from_chat_id(chat_id)) == expected
 
 
-def test_channel_from_chat_id_uses_configured_home(monkeypatch):
+def test_channel_from_chat_id_respects_configured_home_channel(monkeypatch):
     plugin = _load_plugin()
     monkeypatch.setenv("HERMES_INBOX_HOME_CHANNEL", "researcher")
-    assert plugin._channel_from_chat_id(None) == "researcher"
-    assert plugin._channel_from_chat_id("hermes_inbox:") == "researcher"
+    assert plugin._session_id_for_channel(plugin._channel_from_chat_id(None)) == "inbox_researcher"
+    assert plugin._session_id_for_channel(plugin._channel_from_chat_id("hermes_inbox:")) == "inbox_researcher"
 
 
-def test_deliver_to_inbox_accepts_prefixed_channel():
+def test_normalize_channel_strips_platform_prefix(monkeypatch):
     plugin = _load_plugin()
-    assert plugin._session_id_for_channel(plugin._normalize_channel("hermes_inbox:researcher")) == "inbox_researcher"
+    monkeypatch.setenv("HERMES_INBOX_HOME_CHANNEL", "default")
+    assert plugin._normalize_channel("hermes_inbox:researcher") == "researcher"
 
 
 def test_store_home_override_writes_to_relay_home(monkeypatch, tmp_path):
@@ -124,6 +125,29 @@ def test_store_home_override_writes_to_relay_home(monkeypatch, tmp_path):
     plugin.deliver_to_inbox(channel="researcher", content="hi", title="Researcher")
     assert opened_at == [relay_home / "state.db"], \
         "delivery must open the override home's state.db, not the worker's"
+
+
+def test_deliver_to_inbox_with_prefixed_channel_uses_named_session(monkeypatch):
+    plugin = _load_plugin()
+    captured = {}
+
+    class _FakeDB:
+        def create_session(self, **kw): captured["create"] = kw
+        def reopen_session(self, sid): pass
+        def set_session_title(self, sid, title): pass
+        def append_message(self, **kw): return 1
+        def close(self): pass
+
+    monkeypatch.setattr(plugin, "SessionDB", lambda **kw: _FakeDB())
+    monkeypatch.setattr(plugin, "_notify_proactive", lambda **kw: None)
+
+    delivery = plugin.deliver_to_inbox(
+        channel="hermes_inbox:researcher",
+        content="hi",
+        title="Researcher",
+    )
+    assert delivery.session_id == "inbox_researcher"
+    assert captured["create"]["user_id"] == "researcher"
 
 
 def test_store_home_defaults_to_hermes_home_when_unset(monkeypatch, tmp_path):
