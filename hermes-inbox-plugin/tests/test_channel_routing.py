@@ -7,6 +7,7 @@ the per-agent session id, and the store-home override that keeps a worker
 profile's deliveries visible to the relay-paired home the phone reads.
 """
 
+import asyncio
 import importlib.util
 import sys
 from pathlib import Path
@@ -67,6 +68,18 @@ def test_default_channel_unchanged(monkeypatch):
 
     delivery = plugin.deliver_to_inbox(channel="default", content="hi", title="Fetch Inbox")
     assert delivery.session_id == "inbox_default"
+
+
+def test_adapter_get_chat_info_returns_basic_descriptor(monkeypatch):
+    plugin = _load_plugin()
+    adapter = object.__new__(plugin.HermesInboxAdapter)
+    monkeypatch.setenv("HERMES_INBOX_HOME_CHANNEL", "default")
+
+    default = asyncio.run(adapter.get_chat_info("hermes_inbox"))
+    researcher = asyncio.run(adapter.get_chat_info("hermes_inbox:researcher"))
+
+    assert default == {"name": "Fetch Inbox", "type": "dm"}
+    assert researcher == {"name": "Researcher", "type": "dm"}
 
 
 def test_default_cron_delivery_routes_to_job_thread(monkeypatch):

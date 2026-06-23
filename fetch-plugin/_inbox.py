@@ -101,6 +101,10 @@ class FetchInboxAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=str(exc))
         return SendResult(success=True, message_id=str(delivery.message_id))
 
+    async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
+        channel = _channel_from_chat_id(chat_id)
+        return {"name": _label_for_channel(channel), "type": "dm"}
+
 
 def check_requirements() -> bool:
     return True

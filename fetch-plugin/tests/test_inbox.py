@@ -111,6 +111,18 @@ def test_standalone_send_routes_named_channel(monkeypatch):
     assert result["session_id"] == "inbox_researcher"
 
 
+def test_adapter_get_chat_info_returns_basic_descriptor(monkeypatch):
+    inbox = _load_inbox()
+    adapter = object.__new__(inbox.FetchInboxAdapter)
+    monkeypatch.setenv("HERMES_INBOX_HOME_CHANNEL", "default")
+
+    default = asyncio.run(adapter.get_chat_info("fetch"))
+    researcher = asyncio.run(adapter.get_chat_info("fetch:researcher"))
+
+    assert default == {"name": "Fetch", "type": "dm"}
+    assert researcher == {"name": "Researcher", "type": "dm"}
+
+
 def test_standalone_send_titles_home_cron_delivery_from_job_name(monkeypatch):
     inbox = _load_inbox()
     calls = []
