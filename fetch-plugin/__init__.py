@@ -11,6 +11,12 @@ credentials on this host:
       - ``post_llm_call``        — a turn finished anywhere → "Fetch replied".
       - ``pre_approval_request`` — agent waiting on approval/question/secret →
                                    "needs attention".
+  * **Generative-UI platform hint** — the ``platform_hint`` registered with
+    the platform teaches the agent (via the cached system prompt, Fetch
+    sessions only) to emit ``card`` fences the iOS app renders natively as
+    ``GenerativeCardView``. No per-turn hook, no core patches — uses the same
+    per-surface guidance mechanism Telegram/WhatsApp/Slack use. The
+    ``fetch-cards`` skill holds richer patterns (dashboard, carousel, brief).
   * **Reverse tunnel** — a persistent outbound WebSocket to the relay so the app
     can reach this NAT'd agent with no inbound port / no Tailscale. Fetch setup
     enables it and starts a headless relay runtime; manual hosts can still gate
@@ -242,7 +248,40 @@ def register(ctx) -> None:
                 cron_deliver_env_var=_inbox.HOME_CHANNEL_ENV,
                 standalone_sender_fn=_inbox.standalone_send,
                 max_message_length=8000,
-                platform_hint="Fetch delivers messages into the Fetch iOS app.",
+                platform_hint=(
+                    "You are chatting in the Fetch iOS app. Fetch renders "
+                    "standard Markdown (bold, italic, headings, lists, code "
+                    "blocks, tables) and additionally supports generative-UI "
+                    "cards: emit a fenced code block whose language is `card` "
+                    "containing a JSON object, and the app renders a native "
+                    "tappable card instead of a code block. Use a card when "
+                    "the reply is structured data — a daily brief, metrics "
+                    "summary, tappable links, a small dashboard — and use "
+                    "plain prose when the reply is narrative or explanation. "
+                    "Cards are typographic and minimal: the title commands "
+                    "the card, stats and item rows carry data through type "
+                    "hierarchy alone. Omit `symbol` and `emoji` from every "
+                    "field — no icon chips. Status (pass/fail, ready/blocked) "
+                    "lives in the trailing `value` text on item rows, not "
+                    "in icons. Carousel sub-cards are tappable as a whole — "
+                    "do not use `cta`. "
+                    "Card JSON schema (all fields optional):\n"
+                    "  title, subtitle                  header text\n"
+                    "  image                            hero image URL\n"
+                    "  url                              URL opened when the whole card is tapped\n"
+                    "  footer                           small caption text\n"
+                    "  stats: [{label, value}]         big-number columns (value may be string, number, or bool)\n"
+                    "  items: [{title, subtitle, value, url}]   tappable list rows\n"
+                    "  cards: [{title, subtitle, image, badge, url}]   horizontal carousel sub-cards\n"
+                    "Example — daily brief:\n"
+                    "```card\n"
+                    "{\"title\":\"Today\","
+                    "\"stats\":[{\"label\":\"Meetings\",\"value\":3},{\"label\":\"Tasks\",\"value\":12}],"
+                    "\"items\":[{\"title\":\"Standup\",\"subtitle\":\"9:30 Zoom\",\"url\":\"https://zoom.us/j/123\"}],"
+                    "\"footer\":\"Updated just now\"}\n"
+                    "```\n"
+                    "For richer patterns (multi-stat dashboard, link carousel, weekly summary) load the `fetch-cards` skill. A malformed card fence falls back to a code block — it never breaks the chat, so prefer attempting a card over not emitting one when the content fits."
+                ),
                 emoji="📱",
                 install_hint="",
             )
