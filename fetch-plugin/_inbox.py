@@ -139,7 +139,7 @@ def deliver_to_inbox(*, channel: str, content: str, title: str = DEFAULT_TITLE) 
     each agent gets its own Fetch DM instead of one pooled ``inbox_default``
     thread.
     """
-    clean_channel = _normalize_channel(channel)
+    clean_channel = _normalize_channel(_strip_platform_prefix(channel))
     session_id = _session_id_for_channel(clean_channel)
     body = content.strip()
     if not body:
@@ -320,15 +320,28 @@ def _channel_from_chat_id(chat_id) -> str:
     chat_id half to `send` (so `fetch:researcher` -> chat_id="researcher"). This
     also defends against the full `fetch:researcher` string arriving unsplit, by
     stripping a leading `fetch:` prefix. Bare `fetch` or an empty value falls
-    back to the home channel.
+    back to the configured home channel (`HERMES_INBOX_HOME_CHANNEL`), matching
+    what `env_enablement()` advertises.
     """
     raw = str(chat_id or "").strip()
     if not raw or raw == PLATFORM_NAME:
-        return DEFAULT_CHANNEL
+        return _home_channel()
     prefix = f"{PLATFORM_NAME}:"
     if raw.startswith(prefix):
         raw = raw[len(prefix):].strip()
-    return raw or DEFAULT_CHANNEL
+    return raw or _home_channel()
+
+
+def _strip_platform_prefix(channel: str) -> str:
+    """Strip a leading `fetch:` prefix so direct callers of `deliver_to_inbox`
+    can pass `fetch:researcher` and still land in `inbox_researcher` (not
+    `inbox_fetch-researcher`). A bare channel slug is returned unchanged.
+    """
+    raw = str(channel or "").strip()
+    prefix = f"{PLATFORM_NAME}:"
+    if raw.startswith(prefix):
+        return raw[len(prefix):].strip() or _home_channel()
+    return raw
 
 
 def _label_for_channel(channel: str) -> str:

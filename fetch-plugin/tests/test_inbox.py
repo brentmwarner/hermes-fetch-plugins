@@ -148,6 +148,29 @@ def test_label_for_channel_titles_profile_names():
     assert inbox._label_for_channel("code_reviewer") == "Code Reviewer"
 
 
+def test_bare_fetch_routes_to_configured_home_channel(monkeypatch):
+    """A bare `fetch` target uses HERMES_INBOX_HOME_CHANNEL, not hard-coded
+    `default` — so a customized home channel (e.g. `leads`) receives bare
+    sends, matching what env_enablement() advertises."""
+    inbox = _load_inbox()
+    monkeypatch.setenv("HERMES_INBOX_HOME_CHANNEL", "leads")
+    assert inbox._channel_from_chat_id("fetch") == "leads"
+    assert inbox._channel_from_chat_id(None) == "leads"
+    assert inbox._channel_from_chat_id("") == "leads"
+    assert inbox._channel_from_chat_id("fetch:") == "leads"
+    assert inbox._session_id_for_channel(inbox._channel_from_chat_id("fetch")) == "inbox_leads"
+
+
+def test_deliver_to_inbox_strips_platform_prefix_for_direct_callers(monkeypatch):
+    """Direct callers passing `fetch:researcher` land in inbox_researcher, not
+    inbox_fetch-researcher."""
+    inbox = _load_inbox()
+    monkeypatch.setattr(inbox, "SessionDB", lambda **kw: _FakeDB())
+    monkeypatch.setattr(inbox, "_notify_proactive", lambda **kw: None)
+    delivery = inbox.deliver_to_inbox(channel="fetch:researcher", content="hi", title="Researcher")
+    assert delivery.session_id == "inbox_researcher"
+
+
 def test_seed_includes_per_agent_profile_aliases(monkeypatch, tmp_path):
     inbox = _load_inbox()
     home = tmp_path
