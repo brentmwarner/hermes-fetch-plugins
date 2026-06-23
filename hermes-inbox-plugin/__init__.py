@@ -138,7 +138,8 @@ class HermesInboxAdapter(BasePlatformAdapter):
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         channel = _channel_from_chat_id(chat_id)
-        return {"name": _label_for_channel(channel), "type": "dm"}
+        name = DEFAULT_TITLE if _is_home_channel(channel) else _label_for_channel(channel)
+        return {"name": name, "type": "dm"}
 
 
 def check_requirements() -> bool:

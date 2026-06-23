@@ -82,6 +82,20 @@ def test_adapter_get_chat_info_returns_basic_descriptor(monkeypatch):
     assert researcher == {"name": "Researcher", "type": "dm"}
 
 
+def test_adapter_get_chat_info_preserves_title_for_custom_home_channel(monkeypatch):
+    """When HERMES_INBOX_HOME_CHANNEL is a non-default slug, get_chat_info should
+    still return DEFAULT_TITLE (not the title-cased slug) for the home channel."""
+    plugin = _load_plugin()
+    adapter = object.__new__(plugin.HermesInboxAdapter)
+    monkeypatch.setenv("HERMES_INBOX_HOME_CHANNEL", "leads")
+
+    home = asyncio.run(adapter.get_chat_info("hermes_inbox"))
+    researcher = asyncio.run(adapter.get_chat_info("hermes_inbox:researcher"))
+
+    assert home == {"name": "Fetch Inbox", "type": "dm"}
+    assert researcher == {"name": "Researcher", "type": "dm"}
+
+
 def test_default_cron_delivery_routes_to_job_thread(monkeypatch):
     plugin = _load_plugin()
     captured = {}
