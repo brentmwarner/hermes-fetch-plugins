@@ -274,12 +274,12 @@ def register(ctx) -> None:
                     "  items: [{title, subtitle, value, url}]   tappable list rows\n"
                     "  cards: [{title, subtitle, image, badge, url}]   horizontal carousel sub-cards\n"
                     "Example — daily brief:\n"
-                    "  ```card\n"
-                    "  {\"title\":\"Today\","
+                    "```card\n"
+                    "{\"title\":\"Today\","
                     "\"stats\":[{\"label\":\"Meetings\",\"value\":3},{\"label\":\"Tasks\",\"value\":12}],"
                     "\"items\":[{\"title\":\"Standup\",\"subtitle\":\"9:30 Zoom\",\"url\":\"https://zoom.us/j/123\"}],"
                     "\"footer\":\"Updated just now\"}\n"
-                    "  ```\n"
+                    "```\n"
                     "For richer patterns (multi-stat dashboard, link carousel, weekly summary) load the `fetch-cards` skill. A malformed card fence falls back to a code block — it never breaks the chat, so prefer attempting a card over not emitting one when the content fits."
                 ),
                 emoji="📱",
