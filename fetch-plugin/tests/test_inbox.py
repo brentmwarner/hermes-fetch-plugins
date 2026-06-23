@@ -91,7 +91,7 @@ def test_standalone_send_delivers_to_fetch_inbox(monkeypatch):
 
     result = asyncio.run(inbox.standalone_send(None, "default", "hello"))
 
-    assert calls == [{"channel": "default", "content": "hello", "title": "Fetch"}]
+    assert calls == [{"channel": "default", "content": "hello", "title": "Fetch", "thread_id": None}]
     assert result == {"success": True, "message_id": "7", "session_id": "inbox_default"}
 
 
@@ -107,8 +107,59 @@ def test_standalone_send_routes_named_channel(monkeypatch):
 
     result = asyncio.run(inbox.standalone_send(None, "fetch:researcher", "standup"))
 
-    assert calls == [{"channel": "researcher", "content": "standup", "title": "Researcher"}]
+    assert calls == [{"channel": "researcher", "content": "standup", "title": "Researcher", "thread_id": None}]
     assert result["session_id"] == "inbox_researcher"
+
+
+def test_standalone_send_titles_home_cron_delivery_from_job_name(monkeypatch):
+    inbox = _load_inbox()
+    calls = []
+    body = "Cronjob Response: Morning Brief\n(job_id: abc123)\n\nWeather and inbox summary"
+    monkeypatch.setattr(
+        inbox,
+        "deliver_to_inbox",
+        lambda **kw: calls.append(kw) or inbox.InboxDelivery(session_id="inbox_cron-abc123", message_id=11),
+    )
+
+    result = asyncio.run(inbox.standalone_send(None, "default", body))
+
+    assert calls == [{"channel": "cron-abc123", "content": body, "title": "Morning Brief", "thread_id": None}]
+    assert result["session_id"] == "inbox_cron-abc123"
+
+
+def test_standalone_send_preserves_cron_channel_across_chunks(monkeypatch):
+    """When Hermes chunks a long cron response, only the first chunk has the
+    'Cronjob Response...' header. Subsequent chunks must still route to the
+    same cron thread via the process-level cache."""
+    inbox = _load_inbox()
+    calls = []
+    monkeypatch.setattr(
+        inbox,
+        "deliver_to_inbox",
+        lambda **kw: calls.append(kw) or inbox.InboxDelivery(session_id="inbox_cron-abc123", message_id=1),
+    )
+
+    first_chunk = "Cronjob Response: Morning Brief\n(job_id: abc123)\n\nStart of a very long summary..."
+    second_chunk = "...continuation of the summary without a cron header..."
+
+    asyncio.run(inbox.standalone_send(None, "default", first_chunk))
+    asyncio.run(inbox.standalone_send(None, "default", second_chunk))
+
+    assert len(calls) == 2
+    assert calls[0]["channel"] == "cron-abc123"
+    assert calls[1]["channel"] == "cron-abc123", (
+        "second chunk must reuse the cached cron channel, not fall back to home"
+    )
+
+
+def test_title_from_metadata_ignores_thread_id():
+    """_title_from_metadata must NOT fall back to metadata['thread_id'];
+    that value is handled by _thread_id_from_metadata and
+    _default_title_for_delivery which produce a cleaned label."""
+    inbox = _load_inbox()
+    assert inbox._title_from_metadata({"thread_id": "my-thread"}) is None
+    assert inbox._title_from_metadata({"title": "My Title"}) == "My Title"
+    assert inbox._title_from_metadata({"title": "My Title", "thread_id": "t1"}) == "My Title"
 
 
 def test_deliver_to_inbox_passes_source_inbox(monkeypatch):
@@ -139,6 +190,56 @@ def test_deliver_to_inbox_uses_store_home_override(monkeypatch, tmp_path):
     inbox.deliver_to_inbox(channel="researcher", content="hi", title="Researcher")
 
     assert opened == [relay_home / "state.db"]
+
+
+def test_deliver_to_inbox_routes_home_cron_delivery_to_job_thread(monkeypatch):
+    inbox = _load_inbox()
+    captured = {}
+    body = "Cronjob Response: Morning Brief\n(job_id: abc123)\n\nWeather and inbox summary"
+
+    class _CaptureDB:
+        def create_session(self, **kw): captured["create"] = kw
+        def reopen_session(self, sid): captured["reopen"] = sid
+        def set_session_title(self, sid, title): captured["title"] = (sid, title)
+        def append_message(self, **kw): captured["append"] = kw; return 1
+        def close(self): pass
+
+    notify_calls = []
+    monkeypatch.setattr(inbox, "SessionDB", lambda **kw: _CaptureDB())
+    monkeypatch.setattr(inbox, "_notify_proactive", lambda **kw: notify_calls.append(kw))
+
+    delivery = inbox.deliver_to_inbox(channel="default", content=body, title="Fetch")
+
+    assert delivery.session_id == "inbox_cron-abc123"
+    assert captured["create"]["user_id"] == "cron-abc123"
+    assert captured["title"] == ("inbox_cron-abc123", "Morning Brief")
+    assert notify_calls[0]["title"] == "Morning Brief"
+
+
+def test_deliver_to_inbox_preserves_explicit_agent_channel_for_cron_body(monkeypatch):
+    inbox = _load_inbox()
+    captured = {}
+    body = "Cronjob Response: Morning Brief\n(job_id: abc123)\n\nWeather and inbox summary"
+
+    class _CaptureDB:
+        def create_session(self, **kw): captured["create"] = kw
+        def reopen_session(self, sid): pass
+        def set_session_title(self, sid, title): captured["title"] = (sid, title)
+        def append_message(self, **kw): return 1
+        def close(self): pass
+
+    monkeypatch.setattr(inbox, "SessionDB", lambda **kw: _CaptureDB())
+    monkeypatch.setattr(inbox, "_notify_proactive", lambda **kw: None)
+
+    delivery = inbox.deliver_to_inbox(
+        channel="fetch:researcher",
+        content=body,
+        title="Researcher",
+    )
+
+    assert delivery.session_id == "inbox_researcher"
+    assert captured["create"]["user_id"] == "researcher"
+    assert captured["title"] == ("inbox_researcher", "Researcher")
 
 
 def test_label_for_channel_titles_profile_names():
