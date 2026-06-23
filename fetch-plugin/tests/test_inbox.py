@@ -93,3 +93,109 @@ def test_standalone_send_delivers_to_fetch_inbox(monkeypatch):
 
     assert calls == [{"channel": "default", "content": "hello", "title": "Fetch"}]
     assert result == {"success": True, "message_id": "7", "session_id": "inbox_default"}
+
+
+def test_standalone_send_routes_named_channel(monkeypatch):
+    """`fetch:researcher` routes to the researcher DM with a real title."""
+    inbox = _load_inbox()
+    calls = []
+    monkeypatch.setattr(
+        inbox,
+        "deliver_to_inbox",
+        lambda **kw: calls.append(kw) or inbox.InboxDelivery(session_id="inbox_researcher", message_id=9),
+    )
+
+    result = asyncio.run(inbox.standalone_send(None, "fetch:researcher", "standup"))
+
+    assert calls == [{"channel": "researcher", "content": "standup", "title": "Researcher"}]
+    assert result["session_id"] == "inbox_researcher"
+
+
+def test_deliver_to_inbox_passes_source_inbox(monkeypatch):
+    """The proactive push must carry source='inbox' so the device routes it
+    into the phone-owned inbox (iOS inboxSources allowlist)."""
+    inbox = _load_inbox()
+    relay_calls = []
+    fake_relay = type("R", (), {"send_event_background": staticmethod(lambda **kw: relay_calls.append(kw))})
+    monkeypatch.setattr(inbox, "_load_relay", lambda: fake_relay)
+    monkeypatch.setattr(inbox, "SessionDB", lambda **kw: _FakeDB())
+
+    inbox.deliver_to_inbox(channel="default", content="hi", title="Fetch")
+
+    assert relay_calls and relay_calls[0]["source"] == "inbox"
+
+
+def test_deliver_to_inbox_uses_store_home_override(monkeypatch, tmp_path):
+    """A delivery under a worker profile persists into the override home's db."""
+    inbox = _load_inbox()
+    relay_home = tmp_path / "relay"
+    relay_home.mkdir()
+    monkeypatch.setattr(inbox, "get_hermes_home", lambda: tmp_path / "worker")
+    monkeypatch.setenv("HERMES_INBOX_STORE_HOME", str(relay_home))
+    opened = []
+    monkeypatch.setattr(inbox, "SessionDB", lambda **kw: opened.append(kw.get("db_path")) or _FakeDB())
+    monkeypatch.setattr(inbox, "_notify_proactive", lambda **kw: None)
+
+    inbox.deliver_to_inbox(channel="researcher", content="hi", title="Researcher")
+
+    assert opened == [relay_home / "state.db"]
+
+
+def test_label_for_channel_titles_profile_names():
+    inbox = _load_inbox()
+    assert inbox._label_for_channel("default") == "Fetch"
+    assert inbox._label_for_channel("researcher") == "Researcher"
+    assert inbox._label_for_channel("code_reviewer") == "Code Reviewer"
+
+
+def test_bare_fetch_routes_to_configured_home_channel(monkeypatch):
+    """A bare `fetch` target uses HERMES_INBOX_HOME_CHANNEL, not hard-coded
+    `default` — so a customized home channel (e.g. `leads`) receives bare
+    sends, matching what env_enablement() advertises."""
+    inbox = _load_inbox()
+    monkeypatch.setenv("HERMES_INBOX_HOME_CHANNEL", "leads")
+    assert inbox._channel_from_chat_id("fetch") == "leads"
+    assert inbox._channel_from_chat_id(None) == "leads"
+    assert inbox._channel_from_chat_id("") == "leads"
+    assert inbox._channel_from_chat_id("fetch:") == "leads"
+    assert inbox._session_id_for_channel(inbox._channel_from_chat_id("fetch")) == "inbox_leads"
+
+
+def test_deliver_to_inbox_strips_platform_prefix_for_direct_callers(monkeypatch):
+    """Direct callers passing `fetch:researcher` land in inbox_researcher, not
+    inbox_fetch-researcher."""
+    inbox = _load_inbox()
+    monkeypatch.setattr(inbox, "SessionDB", lambda **kw: _FakeDB())
+    monkeypatch.setattr(inbox, "_notify_proactive", lambda **kw: None)
+    delivery = inbox.deliver_to_inbox(channel="fetch:researcher", content="hi", title="Researcher")
+    assert delivery.session_id == "inbox_researcher"
+
+
+def test_seed_includes_per_agent_profile_aliases(monkeypatch, tmp_path):
+    inbox = _load_inbox()
+    home = tmp_path
+    (home / "profiles").mkdir()
+    (home / "profiles" / "researcher").mkdir()
+    (home / "profiles" / "coder").mkdir()
+    monkeypatch.setattr(inbox, "get_hermes_home", lambda: home)
+    monkeypatch.setattr(inbox, "_store_home", lambda: home)
+    monkeypatch.setenv("HERMES_INBOX_HOME_CHANNEL", "default")
+
+    inbox.seed_channel_alias()
+
+    data = json.loads((home / ALIASES).read_text(encoding="utf-8"))
+    entries = data["fetch"]
+    assert entries["default"] == "Fetch"
+    assert entries["researcher"] == "Researcher"
+    assert entries["coder"] == "Coder"
+
+
+class _FakeDB:
+    def __init__(self, *a, **kw): pass
+    def __enter__(self): return self
+    def __exit__(self, *a): pass
+    def create_session(self, **kw): pass
+    def reopen_session(self, sid): pass
+    def set_session_title(self, sid, title): pass
+    def append_message(self, **kw): return 1
+    def close(self): pass
