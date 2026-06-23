@@ -79,6 +79,7 @@ def test_agent_device_push_flow_uses_custom_copy_by_default() -> None:
             "session_id": "s1",
             "title": "Assistant replied",
             "body": "The report is ready.",
+            "source": "inbox",
         },
     )
     assert push_res.status_code == 200
@@ -88,6 +89,7 @@ def test_agent_device_push_flow_uses_custom_copy_by_default() -> None:
     assert fake_apns.sent[0]["collapse_id"] is None
     assert fake_apns.sent[0]["payload"]["aps"]["alert"]["title"] == "Assistant replied"
     assert fake_apns.sent[0]["payload"]["aps"]["alert"]["body"] == "The report is ready."
+    assert fake_apns.sent[0]["payload"]["source"] == "inbox"
     assert "sound" not in fake_apns.sent[0]["payload"]["aps"]
 
     attention_res = client.post(

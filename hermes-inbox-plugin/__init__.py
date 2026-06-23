@@ -68,6 +68,13 @@ LEGACY_PLATFORM_ENV = "HERMES_INBOX_REGISTER_LEGACY_PLATFORM"
 DEFAULT_CHANNEL = "default"
 DEFAULT_TITLE = "Fetch Inbox"
 CHANNEL_LABEL = "Fetch"  # friendly name the agent sees for this channel in its target list
+# When set, inbox sessions are persisted into THIS home's state.db instead of
+# the running process's HERMES_HOME. The Fetch app pairs with ONE home over the
+# relay; a delivery that runs under a worker profile (`hermes -p researcher`)
+# would otherwise write to the researcher's profile db, invisible to Fetch.
+# Point this at the relay-paired home so every per-agent channel
+# (`inbox_researcher`, `inbox_coder`, …) lands in the one store the phone reads.
+STORE_HOME_ENV = "HERMES_INBOX_STORE_HOME"
 
 
 @dataclass(frozen=True)
@@ -90,7 +97,7 @@ class HermesInboxAdapter(BasePlatformAdapter):
         self._mark_disconnected()
 
     async def send(self, chat_id, content, reply_to=None, metadata=None):
-        channel = str(chat_id or DEFAULT_CHANNEL)
+        channel = _channel_from_chat_id(chat_id)
         title = _title_from_metadata(metadata) or DEFAULT_TITLE
         try:
             delivery = deliver_to_inbox(channel=channel, content=str(content or ""), title=title)
@@ -132,7 +139,8 @@ async def _standalone_send(
     title = DEFAULT_TITLE
     if thread_id:
         title = f"{DEFAULT_TITLE}: {thread_id}"
-    delivery = deliver_to_inbox(channel=str(chat_id or DEFAULT_CHANNEL), content=str(message or ""), title=title)
+    channel = _channel_from_chat_id(chat_id)
+    delivery = deliver_to_inbox(channel=channel, content=str(message or ""), title=title)
     return {"success": True, "message_id": str(delivery.message_id), "session_id": delivery.session_id}
 
 
@@ -140,7 +148,10 @@ def deliver_to_inbox(*, channel: str, content: str, title: str = DEFAULT_TITLE) 
     """Persist one inbox message and notify iOS devices.
 
     ``channel`` maps to a stable Hermes session, so repeated lead alerts land
-    in the same app thread unless callers choose a different channel.
+    in the same app thread unless callers choose a different channel. Per-agent
+    channels (`hermes_inbox:researcher`) produce per-agent sessions
+    (`inbox_researcher`) so each agent gets its own Fetch DM instead of one
+    pooled ``inbox_default`` thread.
     """
     clean_channel = _normalize_channel(channel)
     session_id = _session_id_for_channel(clean_channel)
@@ -148,7 +159,7 @@ def deliver_to_inbox(*, channel: str, content: str, title: str = DEFAULT_TITLE) 
     if not body:
         raise ValueError("Hermes Inbox cannot deliver an empty message")
 
-    db = SessionDB()
+    db = SessionDB(db_path=_store_home() / "state.db")
     try:
         db.create_session(session_id=session_id, source="inbox", user_id=clean_channel)
         db.reopen_session(session_id)
@@ -188,6 +199,11 @@ def _notify_proactive(*, session_id: str, title: str, body: str) -> None:
             session_id=session_id,
             title=(title or "")[:120],
             body=(body or "")[:500],
+            # The inbox session is created with source="inbox"; stamp it on the
+            # push so the device routes it into the phone-owned inbox without a
+            # source lookup or a Hermes-specific denylist.
+            source="inbox",
+            hermes_home=_store_home(),
         )
     except Exception:
         logger.debug("Hermes Inbox proactive push failed", exc_info=True)
@@ -217,6 +233,40 @@ def _home_channel() -> str:
     return os.environ.get(HOME_CHANNEL_ENV, "").strip() or DEFAULT_CHANNEL
 
 
+def _store_home() -> Path:
+    """Resolve which Hermes home's state.db inbox sessions persist into.
+
+    Defaults to the running process's HERMES_HOME (the legacy behavior). When
+    ``HERMES_INBOX_STORE_HOME`` is set, deliveries persist into THAT home's db
+    instead — so a delivery run under a worker profile still lands in the
+    relay-paired home the Fetch app reads. Without this, `hermes -p researcher
+    … --deliver hermes_inbox:researcher` writes to researcher's profile db and
+    is invisible to the phone.
+    """
+    override = os.environ.get(STORE_HOME_ENV, "").strip()
+    if override:
+        return Path(os.path.expanduser(override))
+    return get_hermes_home()
+
+
+def _channel_from_chat_id(chat_id) -> str:
+    """Normalize a gateway delivery target into the inbox channel slug.
+
+    The gateway normally splits a `platform:chat_id` target and passes just the
+    chat_id half to `send` (so `hermes_inbox:researcher` → chat_id="researcher").
+    This also defends against the full `hermes_inbox:researcher` string arriving
+    unsplit, by stripping a leading `hermes_inbox:` prefix. Bare `hermes_inbox`
+    or an empty value falls back to the home channel.
+    """
+    raw = str(chat_id or "").strip()
+    if not raw or raw == PLATFORM_NAME:
+        return _home_channel()
+    prefix = f"{PLATFORM_NAME}:"
+    if raw.startswith(prefix):
+        raw = raw[len(prefix):].strip()
+    return raw or _home_channel()
+
+
 def _is_enabled() -> bool:
     value = os.environ.get(ENABLED_ENV, "").strip().lower()
     return value in {"1", "true", "yes", "on"}
@@ -228,8 +278,11 @@ def _legacy_platform_enabled() -> bool:
 
 
 def _normalize_channel(channel: str) -> str:
-    clean = (channel or DEFAULT_CHANNEL).strip()
-    return clean or DEFAULT_CHANNEL
+    clean = (channel or "").strip()
+    prefix = f"{PLATFORM_NAME}:"
+    if clean.startswith(prefix):
+        clean = clean[len(prefix):].strip()
+    return clean or _home_channel()
 
 
 def _session_id_for_channel(channel: str) -> str:
@@ -256,14 +309,22 @@ def _seed_channel_alias() -> None:
     the home channel in ``channel_aliases.json`` makes Hermes inject it as a named
     target even before the first message arrives.
 
-    Idempotent and non-destructive: add the channel only when absent; never
+    Also seeds one alias per Hermes profile (e.g. ``researcher``, ``coder``) so
+    each agent is addressable as its own DM target — ``hermes_inbox:researcher``
+    → "Researcher". This is what lets a cron job deliver to a specific agent's
+    DM (`--deliver hermes_inbox:researcher`) and the agent proactively pick a DM
+    (`send_message(target="hermes_inbox:researcher")`).
+
+    Idempotent and non-destructive: add a channel only when absent; never
     overwrite a name the user changed, nor other platforms' aliases.
 
     An auto-generated alias is one whose value is still ``CHANNEL_LABEL`` — a
     user rename gives it a different value. When the configured home channel
     changes, prune stale auto-generated ``Fetch`` aliases pointing at other
     channels so friendly-name lookup can't keep resolving ``Fetch`` to a stale
-    channel; user-renamed aliases are left untouched.
+    channel; user-renamed aliases are left untouched. Per-agent aliases carry
+    their own labels (Title-Cased profile name), so they're never pruned as
+    stale ``Fetch`` aliases.
     """
     try:
         path = get_hermes_home() / "channel_aliases.json"
@@ -289,11 +350,15 @@ def _seed_channel_alias() -> None:
             for key, value in entries.items()
             if key == channel or value != CHANNEL_LABEL
         }
-        already_current = channel in pruned
-        if pruned == entries and already_current:
-            return  # nothing to prune and the current channel is already present
-        if not already_current:
+        if channel not in pruned:
             pruned[channel] = CHANNEL_LABEL  # respect an existing user rename above
+        # One alias per profile dir → per-agent DM target. The slug IS the
+        # profile name; the label is Title-Cased for display. setdefault keeps
+        # this non-destructive: a user-renamed profile alias is preserved.
+        for slug, label in _profile_channels():
+            pruned.setdefault(slug, label)
+        if pruned == entries:
+            return  # nothing changed
         aliases[PLATFORM_NAME] = pruned
         tmp = path.with_name(path.name + ".tmp")
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -301,6 +366,30 @@ def _seed_channel_alias() -> None:
         os.replace(tmp, path)
     except Exception:
         logger.debug("Hermes Inbox channel alias seeding failed", exc_info=True)
+
+
+def _profile_channels() -> list[tuple[str, str]]:
+    """(slug, label) for each profile under the store home, for per-agent DM
+    alias seeding. Slug = profile dir name; label = Title-Cased name. Empty list
+    when no profiles dir exists or it isn't readable."""
+    try:
+        profiles_dir = _store_home() / "profiles"
+        if not profiles_dir.is_dir():
+            return []
+        out: list[tuple[str, str]] = []
+        for entry in sorted(profiles_dir.iterdir()):
+            if not entry.is_dir() or entry.name.startswith("."):
+                continue
+            out.append((entry.name, _profile_label(entry.name)))
+        return out
+    except Exception:
+        logger.debug("Hermes Inbox profile channel enumeration failed", exc_info=True)
+        return []
+
+
+def _profile_label(slug: str) -> str:
+    """Human-readable label for a profile slug: Title Case the name."""
+    return slug.replace("_", " ").replace("-", " ").title()
 
 
 def register(ctx):

@@ -50,6 +50,8 @@ def test_notify_proactive_clamps_long_fields(monkeypatch):
             "session_id": "inbox_default",
             "title": long_title[:120],
             "body": long_body[:500],
+            "source": "inbox",
+            "hermes_home": plugin._store_home(),
         }
     ]
 
@@ -73,5 +75,7 @@ def test_notify_proactive_forwards_to_relay(monkeypatch):
             "session_id": "inbox_default",
             "title": "Hermes Inbox",
             "body": "new lead",
+            "source": "inbox",
+            "hermes_home": plugin._store_home(),
         }
     ]
