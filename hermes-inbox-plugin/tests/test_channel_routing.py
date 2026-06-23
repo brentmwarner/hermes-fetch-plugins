@@ -69,6 +69,56 @@ def test_default_channel_unchanged(monkeypatch):
     assert delivery.session_id == "inbox_default"
 
 
+def test_default_cron_delivery_routes_to_job_thread(monkeypatch):
+    plugin = _load_plugin()
+    captured = {}
+    body = "Cronjob Response: Morning Brief\n(job_id: abc123)\n\nWeather and inbox summary"
+
+    class _FakeDB:
+        def create_session(self, **kw): captured["create"] = kw
+        def reopen_session(self, sid): pass
+        def set_session_title(self, sid, title): captured["title"] = (sid, title)
+        def append_message(self, **kw): return 1
+        def close(self): pass
+
+    notify_calls = []
+    monkeypatch.setattr(plugin, "SessionDB", lambda **kw: _FakeDB())
+    monkeypatch.setattr(plugin, "_notify_proactive", lambda **kw: notify_calls.append(kw))
+
+    delivery = plugin.deliver_to_inbox(channel="default", content=body, title="Fetch Inbox")
+
+    assert delivery.session_id == "inbox_cron-abc123"
+    assert captured["create"]["user_id"] == "cron-abc123"
+    assert captured["title"] == ("inbox_cron-abc123", "Morning Brief")
+    assert notify_calls[0]["title"] == "Morning Brief"
+
+
+def test_explicit_agent_channel_ignores_cron_wrapper(monkeypatch):
+    plugin = _load_plugin()
+    captured = {}
+    body = "Cronjob Response: Morning Brief\n(job_id: abc123)\n\nWeather and inbox summary"
+
+    class _FakeDB:
+        def create_session(self, **kw): captured["create"] = kw
+        def reopen_session(self, sid): pass
+        def set_session_title(self, sid, title): captured["title"] = (sid, title)
+        def append_message(self, **kw): return 1
+        def close(self): pass
+
+    monkeypatch.setattr(plugin, "SessionDB", lambda **kw: _FakeDB())
+    monkeypatch.setattr(plugin, "_notify_proactive", lambda **kw: None)
+
+    delivery = plugin.deliver_to_inbox(
+        channel="hermes_inbox:researcher",
+        content=body,
+        title="Researcher",
+    )
+
+    assert delivery.session_id == "inbox_researcher"
+    assert captured["create"]["user_id"] == "researcher"
+    assert captured["title"] == ("inbox_researcher", "Researcher")
+
+
 @pytest.mark.parametrize("chat_id,expected", [
     ("researcher", "inbox_researcher"),
     ("hermes_inbox:researcher", "inbox_researcher"),  # defensive: unsplit target

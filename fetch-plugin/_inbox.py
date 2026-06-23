@@ -48,6 +48,18 @@ class InboxDelivery:
     message_id: int
 
 
+@dataclass(frozen=True)
+class CronDeliveryInfo:
+    name: str
+    job_id: str
+
+
+_CRON_RESPONSE_RE = re.compile(
+    r"\ACronjob Response:\s*(?P<name>[^\n]+)\n\(job_id:\s*(?P<job_id>[^)]+)\)",
+    re.IGNORECASE,
+)
+
+
 class FetchInboxAdapter(BasePlatformAdapter):
     """Gateway adapter that routes outbound Fetch sends to Hermes sessions."""
 
@@ -63,9 +75,19 @@ class FetchInboxAdapter(BasePlatformAdapter):
 
     async def send(self, chat_id, content, reply_to=None, metadata=None):
         channel = _channel_from_chat_id(chat_id)
-        title = _title_from_metadata(metadata) or _label_for_channel(channel)
+        thread_id = _thread_id_from_metadata(metadata)
+        title = _title_from_metadata(metadata) or _default_title_for_delivery(
+            channel=channel,
+            content=str(content or ""),
+            thread_id=thread_id,
+        )
         try:
-            delivery = deliver_to_inbox(channel=channel, content=str(content or ""), title=title)
+            delivery = deliver_to_inbox(
+                channel=channel,
+                content=str(content or ""),
+                title=title,
+                thread_id=thread_id,
+            )
         except Exception as exc:
             logger.exception("Fetch inbox delivery failed")
             return SendResult(success=False, error=str(exc))
@@ -123,14 +145,27 @@ async def standalone_send(
     force_document=False,
 ) -> dict:
     channel = _channel_from_chat_id(chat_id)
-    title = _label_for_channel(channel)
-    if thread_id:
-        title = f"{title}: {thread_id}"
-    delivery = deliver_to_inbox(channel=channel, content=str(message or ""), title=title)
+    title = _default_title_for_delivery(
+        channel=channel,
+        content=str(message or ""),
+        thread_id=thread_id,
+    )
+    delivery = deliver_to_inbox(
+        channel=channel,
+        content=str(message or ""),
+        title=title,
+        thread_id=thread_id,
+    )
     return {"success": True, "message_id": str(delivery.message_id), "session_id": delivery.session_id}
 
 
-def deliver_to_inbox(*, channel: str, content: str, title: str = DEFAULT_TITLE) -> InboxDelivery:
+def deliver_to_inbox(
+    *,
+    channel: str,
+    content: str,
+    title: str = DEFAULT_TITLE,
+    thread_id: str | None = None,
+) -> InboxDelivery:
     """Persist one Fetch inbox message and notify iOS devices.
 
     ``channel`` maps to a stable Hermes session, so repeated deliveries to the
@@ -139,7 +174,8 @@ def deliver_to_inbox(*, channel: str, content: str, title: str = DEFAULT_TITLE) 
     each agent gets its own Fetch DM instead of one pooled ``inbox_default``
     thread.
     """
-    clean_channel = _normalize_channel(_strip_platform_prefix(channel))
+    clean_channel = _delivery_channel(channel=channel, content=content, thread_id=thread_id)
+    clean_title = _title_for_channel(clean_channel, content=content, proposed=title)
     session_id = _session_id_for_channel(clean_channel)
     body = content.strip()
     if not body:
@@ -149,7 +185,7 @@ def deliver_to_inbox(*, channel: str, content: str, title: str = DEFAULT_TITLE) 
     try:
         db.create_session(session_id=session_id, source="inbox", user_id=clean_channel)
         db.reopen_session(session_id)
-        _set_title_if_possible(db, session_id, title)
+        _set_title_if_possible(db, session_id, clean_title)
         message_id = db.append_message(
             session_id=session_id,
             role="assistant",
@@ -160,7 +196,7 @@ def deliver_to_inbox(*, channel: str, content: str, title: str = DEFAULT_TITLE) 
     finally:
         db.close()
 
-    _notify_proactive(session_id=session_id, title=title, body=body)
+    _notify_proactive(session_id=session_id, title=clean_title, body=body)
     return InboxDelivery(session_id=session_id, message_id=int(message_id or 0))
 
 
@@ -282,6 +318,14 @@ def _title_from_metadata(metadata: Any) -> str | None:
     return None
 
 
+def _thread_id_from_metadata(metadata: Any) -> str | None:
+    if isinstance(metadata, dict):
+        raw = metadata.get("thread_id")
+        if raw:
+            return str(raw)
+    return None
+
+
 def _configured_home_channel(config) -> str:
     home = getattr(config, "home_channel", None)
     chat_id = str(getattr(home, "chat_id", "") or "").strip()
@@ -297,6 +341,10 @@ def _configured_home_channel(config) -> str:
 
 def _home_channel() -> str:
     return os.environ.get(HOME_CHANNEL_ENV, "").strip() or DEFAULT_CHANNEL
+
+
+def _is_home_channel(channel: str) -> bool:
+    return _normalize_channel(channel) == _normalize_channel(_home_channel())
 
 
 def _store_home() -> Path:
@@ -344,6 +392,69 @@ def _strip_platform_prefix(channel: str) -> str:
     return raw
 
 
+def _delivery_channel(*, channel: str, content: str, thread_id: str | None = None) -> str:
+    """Resolve the stable Fetch thread key for one outbound delivery.
+
+    Explicit channels are preserved (`fetch:researcher` stays `researcher`).
+    Bare home-channel cron deliveries get split by cron job id, otherwise every
+    scheduled job collapses into the shared `inbox_default` home thread.
+    """
+    clean_channel = _normalize_channel(_strip_platform_prefix(channel))
+    if thread_id:
+        return _thread_channel(clean_channel, thread_id)
+    if _is_home_channel(clean_channel):
+        cron_channel = _cron_channel_from_content(content)
+        if cron_channel:
+            return cron_channel
+    return clean_channel
+
+
+def _thread_channel(channel: str, thread_id: str) -> str:
+    clean_thread = _slug_for_channel(thread_id)
+    if not clean_thread:
+        return channel
+    if _is_home_channel(channel):
+        return f"thread-{clean_thread}"
+    return f"{channel}-{clean_thread}"
+
+
+def _cron_channel_from_content(content: str) -> str | None:
+    info = _cron_delivery_info(content)
+    if info is None:
+        return None
+    slug = _slug_for_channel(info.job_id or info.name)
+    return f"cron-{slug}" if slug else None
+
+
+def _cron_delivery_info(content: str) -> CronDeliveryInfo | None:
+    match = _CRON_RESPONSE_RE.match(content.strip())
+    if match is None:
+        return None
+    name = " ".join(match.group("name").split())
+    job_id = " ".join(match.group("job_id").split())
+    if not name and not job_id:
+        return None
+    return CronDeliveryInfo(name=name or job_id, job_id=job_id)
+
+
+def _default_title_for_delivery(*, channel: str, content: str, thread_id: str | None = None) -> str:
+    if thread_id:
+        return _label_for_channel(thread_id)
+    info = _cron_delivery_info(content)
+    if _is_home_channel(channel) and info is not None:
+        return info.name
+    return _label_for_channel(channel)
+
+
+def _title_for_channel(channel: str, *, content: str, proposed: str) -> str:
+    info = _cron_delivery_info(content)
+    if channel.startswith("cron-") and info is not None:
+        home_titles = {DEFAULT_TITLE, _label_for_channel(DEFAULT_CHANNEL), _label_for_channel(_home_channel())}
+        if not proposed or proposed in home_titles:
+            return info.name
+    return proposed or _label_for_channel(channel)
+
+
 def _label_for_channel(channel: str) -> str:
     """Human-readable thread title for a channel slug: Title Case the name.
 
@@ -370,13 +481,18 @@ def _normalize_channel(channel: str) -> str:
     return clean or DEFAULT_CHANNEL
 
 
+def _slug_for_channel(channel: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", str(channel or "")).strip("-_.").lower()
+    if len(slug) > 48:
+        digest = hashlib.sha1(str(channel).encode("utf-8")).hexdigest()[:12]
+        slug = f"{slug[:35]}-{digest}"
+    return slug
+
+
 def _session_id_for_channel(channel: str) -> str:
-    slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", channel).strip("-_.").lower()
+    slug = _slug_for_channel(channel)
     if not slug:
         slug = DEFAULT_CHANNEL
-    if len(slug) > 48:
-        digest = hashlib.sha1(channel.encode("utf-8")).hexdigest()[:12]
-        slug = f"{slug[:35]}-{digest}"
     return f"inbox_{slug}"
 
 
