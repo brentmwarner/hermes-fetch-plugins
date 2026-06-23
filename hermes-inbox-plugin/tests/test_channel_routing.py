@@ -254,3 +254,39 @@ def test_profile_label_title_cases_slug():
     plugin = _load_plugin()
     assert plugin._profile_label("researcher") == "Researcher"
     assert plugin._profile_label("code_reviewer") == "Code Reviewer"
+
+
+def test_title_from_metadata_ignores_thread_id():
+    """_title_from_metadata must NOT fall back to metadata['thread_id'];
+    that value is handled by _thread_id_from_metadata and
+    _default_title_for_delivery which produce a cleaned label."""
+    plugin = _load_plugin()
+    assert plugin._title_from_metadata({"thread_id": "my-thread"}) is None
+    assert plugin._title_from_metadata({"title": "My Title"}) == "My Title"
+    assert plugin._title_from_metadata({"title": "My Title", "thread_id": "t1"}) == "My Title"
+
+
+def test_standalone_send_preserves_cron_channel_across_chunks(monkeypatch):
+    """When Hermes chunks a long cron response, only the first chunk has the
+    'Cronjob Response...' header. Subsequent chunks must still route to the
+    same cron thread via the process-level cache."""
+    import asyncio
+    plugin = _load_plugin()
+    calls = []
+    monkeypatch.setattr(
+        plugin,
+        "deliver_to_inbox",
+        lambda **kw: calls.append(kw) or plugin.InboxDelivery(session_id="inbox_cron-abc123", message_id=1),
+    )
+
+    first_chunk = "Cronjob Response: Morning Brief\n(job_id: abc123)\n\nStart of long summary..."
+    second_chunk = "...continuation without a cron header..."
+
+    asyncio.run(plugin._standalone_send(None, "default", first_chunk))
+    asyncio.run(plugin._standalone_send(None, "default", second_chunk))
+
+    assert len(calls) == 2
+    assert calls[0]["channel"] == "cron-abc123"
+    assert calls[1]["channel"] == "cron-abc123", (
+        "second chunk must reuse the cached cron channel, not fall back to home"
+    )

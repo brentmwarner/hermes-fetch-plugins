@@ -59,6 +59,14 @@ _CRON_RESPONSE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Process-level cache mapping home-channel → last resolved cron channel.
+# When Hermes chunks a long cron response, only the first chunk starts with
+# "Cronjob Response... (job_id: ...)"; later chunks lack the header and would
+# otherwise fall back to the home channel, splitting one run between
+# inbox_cron-* and inbox_default. This cache survives long enough to carry
+# the resolved channel across the remaining chunks in the same delivery.
+_cron_channel_cache: dict[str, str] = {}
+
 
 class FetchInboxAdapter(BasePlatformAdapter):
     """Gateway adapter that routes outbound Fetch sends to Hermes sessions."""
@@ -145,13 +153,28 @@ async def standalone_send(
     force_document=False,
 ) -> dict:
     channel = _channel_from_chat_id(chat_id)
+    # Pre-resolve the delivery channel so chunked cron responses stay in the
+    # same thread even when later chunks lack the "Cronjob Response..." header.
+    resolved_channel = _delivery_channel(
+        channel=channel,
+        content=str(message or ""),
+        thread_id=thread_id,
+    )
+    if not thread_id and _is_home_channel(channel):
+        if _cron_channel_from_content(str(message or "")):
+            # First chunk of a cron response: cache the resolved channel so
+            # subsequent chunks (which lack the header) route to the same thread.
+            _cron_channel_cache[channel] = resolved_channel
+        elif channel in _cron_channel_cache:
+            # Subsequent chunk: reuse the cached cron channel.
+            resolved_channel = _cron_channel_cache[channel]
     title = _default_title_for_delivery(
         channel=channel,
         content=str(message or ""),
         thread_id=thread_id,
     )
     delivery = deliver_to_inbox(
-        channel=channel,
+        channel=resolved_channel,
         content=str(message or ""),
         title=title,
         thread_id=thread_id,
@@ -312,7 +335,7 @@ def _set_title_if_possible(db: SessionDB, session_id: str, title: str) -> None:
 
 def _title_from_metadata(metadata: Any) -> str | None:
     if isinstance(metadata, dict):
-        raw = metadata.get("title") or metadata.get("thread_id")
+        raw = metadata.get("title")
         if raw:
             return str(raw)
     return None
