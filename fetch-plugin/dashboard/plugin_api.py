@@ -136,39 +136,33 @@ def _force_dispatch(kanban_db, conn, task_id: str, board) -> bool:
         return _orig(c, tid) if _orig is not None else None
 
     def _claim_only_target(c, tid, *args, _orig=orig_claim_task, **kwargs):
-        if tid != task_id or _orig is None:
+        if tid != task_id:
             return None
         return _orig(c, tid, *args, **kwargs)
 
     with _reactivate_lock:
-        try:
-            for _ in range(8):
-                if orig_guard is not None:
-                    kanban_db.check_respawn_guard = _patched
-                if orig_claim_task is not None:
-                    kanban_db.claim_task = _claim_only_target
-                try:
-                    result = kanban_db.dispatch_once(conn, max_spawn=16, board=board)
-                finally:
-                    if orig_guard is not None:
-                        kanban_db.check_respawn_guard = orig_guard
-                    if orig_claim_task is not None:
-                        kanban_db.claim_task = orig_claim_task
-                if getattr(result, "skipped_locked", False):
-                    time.sleep(0.1)
-                    continue
-                spawned_ids = {s[0] for s in getattr(result, "spawned", [])}
-                if task_id in spawned_ids:
-                    return True
-                # Another concurrent tick may already have claimed it.
-                t = kanban_db.get_task(conn, task_id)
-                return bool(t is not None and (t.status or "") == "running")
-            return False
-        finally:
+        for _ in range(8):
             if orig_guard is not None:
-                kanban_db.check_respawn_guard = orig_guard
+                kanban_db.check_respawn_guard = _patched
             if orig_claim_task is not None:
-                kanban_db.claim_task = orig_claim_task
+                kanban_db.claim_task = _claim_only_target
+            try:
+                result = kanban_db.dispatch_once(conn, max_spawn=16, board=board)
+            finally:
+                if orig_guard is not None:
+                    kanban_db.check_respawn_guard = orig_guard
+                if orig_claim_task is not None:
+                    kanban_db.claim_task = orig_claim_task
+            if getattr(result, "skipped_locked", False):
+                time.sleep(0.1)
+                continue
+            spawned_ids = {s[0] for s in getattr(result, "spawned", [])}
+            if task_id in spawned_ids:
+                return True
+            # Another concurrent tick may already have claimed it.
+            t = kanban_db.get_task(conn, task_id)
+            return bool(t is not None and (t.status or "") == "running")
+        return False
 
 
 @router.post("/tasks/{task_id}/reactivate")
