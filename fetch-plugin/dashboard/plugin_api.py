@@ -19,10 +19,12 @@ from __future__ import annotations
 import importlib.util
 import logging
 import sys
+import threading
+import time
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 log = logging.getLogger("fetch_plugin.api")
@@ -96,3 +98,112 @@ async def unregister(body: UnregisterBody) -> dict:
     except Exception as exc:  # best-effort; the device ages out via APNs feedback anyway
         log.warning("Fetch push device unregister failed: %s", exc)
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Kanban task reactivation (FET-15)
+# ---------------------------------------------------------------------------
+
+# Serialises the brief, process-wide guard swap in _force_dispatch below.
+_reactivate_lock = threading.Lock()
+
+
+def _force_dispatch(kanban_db, conn, task_id: str, board) -> bool:
+    """Run one ``dispatch_once`` tick with ``check_respawn_guard`` neutralised
+    for ``task_id`` only, and report whether that task spawned.
+
+    Why swap a core global instead of replicating the spawn: ``dispatch_once``
+    owns claim → workspace resolution → the worker subprocess launch
+    (``_default_spawn``), all of which change between Hermes releases. Copying
+    that here would rot. Instead we reuse it verbatim and override the one
+    decision we need — the auto-guard that defers respawning a task which
+    completed in the last hour / has an open PR. An explicit user reply is a
+    "do more" signal the auto-guard doesn't model.
+
+    The swap is serialised (``_reactivate_lock``) and restored in ``finally``.
+    Only ``task_id`` is bypassed, so every other task still faces the real
+    guard — the tick is "what the dispatcher would do anyway, plus this one
+    task". Retries while another dispatcher (the gateway's) holds the board
+    tick lock, which frees between ticks. If the guard symbol is gone in a
+    future Hermes, we don't patch and fall back to a plain dispatch.
+    """
+    orig_guard = getattr(kanban_db, "check_respawn_guard", None)
+    orig_claim_task = getattr(kanban_db, "claim_task", None)
+
+    def _patched(c, tid, _orig=orig_guard):
+        if tid == task_id:
+            return None
+        return _orig(c, tid) if _orig is not None else None
+
+    def _claim_only_target(c, tid, *args, _orig=orig_claim_task, **kwargs):
+        if tid != task_id:
+            return None
+        return _orig(c, tid, *args, **kwargs)
+
+    with _reactivate_lock:
+        for _ in range(8):
+            if orig_guard is not None:
+                kanban_db.check_respawn_guard = _patched
+            if orig_claim_task is not None:
+                kanban_db.claim_task = _claim_only_target
+            try:
+                result = kanban_db.dispatch_once(conn, max_spawn=16, board=board)
+            finally:
+                if orig_guard is not None:
+                    kanban_db.check_respawn_guard = orig_guard
+                if orig_claim_task is not None:
+                    kanban_db.claim_task = orig_claim_task
+            if getattr(result, "skipped_locked", False):
+                time.sleep(0.1)
+                continue
+            spawned_ids = {s[0] for s in getattr(result, "spawned", [])}
+            if task_id in spawned_ids:
+                return True
+            # Another concurrent tick may already have claimed it.
+            t = kanban_db.get_task(conn, task_id)
+            return bool(t is not None and (t.status or "") == "running")
+        return False
+
+
+@router.post("/tasks/{task_id}/reactivate")
+def reactivate_task(task_id: str, board: Optional[str] = Query(None)) -> dict:
+    """Force a worker respawn for a task the user explicitly replied to (FET-15).
+
+    The auto-dispatcher's ``check_respawn_guard`` defers respawning a task for up
+    to an hour after it completes (or a day after a PR link) — so a follow-up
+    reply on a just-finished task silently fails to reactivate it. The iOS app
+    has already posted the comment and moved the task to ``ready``; this route
+    forces the spawn, bypassing only that guard, reusing Hermes' real spawn path.
+
+    Lives in the Fetch plugin (a supported extension point) rather than a patch
+    to ``check_respawn_guard``, so a ``hermes update`` can't silently drop it.
+    """
+    try:
+        from hermes_cli import kanban_db
+    except Exception as exc:  # not a kanban-capable host
+        raise HTTPException(status_code=501, detail="kanban is not available on this host") from exc
+
+    try:
+        conn = kanban_db.connect(board=board)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"invalid board: {exc}") from exc
+    try:
+        task = kanban_db.get_task(conn, task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail=f"task {task_id} not found")
+        status = (task.status or "")
+        if status == "running":
+            # A live worker holds the claim; it picks up the new comment on its
+            # next kanban_show. Nothing to spawn — report success.
+            return {"ok": True, "spawned": False, "reason": "already_running"}
+        if status != "ready":
+            raise HTTPException(
+                status_code=409,
+                detail=f"task must be 'ready' to reactivate (status={status!r})",
+            )
+        if not (task.assignee or "").strip():
+            raise HTTPException(status_code=409, detail="assign a profile before reactivating")
+        spawned = _force_dispatch(kanban_db, conn, task_id, board)
+        return {"ok": True, "spawned": spawned}
+    finally:
+        conn.close()

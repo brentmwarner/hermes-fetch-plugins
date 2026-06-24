@@ -184,6 +184,50 @@ def _on_pre_approval_request(
     )
 
 
+# Truthy spellings the model may pass for a boolean tool arg (kanban_create's
+# `triage` arrives as a JSON bool, but be tolerant of stringified forms).
+_TRUTHY_ARG = frozenset({True, 1, "1", "true", "True", "yes", "on"})
+
+
+def _on_pre_tool_call(*, tool_name: str = "", args: dict | None = None, **_kwargs):
+    """Enforce that agent-created kanban tasks carry a real spec (FET-16).
+
+    A title-only card strands the worker: the assignee sees only the task's
+    title and body, so a card with an empty body gives it nothing to act on
+    ("creates titles but not useful details"). Hermes honors a
+    ``{"action": "block", "message": ...}`` return from a ``pre_tool_call``
+    hook (see ``hermes_cli.plugins.get_pre_tool_call_block_message``): the
+    block message is handed back to the model, which then re-calls
+    ``kanban_create`` with a body.
+
+    This lives in the Fetch plugin — a supported extension point — instead of a
+    patch to the ``kanban_create`` schema / KANBAN_GUIDANCE, so a ``hermes
+    update`` can't silently drop it. It applies to every ``kanban_create`` on
+    this host (the body requirement is universally good); ``triage`` stubs are
+    exempt because a specifier profile fleshes those out later.
+    """
+    if tool_name != "kanban_create":
+        return None
+    args = args if isinstance(args, dict) else {}
+    body = args.get("body")
+    body = body.strip() if isinstance(body, str) else ""
+    if body:
+        return None
+    if args.get("triage") in _TRUTHY_ARG:
+        return None
+    return {
+        "action": "block",
+        "message": (
+            "kanban_create needs a `body`. Write the full spec — goal, "
+            "acceptance criteria, and any relevant links/context — then "
+            "re-call kanban_create with it. The worker that picks up this "
+            "card sees only the title and body, so a title-only card leaves "
+            "it nothing to act on. (Pass triage=true only if you intend a "
+            "deliberately empty stub for a specifier to flesh out.)"
+        ),
+    }
+
+
 def _fetch_is_connected(config) -> bool:
     return bool(_pairing.is_pairing_configured() or _inbox.validate_config(config))
 
@@ -229,6 +273,8 @@ def register(ctx) -> None:
     # Push hooks: notify the app on turn completion / attention-needed.
     ctx.register_hook("post_llm_call", _on_post_llm_call)
     ctx.register_hook("pre_approval_request", _on_pre_approval_request)
+    # Quality gate: require a real `body` on agent-created kanban tasks (FET-16).
+    ctx.register_hook("pre_tool_call", _on_pre_tool_call)
 
     # Platform registration: surface Fetch in `hermes setup` with a pairing
     # flow. Guarded so an older Hermes without the platform API still loads the
