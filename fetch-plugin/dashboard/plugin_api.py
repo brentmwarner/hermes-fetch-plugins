@@ -128,18 +128,32 @@ def _force_dispatch(kanban_db, conn, task_id: str, board) -> bool:
     future Hermes, we don't patch and fall back to a plain dispatch.
     """
     orig_guard = getattr(kanban_db, "check_respawn_guard", None)
+    orig_claim_task = getattr(kanban_db, "claim_task", None)
 
     def _patched(c, tid, _orig=orig_guard):
         if tid == task_id:
             return None
         return _orig(c, tid) if _orig is not None else None
 
+    def _claim_only_target(c, tid, *args, _orig=orig_claim_task, **kwargs):
+        if tid != task_id or _orig is None:
+            return None
+        return _orig(c, tid, *args, **kwargs)
+
     with _reactivate_lock:
-        if orig_guard is not None:
-            kanban_db.check_respawn_guard = _patched
         try:
             for _ in range(8):
-                result = kanban_db.dispatch_once(conn, max_spawn=16, board=board)
+                if orig_guard is not None:
+                    kanban_db.check_respawn_guard = _patched
+                if orig_claim_task is not None:
+                    kanban_db.claim_task = _claim_only_target
+                try:
+                    result = kanban_db.dispatch_once(conn, max_spawn=16, board=board)
+                finally:
+                    if orig_guard is not None:
+                        kanban_db.check_respawn_guard = orig_guard
+                    if orig_claim_task is not None:
+                        kanban_db.claim_task = orig_claim_task
                 if getattr(result, "skipped_locked", False):
                     time.sleep(0.1)
                     continue
@@ -153,6 +167,8 @@ def _force_dispatch(kanban_db, conn, task_id: str, board) -> bool:
         finally:
             if orig_guard is not None:
                 kanban_db.check_respawn_guard = orig_guard
+            if orig_claim_task is not None:
+                kanban_db.claim_task = orig_claim_task
 
 
 @router.post("/tasks/{task_id}/reactivate")

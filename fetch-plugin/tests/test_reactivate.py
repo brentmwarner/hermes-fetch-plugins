@@ -39,6 +39,7 @@ def _install_fake_kanban(monkeypatch, *, task, dispatch):
     fake.check_respawn_guard = check_respawn_guard
     fake.connect = lambda board=None: types.SimpleNamespace(close=lambda: None)
     fake.get_task = lambda conn, tid: task
+    fake.claim_task = lambda conn, tid, *a, **k: task if task is not None and tid == getattr(task, "id", None) else None
     fake.dispatch_once = dispatch
 
     hermes_cli = sys.modules.get("hermes_cli") or types.ModuleType("hermes_cli")
@@ -79,6 +80,28 @@ def test_reactivate_bypasses_guard_and_reports_spawn(monkeypatch):
     assert fake.check_respawn_guard(object(), tid) == "recent_success"
 
 
+def test_reactivate_only_claims_requested_task(monkeypatch):
+    requested = "t_requested"
+    claimed = []
+
+    def dispatch(conn, *, max_spawn=None, board=None, **kw):
+        claim = sys.modules["hermes_cli.kanban_db"].claim_task
+        claimed.append(claim(conn, "t_other"))
+        claimed.append(claim(conn, requested))
+        return types.SimpleNamespace(spawned=[(requested, "coder", "/tmp/ws")], skipped_locked=False)
+
+    task = _task(tid=requested)
+    fake = _install_fake_kanban(monkeypatch, task=task, dispatch=dispatch)
+    orig_claim = fake.claim_task
+
+    res = _client().post(f"/tasks/{requested}/reactivate")
+    assert res.status_code == 200, res.text
+    assert res.json() == {"ok": True, "spawned": True}
+    assert claimed[0] is None
+    assert claimed[1] is task
+    assert fake.claim_task is orig_claim
+
+
 def test_reactivate_retries_while_tick_lock_held(monkeypatch):
     tid = "t_1"
     calls = {"n": 0}
@@ -94,6 +117,25 @@ def test_reactivate_retries_while_tick_lock_held(monkeypatch):
     assert res.status_code == 200
     assert res.json()["spawned"] is True
     assert calls["n"] == 3
+
+
+def test_reactivate_restores_guard_between_retry_attempts(monkeypatch):
+    tid = "t_1"
+    guards_seen = []
+
+    def dispatch(conn, *, max_spawn=None, board=None, **kw):
+        fake = sys.modules["hermes_cli.kanban_db"]
+        guards_seen.append(fake.check_respawn_guard(conn, tid))
+        if len(guards_seen) == 1:
+            return types.SimpleNamespace(spawned=[], skipped_locked=True)
+        return types.SimpleNamespace(spawned=[(tid, "coder", "/tmp/ws")], skipped_locked=False)
+
+    fake = _install_fake_kanban(monkeypatch, task=_task(tid=tid), dispatch=dispatch)
+    orig_guard = fake.check_respawn_guard
+    res = _client().post(f"/tasks/{tid}/reactivate")
+    assert res.status_code == 200, res.text
+    assert guards_seen == [None, None]
+    assert fake.check_respawn_guard is orig_guard
 
 
 def test_reactivate_counts_concurrent_claim_as_spawn(monkeypatch):

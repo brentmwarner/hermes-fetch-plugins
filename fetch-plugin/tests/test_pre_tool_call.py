@@ -72,6 +72,15 @@ def test_allows_kanban_create_with_body(plugin):
     assert result is None
 
 
+@pytest.mark.parametrize("body", [[], {}, 0, False])
+def test_blocks_kanban_create_with_non_string_body(plugin, body):
+    result = plugin._on_pre_tool_call(
+        tool_name="kanban_create",
+        args={"title": "x", "assignee": "coder", "body": body},
+    )
+    assert result is not None and result["action"] == "block"
+
+
 def test_allows_triage_stub_without_body(plugin):
     # A deliberate triage stub is exempt — a specifier fleshes it out later.
     for triage in (True, "true", "1"):

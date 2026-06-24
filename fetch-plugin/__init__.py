@@ -210,7 +210,7 @@ def _on_pre_tool_call(*, tool_name: str = "", args: dict | None = None, **_kwarg
         return None
     args = args if isinstance(args, dict) else {}
     body = args.get("body")
-    body = body.strip() if isinstance(body, str) else (str(body).strip() if body else "")
+    body = body.strip() if isinstance(body, str) else ""
     if body:
         return None
     if args.get("triage") in _TRUTHY_ARG:
