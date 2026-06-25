@@ -99,6 +99,24 @@ def test_reseed_prunes_stale_auto_alias_when_home_channel_changes(tmp_path, monk
     assert data == {"fetch": {"leads": "Fetch"}}
 
 
+def test_reseed_prunes_stale_legacy_home_alias_for_non_current_channel(tmp_path, monkeypatch):
+    """A stale legacy hermes_inbox alias for a key that was the old home channel
+    but is no longer current or a profile slug must be pruned on the next seed."""
+    plugin = _load_plugin()
+    monkeypatch.setattr(plugin, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_INBOX_HOME_CHANNEL", "default")
+    # `leads` was the home channel under an older install; its value is the auto-generated marker.
+    existing = {"hermes_inbox": {"leads": "Fetch"}}
+    (tmp_path / ALIASES).write_text(json.dumps(existing))
+
+    plugin._seed_channel_alias()
+
+    data = json.loads((tmp_path / ALIASES).read_text())
+    assert data == {"fetch": {"default": "Fetch"}}, (
+        "stale legacy home alias 'leads' should be pruned; only the current fetch alias should remain"
+    )
+
+
 def test_reseed_keeps_user_renamed_alias_when_home_channel_changes(tmp_path, monkeypatch):
     plugin = _load_plugin()
     monkeypatch.setattr(plugin, "get_hermes_home", lambda: tmp_path)
@@ -213,7 +231,9 @@ def test_fetch_platform_registered_returns_false_when_registry_module_missing(mo
     assert plugin._fetch_platform_already_registered() is False
 
 
-def test_fetch_platform_registered_propagates_registry_errors(monkeypatch):
+def test_fetch_platform_registered_returns_true_on_unexpected_registry_error(monkeypatch):
+    """An unexpected error from is_registered() must cause the function to return
+    True so that registration is skipped and a duplicate entry is avoided."""
     plugin = _load_plugin()
 
     class _BrokenRegistry:
@@ -227,5 +247,4 @@ def test_fetch_platform_registered_propagates_registry_errors(monkeypatch):
     monkeypatch.setitem(sys.modules, "gateway", gateway_module)
     monkeypatch.setitem(sys.modules, "gateway.platform_registry", registry_module)
 
-    with pytest.raises(RuntimeError, match="boom"):
-        plugin._fetch_platform_already_registered()
+    assert plugin._fetch_platform_already_registered() is True

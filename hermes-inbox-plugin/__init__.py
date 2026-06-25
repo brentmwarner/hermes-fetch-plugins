@@ -538,7 +538,6 @@ def _seed_channel_alias() -> None:
                 logger.debug("Hermes Inbox legacy alias seed skipped: platform aliases entry is not a dict")
         elif isinstance(legacy, dict):
             profile_slugs = {slug for slug, _label in profile_channels}
-            home_slugs = {DEFAULT_CHANNEL, _home_channel()}
             legacy_pruned = {
                 key: value
                 for key, value in legacy.items()
@@ -546,7 +545,6 @@ def _seed_channel_alias() -> None:
                     key,
                     value,
                     profile_slugs=profile_slugs,
-                    home_slugs=home_slugs,
                 )
             }
             if legacy_pruned:
@@ -585,13 +583,12 @@ def _is_auto_generated_legacy_alias(
     value: Any,
     *,
     profile_slugs: set[str],
-    home_slugs: set[str],
 ) -> bool:
     """Return True for legacy aliases produced by older plugin versions."""
     if not isinstance(value, str):
         return False
     key = str(key)
-    if key in home_slugs and value == CHANNEL_LABEL:
+    if value == CHANNEL_LABEL:
         return True
     return key in profile_slugs and value == _profile_label(key)
 
@@ -610,7 +607,14 @@ def _fetch_platform_already_registered() -> bool:
     is_registered = getattr(platform_registry, "is_registered", None)
     if not callable(is_registered):
         return False
-    return bool(is_registered(CANONICAL_PLATFORM_NAME))
+    try:
+        return bool(is_registered(CANONICAL_PLATFORM_NAME))
+    except Exception:
+        logger.warning(
+            "Unexpected error checking fetch platform registration; skipping registration to avoid duplicate",
+            exc_info=True,
+        )
+        return True
 
 
 def _productized_fetch_plugin_available() -> bool:

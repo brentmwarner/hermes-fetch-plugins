@@ -389,6 +389,24 @@ def test_seed_prunes_legacy_auto_profile_aliases(monkeypatch, tmp_path):
     }
 
 
+def test_seed_prunes_stale_legacy_home_alias_after_home_channel_change(monkeypatch, tmp_path):
+    """Stale legacy home alias for a non-current channel (e.g. `leads`) must be
+    pruned even when it no longer matches the current home slug."""
+    inbox = _load_inbox()
+    monkeypatch.setattr(inbox, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_INBOX_HOME_CHANNEL", "default")
+    # `leads` was the home channel in the old install; value is the auto-generated marker.
+    existing = {"hermes_inbox": {"leads": "Fetch"}}
+    (tmp_path / ALIASES).write_text(json.dumps(existing), encoding="utf-8")
+
+    inbox.seed_channel_alias()
+
+    data = json.loads((tmp_path / ALIASES).read_text(encoding="utf-8"))
+    assert data == {"fetch": {"default": "Fetch"}}, (
+        "stale legacy home alias 'leads' should be pruned; only the current fetch alias should remain"
+    )
+
+
 class _FakeDB:
     def __init__(self, *a, **kw): pass
     def __enter__(self): return self

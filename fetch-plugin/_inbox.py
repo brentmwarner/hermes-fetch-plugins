@@ -278,11 +278,10 @@ def seed_channel_alias() -> None:
         legacy = aliases.get(LEGACY_PLATFORM_NAME)
         if isinstance(legacy, dict) and not _legacy_platform_enabled():
             profile_slugs = {slug for slug, _label in profile_channels}
-            home_slugs = {DEFAULT_CHANNEL, _home_channel()}
             legacy_pruned = {
                 key: value
                 for key, value in legacy.items()
-                if not _is_auto_generated_legacy_alias(key, value, profile_slugs=profile_slugs, home_slugs=home_slugs)
+                if not _is_auto_generated_legacy_alias(key, value, profile_slugs=profile_slugs)
             }
             if legacy_pruned:
                 aliases[LEGACY_PLATFORM_NAME] = legacy_pruned
@@ -302,13 +301,12 @@ def _is_auto_generated_legacy_alias(
     value: Any,
     *,
     profile_slugs: set[str],
-    home_slugs: set[str],
 ) -> bool:
     """Return True for legacy aliases produced by older plugin versions."""
     if not isinstance(value, str):
         return False
     key = str(key)
-    if key in home_slugs and value == CHANNEL_LABEL:
+    if value == CHANNEL_LABEL:
         return True
     return key in profile_slugs and value == _label_for_channel(key)
 
