@@ -33,6 +33,11 @@ logger = logging.getLogger("fetch_plugin.inbox")
 PLATFORM_NAME = "fetch"
 HOME_CHANNEL_ENV = "HERMES_FETCH_HOME_CHANNEL"
 ENABLED_ENV = "HERMES_FETCH_DELIVERY_ENABLED"
+# Legacy env var names — read as fallback so an upgrade doesn't silently
+# disable delivery until the user re-runs setup (which writes the new names).
+_LEGACY_HOME_CHANNEL_ENV = "HERMES_INBOX_HOME_CHANNEL"
+_LEGACY_ENABLED_ENV = "HERMES_INBOX_ENABLED"
+_LEGACY_STORE_HOME_ENV = "HERMES_INBOX_STORE_HOME"
 DEFAULT_CHANNEL = "default"
 DEFAULT_TITLE = "Fetch"
 CHANNEL_LABEL = "Fetch"
@@ -123,7 +128,7 @@ def validate_config(config) -> bool:
 
 
 def is_delivery_enabled() -> bool:
-    return _truthy(os.environ.get(ENABLED_ENV))
+    return _truthy(os.environ.get(ENABLED_ENV) or os.environ.get(_LEGACY_ENABLED_ENV))
 
 
 def env_enablement(*, force: bool = False) -> dict[str, Any] | None:
@@ -374,7 +379,9 @@ def _configured_home_channel(config) -> str:
 
 
 def _home_channel() -> str:
-    return os.environ.get(HOME_CHANNEL_ENV, "").strip() or DEFAULT_CHANNEL
+    return (os.environ.get(HOME_CHANNEL_ENV, "").strip()
+            or os.environ.get(_LEGACY_HOME_CHANNEL_ENV, "").strip()
+            or DEFAULT_CHANNEL)
 
 
 def _is_home_channel(channel: str) -> bool:
