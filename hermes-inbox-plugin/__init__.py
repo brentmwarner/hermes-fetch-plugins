@@ -474,7 +474,8 @@ def _seed_channel_alias() -> None:
     → "Researcher". This is what lets a cron job deliver to a specific agent's
     DM (`--deliver fetch:researcher`) and the agent proactively pick a DM
     (`send_message(target="fetch:researcher")`). The legacy `hermes_inbox:`
-    prefix is still accepted by delivery normalization but is not auto-seeded.
+    prefix is still accepted by delivery normalization; it is auto-seeded only
+    when `HERMES_INBOX_REGISTER_LEGACY_PLATFORM` is enabled.
 
     Idempotent and non-destructive: add a channel only when absent; never
     overwrite a name the user changed, nor other platforms' aliases.
@@ -603,10 +604,13 @@ def _profile_label(slug: str) -> str:
 def _fetch_platform_already_registered() -> bool:
     try:
         from gateway.platform_registry import platform_registry
-
-        return platform_registry.is_registered(CANONICAL_PLATFORM_NAME)
-    except Exception:
+    except ImportError:
         return False
+
+    is_registered = getattr(platform_registry, "is_registered", None)
+    if not callable(is_registered):
+        return False
+    return bool(is_registered(CANONICAL_PLATFORM_NAME))
 
 
 def _productized_fetch_plugin_available() -> bool:

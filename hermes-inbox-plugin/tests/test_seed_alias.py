@@ -16,6 +16,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
 ALIASES = "channel_aliases.json"
 
@@ -202,3 +204,28 @@ def test_register_skips_seed_when_disabled(tmp_path, monkeypatch):
 
     assert not (tmp_path / ALIASES).exists()
     assert captured == []
+
+
+def test_fetch_platform_registered_returns_false_when_registry_module_missing(monkeypatch):
+    plugin = _load_plugin()
+    monkeypatch.setitem(sys.modules, "gateway.platform_registry", None)
+
+    assert plugin._fetch_platform_already_registered() is False
+
+
+def test_fetch_platform_registered_propagates_registry_errors(monkeypatch):
+    plugin = _load_plugin()
+
+    class _BrokenRegistry:
+        def is_registered(self, _name):
+            raise RuntimeError("boom")
+
+    gateway_module = types.ModuleType("gateway")
+    registry_module = types.ModuleType("gateway.platform_registry")
+    setattr(registry_module, "platform_registry", _BrokenRegistry())
+    setattr(gateway_module, "platform_registry", registry_module)
+    monkeypatch.setitem(sys.modules, "gateway", gateway_module)
+    monkeypatch.setitem(sys.modules, "gateway.platform_registry", registry_module)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        plugin._fetch_platform_already_registered()
