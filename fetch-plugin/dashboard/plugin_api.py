@@ -42,6 +42,7 @@ _spec.loader.exec_module(_relay)
 
 
 _inbox = None
+_inbox_lock = threading.Lock()
 
 
 def _load_inbox():
@@ -50,17 +51,24 @@ def _load_inbox():
     ``_inbox`` imports ``gateway`` / ``hermes_state`` at module load, which are
     present in the dashboard process but not on a minimal host — load it lazily
     so the device-registration routes above keep working regardless.
+
+    Uses a double-checked lock so concurrent threadpool requests don't race to
+    exec the module twice or observe a partially-initialized module via
+    sys.modules.
     """
     global _inbox
     if _inbox is not None:
         return _inbox
-    path = Path(__file__).resolve().parent.parent / "_inbox.py"
-    spec = importlib.util.spec_from_file_location("fetch_plugin_inbox_api", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    _inbox = module
+    with _inbox_lock:
+        if _inbox is not None:  # re-check under the lock
+            return _inbox
+        path = Path(__file__).resolve().parent.parent / "_inbox.py"
+        spec = importlib.util.spec_from_file_location("fetch_plugin_inbox_api", path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        _inbox = module
     return _inbox
 
 
@@ -140,7 +148,7 @@ class EnableInboxBody(BaseModel):
 
 class TestInboxBody(BaseModel):
     channel: str = Field(default="default", max_length=80)
-    message: str = Field(default="Fetch is ready.", max_length=1000)
+    message: str = Field(default="Fetch is ready.", min_length=1, max_length=1000)
 
 
 @router.get("/inbox/status")
@@ -180,8 +188,11 @@ def inbox_test(body: TestInboxBody) -> dict:
     channel = (body.channel or inbox.DEFAULT_CHANNEL).strip() or inbox.DEFAULT_CHANNEL
     try:
         delivery = inbox.deliver_to_inbox(channel=channel, content=body.message, title="Fetch")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        log.exception("Fetch delivery test failed unexpectedly")
+        raise HTTPException(status_code=500, detail="delivery failed") from exc
     return {"ok": True, "session_id": delivery.session_id, "message_id": delivery.message_id}
 
 
