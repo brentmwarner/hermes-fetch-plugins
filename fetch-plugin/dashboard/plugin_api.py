@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import os
 import sys
 import threading
 import time
@@ -38,6 +39,38 @@ assert _spec is not None and _spec.loader is not None
 _relay = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = _relay
 _spec.loader.exec_module(_relay)
+
+
+_inbox = None
+_inbox_lock = threading.Lock()
+
+
+def _load_inbox():
+    """Lazily load the sibling ``_inbox.py`` by path.
+
+    ``_inbox`` imports ``gateway`` / ``hermes_state`` at module load, which are
+    present in the dashboard process but not on a minimal host — load it lazily
+    so the device-registration routes above keep working regardless.
+
+    Uses a double-checked lock so concurrent threadpool requests don't race to
+    exec the module twice or observe a partially-initialized module via
+    sys.modules.
+    """
+    global _inbox
+    if _inbox is not None:
+        return _inbox
+    with _inbox_lock:
+        if _inbox is not None:  # re-check under the lock
+            return _inbox
+        path = Path(__file__).resolve().parent.parent / "_inbox.py"
+        spec = importlib.util.spec_from_file_location("fetch_plugin_inbox_api", path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        _inbox = module
+    return _inbox
+
 
 router = APIRouter()
 
@@ -98,6 +131,69 @@ async def unregister(body: UnregisterBody) -> dict:
     except Exception as exc:  # best-effort; the device ages out via APNs feedback anyway
         log.warning("Fetch push device unregister failed: %s", exc)
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Inbox delivery configuration (status / enable / test)
+# ---------------------------------------------------------------------------
+# Lets the dashboard or app turn Fetch into a cron/webhook delivery target and
+# fire a test push, all under the single ``fetch`` product. Fetch relay setup
+# already enables delivery automatically; these routes are the explicit control.
+
+
+class EnableInboxBody(BaseModel):
+    enabled: bool = True
+    channel: str = Field(default="default", max_length=80)
+
+
+class TestInboxBody(BaseModel):
+    channel: str = Field(default="default", max_length=80)
+    message: str = Field(default="Fetch is ready.", min_length=1, max_length=1000)
+
+
+@router.get("/inbox/status")
+def inbox_status() -> dict:
+    inbox = _load_inbox()
+    channel = os.environ.get(inbox.HOME_CHANNEL_ENV, "").strip() or inbox.DEFAULT_CHANNEL
+    return {
+        "installed": True,
+        "enabled": inbox.is_delivery_enabled(),
+        "delivery_target": inbox.PLATFORM_NAME,
+        "home_channel": channel,
+        "home_channel_env": inbox.HOME_CHANNEL_ENV,
+    }
+
+
+@router.post("/inbox/enable")
+def inbox_enable(body: EnableInboxBody) -> dict:
+    inbox = _load_inbox()
+    channel = (body.channel or inbox.DEFAULT_CHANNEL).strip() or inbox.DEFAULT_CHANNEL
+    inbox.set_delivery_enabled(body.enabled, channel=channel)
+    return {
+        "ok": True,
+        "installed": True,
+        "enabled": body.enabled,
+        "delivery_target": inbox.PLATFORM_NAME,
+        "home_channel": channel,
+        "home_channel_env": inbox.HOME_CHANNEL_ENV,
+        "restart_required": True,
+    }
+
+
+@router.post("/inbox/test")
+def inbox_test(body: TestInboxBody) -> dict:
+    inbox = _load_inbox()
+    if not inbox.is_delivery_enabled():
+        raise HTTPException(status_code=400, detail="Fetch delivery is not enabled")
+    channel = (body.channel or inbox.DEFAULT_CHANNEL).strip() or inbox.DEFAULT_CHANNEL
+    try:
+        delivery = inbox.deliver_to_inbox(channel=channel, content=body.message, title="Fetch")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log.exception("Fetch delivery test failed unexpectedly")
+        raise HTTPException(status_code=500, detail="delivery failed") from exc
+    return {"ok": True, "session_id": delivery.session_id, "message_id": delivery.message_id}
 
 
 # ---------------------------------------------------------------------------

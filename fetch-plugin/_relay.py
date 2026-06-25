@@ -39,7 +39,7 @@ _DEDUPE_WINDOW_S = 10.0
 def _hermes_home(hermes_home: Path | None = None) -> Path:
     if hermes_home is not None:
         return Path(hermes_home).expanduser()
-    store_home = os.environ.get("HERMES_INBOX_STORE_HOME", "").strip()
+    store_home = os.environ.get("HERMES_FETCH_STORE_HOME", "").strip()
     if store_home:
         return Path(os.path.expanduser(store_home))
     try:
