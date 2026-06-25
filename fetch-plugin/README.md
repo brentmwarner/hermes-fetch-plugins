@@ -61,38 +61,77 @@ Then open Fetch on the phone and allow notifications. No Apple account, no
 
 ## Configuration
 
+Most users set nothing — Fetch setup configures delivery and the tunnel for you.
+All env vars are `HERMES_FETCH_*`; there is no separate inbox product.
+
+**Public knobs:**
+
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `HERMES_FETCH_RELAY_URL` | hosted relay (`https://push.tryfetchapp.com`) | Point at a different / local relay. |
 | `HERMES_FETCH_RELAY_REGISTRATION_TOKEN` | _(none)_ | Enrollment token, if the relay requires one. |
 | `HERMES_FETCH_TUNNEL_ENABLED` | enabled by Fetch relay setup | Keep the agent-side reverse tunnel active for relay pairing. |
 | `HERMES_FETCH_TUNNEL_DISABLE_DASHBOARD_AUTOSTART` | _(unset)_ | Opt out if you manage the local Hermes dashboard/API process yourself. |
-| `HERMES_INBOX_ENABLED` | set by Fetch setup | Enable Fetch as a cron/webhook delivery target. |
-| `HERMES_INBOX_HOME_CHANNEL` | `default` | Default Fetch inbox channel used by bare `--deliver fetch`. |
-| `HERMES_INBOX_STORE_HOME` | running profile home | Optional relay-paired Hermes home whose `state.db` receives inbox sessions. |
+
+**Internal / advanced** (written by Fetch setup or the `/api/plugins/fetch/inbox/enable`
+dashboard route; rarely set by hand):
+
+| Env var | Default | Purpose |
+| --- | --- | --- |
+| `HERMES_FETCH_DELIVERY_ENABLED` | set by Fetch setup | Enable Fetch as a cron/webhook delivery target. |
+| `HERMES_FETCH_HOME_CHANNEL` | `default` | Default Fetch channel used by bare `--deliver fetch`. |
+| `HERMES_FETCH_STORE_HOME` | running profile home | Relay-paired Hermes home whose `state.db` receives delivery sessions (multi-profile setups). |
 
 For local development, run the relay from `server/push-relay/` and set
 `HERMES_FETCH_RELAY_URL=http://127.0.0.1:8787`.
 
 ## Inbox delivery and thread affinity
 
-Fetch owns the canonical Hermes delivery surface for proactive and cron output:
+Fetch is the canonical Hermes delivery surface for proactive and cron output:
 
 ```bash
 hermes cron create "every 15m" "Summarize the World Cup" --deliver fetch:world-cup
 ```
 
-Delivery channels are normalized before persistence. Both `fetch:world-cup` and
-the legacy `hermes_inbox:world-cup` spelling resolve to the same channel slug and
-therefore the same deterministic Hermes session, `inbox_world-cup`. Bare
-`--deliver fetch` uses `HERMES_INBOX_HOME_CHANNEL` (default `default`). Cron
-responses delivered to the home channel are split by cron job id
-(`inbox_cron-<job-id>`) so each scheduled job gets a stable thread instead of all
-proactive output collapsing into one inbox.
+Delivery channels are normalized before persistence: `fetch:world-cup` resolves
+to the deterministic Hermes session `inbox_world-cup`, so repeated deliveries to
+the same channel append to the same app thread. Bare `--deliver fetch` uses
+`HERMES_FETCH_HOME_CHANNEL` (default `default`). Cron responses delivered to the
+home channel are split by cron job id (`inbox_cron-<job-id>`) so each scheduled
+job gets a stable thread instead of all proactive output collapsing into one
+thread.
+
+(`inbox` here is an internal wire tag — the session `source` value and
+`inbox_<slug>` session-id prefix the iOS app keys its inbox off. The user only
+ever sees and targets `fetch`.)
 
 This channel-thread affinity is enforced in the plugin because Fetch owns the
 phone-side inbox UX; end users should not need to manually pick Hermes thread ids
 or understand profile-specific platform names.
+
+## Fetch as a messaging channel
+
+When Fetch setup runs, the plugin seeds an entry in
+`~/.hermes/channel_aliases.json` so the agent *discovers* Fetch as a named target
+(`fetch`) in `send_message`, without waiting for a first inbound message. (Hermes
+hides platforms that have no known channels, and a send-only platform never
+discovers one from inbound traffic, so this seed is what makes Fetch
+addressable.) One alias is seeded per Hermes profile, so each agent is reachable
+as its own DM target — `fetch:researcher` → "Researcher".
+
+- `send_message(target="fetch", ...)` → your Fetch app (home channel)
+- `hermes cron create ... --deliver fetch` → scheduled pushes
+- On a fresh install with no other platform configured, Fetch is the agent's
+  default place to reach you — no Telegram bot or other API setup required.
+
+The seed is idempotent and non-destructive: it adds a channel only when absent
+and never overwrites a name you've changed or other platforms' aliases.
+
+To nudge the agent to reach out on its own, add a line to `~/.hermes/SOUL.md`:
+
+> You can reach me on my phone through Fetch. For anything time-sensitive or
+> worth knowing while I'm away from the terminal — finished work, blockers, a
+> heads-up, scheduled summaries — send it to the `fetch` channel.
 
 ## Notes & limits
 

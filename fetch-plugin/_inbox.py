@@ -1,9 +1,13 @@
 """Fetch inbox delivery helpers.
 
-Fetch is the visible Hermes platform. This module gives that platform the
-send-only inbox behavior that used to live behind a separate ``hermes_inbox``
-setup entry: persist a message into Hermes' session database, then send a
-proactive Fetch push for the created thread.
+Fetch is the single visible Hermes platform. This module gives that platform its
+send-only delivery behavior: persist a message into Hermes' session database,
+then send a proactive Fetch push for the created thread.
+
+``inbox`` survives only as an internal wire tag — the session ``source`` column
+value and the ``inbox_<slug>`` session-id prefix the iOS app keys its inbox off.
+The user never sees it: the platform, the delivery target, and every env var are
+``fetch``.
 """
 
 from __future__ import annotations
@@ -27,17 +31,16 @@ from hermes_state import SessionDB
 logger = logging.getLogger("fetch_plugin.inbox")
 
 PLATFORM_NAME = "fetch"
-LEGACY_PLATFORM_NAME = "hermes_inbox"
-HOME_CHANNEL_ENV = "HERMES_INBOX_HOME_CHANNEL"
-ENABLED_ENV = "HERMES_INBOX_ENABLED"
+HOME_CHANNEL_ENV = "HERMES_FETCH_HOME_CHANNEL"
+ENABLED_ENV = "HERMES_FETCH_DELIVERY_ENABLED"
 DEFAULT_CHANNEL = "default"
 DEFAULT_TITLE = "Fetch"
 CHANNEL_LABEL = "Fetch"
-# When set, inbox sessions are persisted into THIS home's state.db instead of
+# When set, delivery sessions are persisted into THIS home's state.db instead of
 # the running process's HERMES_HOME. The Fetch app pairs with ONE home over the
 # relay; a delivery that runs under a worker profile (`hermes -p researcher`)
 # would otherwise write to the researcher's profile db, invisible to Fetch.
-STORE_HOME_ENV = "HERMES_INBOX_STORE_HOME"
+STORE_HOME_ENV = "HERMES_FETCH_STORE_HOME"
 
 _relay_module = None
 
@@ -134,18 +137,32 @@ def env_enablement(*, force: bool = False) -> dict[str, Any] | None:
 
 
 def enable_delivery_for_future_starts() -> None:
-    """Persist Fetch inbox delivery defaults for future Hermes processes."""
-    os.environ[ENABLED_ENV] = "1"
-    channel = _home_channel()
-    os.environ[HOME_CHANNEL_ENV] = channel
+    """Persist Fetch delivery defaults for future Hermes processes (pairing)."""
+    set_delivery_enabled(True, channel=_home_channel())
+
+
+def set_delivery_enabled(enabled: bool, *, channel: str | None = None) -> None:
+    """Persist the Fetch delivery on/off flag (and optional home channel) for
+    future Hermes processes, seeding the channel alias when enabling.
+
+    Single source of truth for both Fetch pairing (always enables) and the
+    dashboard ``/inbox/enable`` endpoint (explicit toggle). The env vars are
+    internal: setup and the dashboard write them; users target ``fetch``.
+    """
+    flag = "1" if enabled else "0"
+    os.environ[ENABLED_ENV] = flag
+    if channel is not None:
+        os.environ[HOME_CHANNEL_ENV] = channel.strip() or DEFAULT_CHANNEL
     try:
         from hermes_cli.config import save_env_value
 
-        save_env_value(ENABLED_ENV, "1")
-        save_env_value(HOME_CHANNEL_ENV, channel)
+        save_env_value(ENABLED_ENV, flag)
+        if channel is not None:
+            save_env_value(HOME_CHANNEL_ENV, os.environ[HOME_CHANNEL_ENV])
     except Exception:
-        logger.debug("Could not persist Fetch inbox delivery env", exc_info=True)
-    seed_channel_alias()
+        logger.debug("Could not persist Fetch delivery env", exc_info=True)
+    if enabled:
+        seed_channel_alias()
 
 
 async def standalone_send(
@@ -236,9 +253,10 @@ def message_fingerprint(channel: str, body: str) -> str:
 def seed_channel_alias() -> None:
     """Advertise Fetch as a named, addressable send target.
 
-    The visible platform is now ``fetch``. Old auto-generated ``hermes_inbox``
-    aliases are pruned so the agent does not see both targets after an upgrade;
-    user-renamed legacy aliases are left untouched.
+    Manages only the ``fetch`` key in ``channel_aliases.json`` — every other
+    platform's aliases are left untouched. Stale auto-generated ``fetch`` aliases
+    (value still equal to ``CHANNEL_LABEL``) for a previous home channel are
+    pruned when the home channel changes; user-renamed aliases are preserved.
     """
     try:
         path = get_hermes_home() / "channel_aliases.json"
@@ -275,40 +293,12 @@ def seed_channel_alias() -> None:
             pruned.setdefault(slug, label)
         aliases[PLATFORM_NAME] = pruned
 
-        legacy = aliases.get(LEGACY_PLATFORM_NAME)
-        if isinstance(legacy, dict) and not _legacy_platform_enabled():
-            profile_slugs = {slug for slug, _label in profile_channels}
-            legacy_pruned = {
-                key: value
-                for key, value in legacy.items()
-                if not _is_auto_generated_legacy_alias(key, value, profile_slugs=profile_slugs)
-            }
-            if legacy_pruned:
-                aliases[LEGACY_PLATFORM_NAME] = legacy_pruned
-            else:
-                aliases.pop(LEGACY_PLATFORM_NAME, None)
-
         tmp = path.with_name(path.name + ".tmp")
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(aliases, fh, indent=2)
         os.replace(tmp, path)
     except Exception:
         logger.debug("Fetch channel alias seeding failed", exc_info=True)
-
-
-def _is_auto_generated_legacy_alias(
-    key: str,
-    value: Any,
-    *,
-    profile_slugs: set[str],
-) -> bool:
-    """Return True for legacy aliases produced by older plugin versions."""
-    if not isinstance(value, str):
-        return False
-    key = str(key)
-    if value == CHANNEL_LABEL:
-        return True
-    return key in profile_slugs and value == _label_for_channel(key)
 
 
 def _load_relay():
@@ -392,10 +382,10 @@ def _is_home_channel(channel: str) -> bool:
 
 
 def _store_home() -> Path:
-    """Resolve which Hermes home's state.db inbox sessions persist into.
+    """Resolve which Hermes home's state.db delivery sessions persist into.
 
     Defaults to the running process's HERMES_HOME. When
-    ``HERMES_INBOX_STORE_HOME`` is set, deliveries persist into THAT home's db
+    ``HERMES_FETCH_STORE_HOME`` is set, deliveries persist into THAT home's db
     instead — so a delivery run under a worker profile still lands in the
     relay-paired home the Fetch app reads.
     """
@@ -406,39 +396,34 @@ def _store_home() -> Path:
 
 
 def _channel_from_chat_id(chat_id) -> str:
-    """Normalize a gateway delivery target into the inbox channel slug.
+    """Normalize a gateway delivery target into the channel slug.
 
     The gateway normally splits a `platform:chat_id` target and passes just the
     chat_id half to `send` (so `fetch:researcher` -> chat_id="researcher"). This
-    also defends against the full `fetch:researcher` or legacy
-    `hermes_inbox:researcher` string arriving unsplit, by stripping a leading
-    platform prefix. Bare `fetch`, bare `hermes_inbox`, or an empty value falls
-    back to the configured home channel (`HERMES_INBOX_HOME_CHANNEL`), matching
+    also defends against the full `fetch:researcher` string arriving unsplit, by
+    stripping a leading `fetch:` prefix. Bare `fetch` or an empty value falls
+    back to the configured home channel (`HERMES_FETCH_HOME_CHANNEL`), matching
     what `env_enablement()` advertises.
     """
     raw = str(chat_id or "").strip()
-    if not raw or raw in {PLATFORM_NAME, LEGACY_PLATFORM_NAME}:
+    if not raw or raw == PLATFORM_NAME:
         return _home_channel()
-    for platform_name in (PLATFORM_NAME, LEGACY_PLATFORM_NAME):
-        prefix = f"{platform_name}:"
-        if raw.startswith(prefix):
-            raw = raw[len(prefix):].strip()
-            break
+    prefix = f"{PLATFORM_NAME}:"
+    if raw.startswith(prefix):
+        raw = raw[len(prefix):].strip()
     return raw or _home_channel()
 
 
 def _strip_platform_prefix(channel: str) -> str:
-    """Strip canonical or legacy Fetch platform prefixes from direct calls.
+    """Strip a leading `fetch:` platform prefix from direct calls.
 
-    Direct callers may pass either `fetch:researcher` or the legacy
-    `hermes_inbox:researcher`; both must land in `inbox_researcher` instead of
-    creating platform-prefixed duplicate threads.
+    Direct callers passing `fetch:researcher` must land in `inbox_researcher`
+    instead of creating a platform-prefixed duplicate thread.
     """
     raw = str(channel or "").strip()
-    for platform_name in (PLATFORM_NAME, LEGACY_PLATFORM_NAME):
-        prefix = f"{platform_name}:"
-        if raw.startswith(prefix):
-            return raw[len(prefix):].strip() or _home_channel()
+    prefix = f"{PLATFORM_NAME}:"
+    if raw.startswith(prefix):
+        return raw[len(prefix):].strip() or _home_channel()
     return raw
 
 
@@ -520,10 +505,6 @@ def _label_for_channel(channel: str) -> str:
 
 def _truthy(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _legacy_platform_enabled() -> bool:
-    return _truthy(os.environ.get("HERMES_INBOX_REGISTER_LEGACY_PLATFORM"))
 
 
 def _normalize_channel(channel: str) -> str:

@@ -13,6 +13,14 @@ sys.modules[_spec.name] = relay
 _spec.loader.exec_module(relay)
 
 
+def test_hermes_home_honors_fetch_store_home(monkeypatch, tmp_path):
+    """The relay client resolves credentials under HERMES_FETCH_STORE_HOME when
+    set, so a proactive push fired under a worker profile still uses the
+    relay-paired home's agent identity (matches _inbox._store_home())."""
+    monkeypatch.setenv("HERMES_FETCH_STORE_HOME", str(tmp_path))
+    assert relay._hermes_home() == tmp_path
+
+
 def _patch_transport(monkeypatch, handler):
     transport = httpx.MockTransport(handler)
     real = httpx.AsyncClient

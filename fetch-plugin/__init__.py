@@ -67,7 +67,8 @@ def _is_kanban_worker() -> bool:
 # Channels that are conversations with the user *through the Fetch app*. A reply
 # in one of these is a Fetch conversation the phone should show in its inbox.
 # Empty string = an untagged gateway chat (the Fetch app's dashboard-WS sessions
-# carry no channel tag). ``inbox`` = a hermes-inbox proactive delivery. Other
+# carry no channel tag). ``inbox`` = a Fetch proactive/cron delivery (the
+# internal source tag the iOS inbox keys off). Other
 # channels (``telegram``, ``discord``, ``cli``, ``tui``, ``cron`` for a cron
 # *run*, …) are not Fetch conversations, so their replies don't push to the
 # phone — the user is already on that surface, or it's an automated run.
