@@ -42,6 +42,7 @@ import asyncio
 import importlib.util
 import logging
 import os
+import shutil
 import sys
 import threading
 from pathlib import Path
@@ -147,6 +148,30 @@ _relay = _load_sibling("fetch_plugin_relay", "_relay.py")
 _pairing = _load_sibling("fetch_plugin_pairing", "_pairing.py")
 _runtime = _load_sibling("fetch_plugin_runtime", "_runtime.py")
 _inbox = _load_sibling("fetch_plugin_inbox", "_inbox.py")
+
+
+def _ensure_fetch_cards_skill() -> None:
+    """Expose the bundled fetch-cards skill to Hermes agents.
+
+    Plugin platform hints and Fetch cron jobs refer to `fetch-cards`, but Hermes
+    only discovers skills under HERMES_HOME/skills. Installing the plugin should
+    therefore make the bundled skill visible without requiring a separate manual
+    skill install. Never overwrite an existing user/custom skill.
+    """
+    bundled = Path(__file__).resolve().parent / "skills" / "fetch-cards"
+    if not (bundled / "SKILL.md").is_file():
+        return
+    try:
+        from hermes_cli.config import get_hermes_home
+
+        target = get_hermes_home() / "skills" / "fetch-cards"
+        if target.exists():
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(bundled, target)
+        log.info("Installed bundled Fetch skill: %s", target)
+    except Exception:
+        log.debug("Could not install bundled fetch-cards skill", exc_info=True)
 
 
 def _on_post_llm_call(*, session_id: str = "", assistant_response: str = "", **_kwargs) -> None:
@@ -271,6 +296,8 @@ def _spawn_tunnel() -> None:
 
 
 def register(ctx) -> None:
+    _ensure_fetch_cards_skill()
+
     # Push hooks: notify the app on turn completion / attention-needed.
     ctx.register_hook("post_llm_call", _on_post_llm_call)
     ctx.register_hook("pre_approval_request", _on_pre_approval_request)

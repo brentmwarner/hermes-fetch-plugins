@@ -30,6 +30,7 @@ def test_fetch_registers_exactly_one_platform(tmp_path, monkeypatch):
 
     fetch = _load_module("fetch_plugin_register_test", FETCH_PLUGIN_DIR / "__init__.py")
     monkeypatch.setattr(fetch._inbox, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(sys.modules["hermes_cli.config"], "get_hermes_home", lambda: tmp_path)
     registered = []
     ctx = types.SimpleNamespace(
         register_hook=lambda *args, **kwargs: None,
@@ -42,3 +43,17 @@ def test_fetch_registers_exactly_one_platform(tmp_path, monkeypatch):
     assert registered[0]["label"] == "Fetch"
     assert callable(registered[0]["setup_fn"])
     assert registered[0]["cron_deliver_env_var"] == "HERMES_FETCH_HOME_CHANNEL"
+    assert (tmp_path / "skills" / "fetch-cards" / "SKILL.md").is_file()
+
+
+def test_fetch_cards_skill_install_never_overwrites_existing_skill(tmp_path, monkeypatch):
+    fetch = _load_module("fetch_plugin_skill_install_test", FETCH_PLUGIN_DIR / "__init__.py")
+    target = tmp_path / "skills" / "fetch-cards"
+    target.mkdir(parents=True)
+    existing = target / "SKILL.md"
+    existing.write_text("custom skill", encoding="utf-8")
+    monkeypatch.setattr(sys.modules["hermes_cli.config"], "get_hermes_home", lambda: tmp_path)
+
+    fetch._ensure_fetch_cards_skill()
+
+    assert existing.read_text(encoding="utf-8") == "custom skill"
