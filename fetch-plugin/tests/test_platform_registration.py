@@ -25,6 +25,8 @@ def test_fetch_is_the_only_default_fetch_setup_platform(tmp_path, monkeypatch):
     fetch = _load_module("fetch_plugin_register_test", ROOT / "fetch-plugin" / "__init__.py")
     inbox = _load_module("hermes_inbox_register_test", ROOT / "hermes-inbox-plugin" / "__init__.py")
     monkeypatch.setattr(fetch._inbox, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(inbox, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(inbox, "_fetch_platform_already_registered", lambda: True)
     registered = []
     ctx = types.SimpleNamespace(
         register_hook=lambda *args, **kwargs: None,

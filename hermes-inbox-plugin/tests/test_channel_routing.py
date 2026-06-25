@@ -70,6 +70,27 @@ def test_default_channel_unchanged(monkeypatch):
     assert delivery.session_id == "inbox_default"
 
 
+def test_repeated_deliveries_to_same_slug_reuse_same_session(monkeypatch):
+    plugin = _load_plugin()
+    created = []
+
+    class _FakeDB:
+        def create_session(self, **kw): created.append(kw["session_id"])
+        def reopen_session(self, sid): pass
+        def set_session_title(self, sid, title): pass
+        def append_message(self, **kw): return len(created)
+        def close(self): pass
+
+    monkeypatch.setattr(plugin, "SessionDB", lambda **kw: _FakeDB())
+    monkeypatch.setattr(plugin, "_notify_proactive", lambda **kw: None)
+
+    first = plugin.deliver_to_inbox(channel="World Cup", content="match one", title="World Cup")
+    second = plugin.deliver_to_inbox(channel="World Cup", content="match two", title="World Cup")
+
+    assert first.session_id == second.session_id == "inbox_world-cup"
+    assert created == ["inbox_world-cup", "inbox_world-cup"]
+
+
 def test_adapter_get_chat_info_returns_basic_descriptor(monkeypatch):
     plugin = _load_plugin()
     adapter = object.__new__(plugin.HermesInboxAdapter)
@@ -148,8 +169,10 @@ def test_explicit_agent_channel_ignores_cron_wrapper(monkeypatch):
 
 @pytest.mark.parametrize("chat_id,expected", [
     ("researcher", "inbox_researcher"),
+    ("fetch:researcher", "inbox_researcher"),         # canonical unsplit target
     ("hermes_inbox:researcher", "inbox_researcher"),  # defensive: unsplit target
     ("", "inbox_default"),                             # bare empty → home
+    ("fetch", "inbox_default"),                        # bare canonical platform → home
     ("hermes_inbox", "inbox_default"),                 # bare platform → home
     (None, "inbox_default"),
 ])
@@ -162,12 +185,14 @@ def test_channel_from_chat_id_respects_configured_home_channel(monkeypatch):
     plugin = _load_plugin()
     monkeypatch.setenv("HERMES_INBOX_HOME_CHANNEL", "researcher")
     assert plugin._session_id_for_channel(plugin._channel_from_chat_id(None)) == "inbox_researcher"
+    assert plugin._session_id_for_channel(plugin._channel_from_chat_id("fetch:")) == "inbox_researcher"
     assert plugin._session_id_for_channel(plugin._channel_from_chat_id("hermes_inbox:")) == "inbox_researcher"
 
 
 def test_normalize_channel_strips_platform_prefix(monkeypatch):
     plugin = _load_plugin()
     monkeypatch.setenv("HERMES_INBOX_HOME_CHANNEL", "default")
+    assert plugin._normalize_channel("fetch:researcher") == "researcher"
     assert plugin._normalize_channel("hermes_inbox:researcher") == "researcher"
 
 
@@ -252,7 +277,7 @@ def test_seed_alias_includes_per_agent_channels(monkeypatch, tmp_path):
     plugin._seed_channel_alias()
 
     data = json.loads((home / "channel_aliases.json").read_text())
-    entries = data["hermes_inbox"]
+    entries = data["fetch"]
     assert entries["default"] == "Fetch"
     assert entries["researcher"] == "Researcher"
     assert entries["coder"] == "Coder"

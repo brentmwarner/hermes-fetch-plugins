@@ -236,10 +236,9 @@ def message_fingerprint(channel: str, body: str) -> str:
 def seed_channel_alias() -> None:
     """Advertise Fetch as a named, addressable send target.
 
-    The visible platform is now ``fetch``. Any old auto-generated
-    ``hermes_inbox`` alias named exactly ``Fetch`` is pruned so the agent does
-    not see both targets after an upgrade; user-renamed legacy aliases are left
-    untouched.
+    The visible platform is now ``fetch``. Old auto-generated ``hermes_inbox``
+    aliases are pruned so the agent does not see both targets after an upgrade;
+    user-renamed legacy aliases are left untouched.
     """
     try:
         path = get_hermes_home() / "channel_aliases.json"
@@ -271,16 +270,18 @@ def seed_channel_alias() -> None:
         # One alias per profile dir → per-agent DM target. The slug IS the
         # profile name; the label is Title-Cased for display. setdefault keeps
         # this non-destructive: a user-renamed profile alias is preserved.
-        for slug, label in _profile_channels():
+        profile_channels = _profile_channels()
+        for slug, label in profile_channels:
             pruned.setdefault(slug, label)
         aliases[PLATFORM_NAME] = pruned
 
         legacy = aliases.get(LEGACY_PLATFORM_NAME)
         if isinstance(legacy, dict) and not _legacy_platform_enabled():
+            profile_slugs = {slug for slug, _label in profile_channels}
             legacy_pruned = {
                 key: value
                 for key, value in legacy.items()
-                if value != CHANNEL_LABEL
+                if not _is_auto_generated_legacy_alias(key, value, profile_slugs=profile_slugs)
             }
             if legacy_pruned:
                 aliases[LEGACY_PLATFORM_NAME] = legacy_pruned
@@ -293,6 +294,21 @@ def seed_channel_alias() -> None:
         os.replace(tmp, path)
     except Exception:
         logger.debug("Fetch channel alias seeding failed", exc_info=True)
+
+
+def _is_auto_generated_legacy_alias(
+    key: str,
+    value: Any,
+    *,
+    profile_slugs: set[str],
+) -> bool:
+    """Return True for legacy aliases produced by older plugin versions."""
+    if not isinstance(value, str):
+        return False
+    key = str(key)
+    if value == CHANNEL_LABEL:
+        return True
+    return key in profile_slugs and value == _label_for_channel(key)
 
 
 def _load_relay():
@@ -394,29 +410,35 @@ def _channel_from_chat_id(chat_id) -> str:
 
     The gateway normally splits a `platform:chat_id` target and passes just the
     chat_id half to `send` (so `fetch:researcher` -> chat_id="researcher"). This
-    also defends against the full `fetch:researcher` string arriving unsplit, by
-    stripping a leading `fetch:` prefix. Bare `fetch` or an empty value falls
+    also defends against the full `fetch:researcher` or legacy
+    `hermes_inbox:researcher` string arriving unsplit, by stripping a leading
+    platform prefix. Bare `fetch`, bare `hermes_inbox`, or an empty value falls
     back to the configured home channel (`HERMES_INBOX_HOME_CHANNEL`), matching
     what `env_enablement()` advertises.
     """
     raw = str(chat_id or "").strip()
-    if not raw or raw == PLATFORM_NAME:
+    if not raw or raw in {PLATFORM_NAME, LEGACY_PLATFORM_NAME}:
         return _home_channel()
-    prefix = f"{PLATFORM_NAME}:"
-    if raw.startswith(prefix):
-        raw = raw[len(prefix):].strip()
+    for platform_name in (PLATFORM_NAME, LEGACY_PLATFORM_NAME):
+        prefix = f"{platform_name}:"
+        if raw.startswith(prefix):
+            raw = raw[len(prefix):].strip()
+            break
     return raw or _home_channel()
 
 
 def _strip_platform_prefix(channel: str) -> str:
-    """Strip a leading `fetch:` prefix so direct callers of `deliver_to_inbox`
-    can pass `fetch:researcher` and still land in `inbox_researcher` (not
-    `inbox_fetch-researcher`). A bare channel slug is returned unchanged.
+    """Strip canonical or legacy Fetch platform prefixes from direct calls.
+
+    Direct callers may pass either `fetch:researcher` or the legacy
+    `hermes_inbox:researcher`; both must land in `inbox_researcher` instead of
+    creating platform-prefixed duplicate threads.
     """
     raw = str(channel or "").strip()
-    prefix = f"{PLATFORM_NAME}:"
-    if raw.startswith(prefix):
-        return raw[len(prefix):].strip() or _home_channel()
+    for platform_name in (PLATFORM_NAME, LEGACY_PLATFORM_NAME):
+        prefix = f"{platform_name}:"
+        if raw.startswith(prefix):
+            return raw[len(prefix):].strip() or _home_channel()
     return raw
 
 

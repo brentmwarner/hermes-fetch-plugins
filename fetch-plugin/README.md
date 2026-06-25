@@ -67,9 +67,32 @@ Then open Fetch on the phone and allow notifications. No Apple account, no
 | `HERMES_FETCH_RELAY_REGISTRATION_TOKEN` | _(none)_ | Enrollment token, if the relay requires one. |
 | `HERMES_FETCH_TUNNEL_ENABLED` | enabled by Fetch relay setup | Keep the agent-side reverse tunnel active for relay pairing. |
 | `HERMES_FETCH_TUNNEL_DISABLE_DASHBOARD_AUTOSTART` | _(unset)_ | Opt out if you manage the local Hermes dashboard/API process yourself. |
+| `HERMES_INBOX_ENABLED` | set by Fetch setup | Enable Fetch as a cron/webhook delivery target. |
+| `HERMES_INBOX_HOME_CHANNEL` | `default` | Default Fetch inbox channel used by bare `--deliver fetch`. |
+| `HERMES_INBOX_STORE_HOME` | running profile home | Optional relay-paired Hermes home whose `state.db` receives inbox sessions. |
 
 For local development, run the relay from `server/push-relay/` and set
 `HERMES_FETCH_RELAY_URL=http://127.0.0.1:8787`.
+
+## Inbox delivery and thread affinity
+
+Fetch owns the canonical Hermes delivery surface for proactive and cron output:
+
+```bash
+hermes cron create "every 15m" "Summarize the World Cup" --deliver fetch:world-cup
+```
+
+Delivery channels are normalized before persistence. Both `fetch:world-cup` and
+the legacy `hermes_inbox:world-cup` spelling resolve to the same channel slug and
+therefore the same deterministic Hermes session, `inbox_world-cup`. Bare
+`--deliver fetch` uses `HERMES_INBOX_HOME_CHANNEL` (default `default`). Cron
+responses delivered to the home channel are split by cron job id
+(`inbox_cron-<job-id>`) so each scheduled job gets a stable thread instead of all
+proactive output collapsing into one inbox.
+
+This channel-thread affinity is enforced in the plugin because Fetch owns the
+phone-side inbox UX; end users should not need to manually pick Hermes thread ids
+or understand profile-specific platform names.
 
 ## Notes & limits
 

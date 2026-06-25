@@ -3,8 +3,9 @@
 The platform's ``send`` operation persists a message into Hermes' canonical
 session database and emits an iOS proactive push tied to that session. This
 lets cron jobs and webhook direct-delivery routes target the Fetch iOS app.
-The visible platform moved to ``fetch``; this plugin keeps the old
-``hermes_inbox`` target available only when explicitly opted in.
+The visible platform moved to ``fetch``; this plugin exposes that canonical
+surface when the productized Fetch plugin is not present, and keeps the old
+``hermes_inbox`` target available when explicitly opted in.
 """
 
 from __future__ import annotations
@@ -61,7 +62,9 @@ def _load_relay():
     _relay_module = module
     return _relay_module
 
-PLATFORM_NAME = "hermes_inbox"
+LEGACY_PLATFORM_NAME = "hermes_inbox"
+PLATFORM_NAME = LEGACY_PLATFORM_NAME
+CANONICAL_PLATFORM_NAME = "fetch"
 HOME_CHANNEL_ENV = "HERMES_INBOX_HOME_CHANNEL"
 ENABLED_ENV = "HERMES_INBOX_ENABLED"
 LEGACY_PLATFORM_ENV = "HERMES_INBOX_REGISTER_LEGACY_PLATFORM"
@@ -106,8 +109,8 @@ _cron_channel_cache: dict[str, str] = {}
 class HermesInboxAdapter(BasePlatformAdapter):
     """Gateway adapter that routes outbound sends to Hermes session history."""
 
-    def __init__(self, config: PlatformConfig):
-        super().__init__(config, Platform(PLATFORM_NAME))
+    def __init__(self, config: PlatformConfig, platform_name: str = PLATFORM_NAME):
+        super().__init__(config, Platform(platform_name))
 
     async def connect(self) -> bool:
         self._mark_connected()
@@ -326,17 +329,20 @@ def _channel_from_chat_id(chat_id) -> str:
     """Normalize a gateway delivery target into the inbox channel slug.
 
     The gateway normally splits a `platform:chat_id` target and passes just the
-    chat_id half to `send` (so `hermes_inbox:researcher` → chat_id="researcher").
-    This also defends against the full `hermes_inbox:researcher` string arriving
-    unsplit, by stripping a leading `hermes_inbox:` prefix. Bare `hermes_inbox`
-    or an empty value falls back to the home channel.
+    chat_id half to `send` (so `fetch:researcher` or
+    `hermes_inbox:researcher` → chat_id="researcher"). This also defends
+    against the full target string arriving unsplit, by stripping either Fetch
+    platform prefix. Bare `fetch`, bare `hermes_inbox`, or an empty value falls
+    back to the home channel.
     """
     raw = str(chat_id or "").strip()
-    if not raw or raw == PLATFORM_NAME:
+    if not raw or raw in {CANONICAL_PLATFORM_NAME, LEGACY_PLATFORM_NAME}:
         return _home_channel()
-    prefix = f"{PLATFORM_NAME}:"
-    if raw.startswith(prefix):
-        raw = raw[len(prefix):].strip()
+    for platform_name in (CANONICAL_PLATFORM_NAME, LEGACY_PLATFORM_NAME):
+        prefix = f"{platform_name}:"
+        if raw.startswith(prefix):
+            raw = raw[len(prefix):].strip()
+            break
     return raw or _home_channel()
 
 
@@ -352,9 +358,11 @@ def _legacy_platform_enabled() -> bool:
 
 def _normalize_channel(channel: str) -> str:
     clean = (channel or "").strip()
-    prefix = f"{PLATFORM_NAME}:"
-    if clean.startswith(prefix):
-        clean = clean[len(prefix):].strip()
+    for platform_name in (CANONICAL_PLATFORM_NAME, LEGACY_PLATFORM_NAME):
+        prefix = f"{platform_name}:"
+        if clean.startswith(prefix):
+            clean = clean[len(prefix):].strip()
+            break
     return clean or _home_channel()
 
 
@@ -462,10 +470,12 @@ def _seed_channel_alias() -> None:
     target even before the first message arrives.
 
     Also seeds one alias per Hermes profile (e.g. ``researcher``, ``coder``) so
-    each agent is addressable as its own DM target — ``hermes_inbox:researcher``
+    each agent is addressable as its own DM target — ``fetch:researcher``
     → "Researcher". This is what lets a cron job deliver to a specific agent's
-    DM (`--deliver hermes_inbox:researcher`) and the agent proactively pick a DM
-    (`send_message(target="hermes_inbox:researcher")`).
+    DM (`--deliver fetch:researcher`) and the agent proactively pick a DM
+    (`send_message(target="fetch:researcher")`). The legacy `hermes_inbox:`
+    prefix is still accepted by delivery normalization; it is auto-seeded only
+    when `HERMES_INBOX_REGISTER_LEGACY_PLATFORM` is enabled.
 
     Idempotent and non-destructive: add a channel only when absent; never
     overwrite a name the user changed, nor other platforms' aliases.
@@ -488,7 +498,7 @@ def _seed_channel_alias() -> None:
                 logger.debug("Hermes Inbox alias seed skipped: channel_aliases top-level is not a dict")
                 return
             aliases = loaded
-        entries = aliases.get(PLATFORM_NAME)
+        entries = aliases.get(CANONICAL_PLATFORM_NAME)
         if entries is None:
             entries = {}
         elif not isinstance(entries, dict):
@@ -507,11 +517,40 @@ def _seed_channel_alias() -> None:
         # One alias per profile dir → per-agent DM target. The slug IS the
         # profile name; the label is Title-Cased for display. setdefault keeps
         # this non-destructive: a user-renamed profile alias is preserved.
-        for slug, label in _profile_channels():
+        profile_channels = _profile_channels()
+        for slug, label in profile_channels:
             pruned.setdefault(slug, label)
-        if pruned == entries:
-            return  # nothing changed
-        aliases[PLATFORM_NAME] = pruned
+        aliases[CANONICAL_PLATFORM_NAME] = pruned
+
+        # Prune old auto-generated Hermes Inbox aliases so the agent sees one
+        # canonical target. User-renamed legacy aliases remain as explicit
+        # back-compat escape hatches.
+        legacy = aliases.get(LEGACY_PLATFORM_NAME)
+        if _legacy_platform_enabled():
+            if legacy is None:
+                legacy = {}
+            if isinstance(legacy, dict):
+                legacy.setdefault(channel, CHANNEL_LABEL)
+                for slug, label in profile_channels:
+                    legacy.setdefault(slug, label)
+                aliases[LEGACY_PLATFORM_NAME] = legacy
+            else:
+                logger.debug("Hermes Inbox legacy alias seed skipped: platform aliases entry is not a dict")
+        elif isinstance(legacy, dict):
+            profile_slugs = {slug for slug, _label in profile_channels}
+            legacy_pruned = {
+                key: value
+                for key, value in legacy.items()
+                if not _is_auto_generated_legacy_alias(
+                    key,
+                    value,
+                    profile_slugs=profile_slugs,
+                )
+            }
+            if legacy_pruned:
+                aliases[LEGACY_PLATFORM_NAME] = legacy_pruned
+            else:
+                aliases.pop(LEGACY_PLATFORM_NAME, None)
         tmp = path.with_name(path.name + ".tmp")
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(aliases, fh, indent=2)
@@ -539,25 +578,56 @@ def _profile_channels() -> list[tuple[str, str]]:
         return []
 
 
+def _is_auto_generated_legacy_alias(
+    key: str,
+    value: Any,
+    *,
+    profile_slugs: set[str],
+) -> bool:
+    """Return True for legacy aliases produced by older plugin versions."""
+    if not isinstance(value, str):
+        return False
+    key = str(key)
+    if value == CHANNEL_LABEL:
+        return True
+    return key in profile_slugs and value == _profile_label(key)
+
+
 def _profile_label(slug: str) -> str:
     """Human-readable label for a profile slug: Title Case the name."""
     return slug.replace("_", " ").replace("-", " ").title()
 
 
-def register(ctx):
-    if _is_enabled() and _legacy_platform_enabled():
-        _seed_channel_alias()
-    if not _legacy_platform_enabled():
-        logger.info(
-            "Fetch Inbox legacy platform hidden; use the unified `fetch` platform "
-            "or set %s=1 to expose `hermes_inbox`.",
-            LEGACY_PLATFORM_ENV,
+def _fetch_platform_already_registered() -> bool:
+    try:
+        from gateway.platform_registry import platform_registry
+    except ImportError:
+        return False
+
+    is_registered = getattr(platform_registry, "is_registered", None)
+    if not callable(is_registered):
+        return False
+    try:
+        return bool(is_registered(CANONICAL_PLATFORM_NAME))
+    except Exception:
+        logger.warning(
+            "Unexpected error checking fetch platform registration; skipping registration to avoid duplicate",
+            exc_info=True,
         )
-        return
+        return True
+
+
+def _productized_fetch_plugin_available() -> bool:
+    """Return True when the first-class Fetch plugin is installed beside us."""
+    here = Path(__file__).resolve().parent
+    return any((here.parent / dirname / "__init__.py").exists() for dirname in ("fetch", "fetch-plugin"))
+
+
+def _register_platform_entry(ctx, *, name: str, label: str, platform_hint: str, emoji: str) -> None:
     ctx.register_platform(
-        name=PLATFORM_NAME,
-        label=DEFAULT_TITLE,
-        adapter_factory=lambda cfg: HermesInboxAdapter(cfg),
+        name=name,
+        label=label,
+        adapter_factory=lambda cfg, platform_name=name: HermesInboxAdapter(cfg, platform_name),
         check_fn=check_requirements,
         validate_config=validate_config,
         required_env=[],
@@ -565,6 +635,37 @@ def register(ctx):
         cron_deliver_env_var=HOME_CHANNEL_ENV,
         standalone_sender_fn=_standalone_send,
         max_message_length=8000,
-        platform_hint="Fetch Inbox delivers messages into the Fetch iOS app.",
-        emoji="📱",
+        platform_hint=platform_hint,
+        emoji=emoji,
+    )
+
+
+def register(ctx):
+    if _is_enabled():
+        _seed_channel_alias()
+    if (
+        _is_enabled()
+        and not _fetch_platform_already_registered()
+        and not _productized_fetch_plugin_available()
+    ):
+        _register_platform_entry(
+            ctx,
+            name=CANONICAL_PLATFORM_NAME,
+            label="Fetch",
+            platform_hint="Fetch delivers messages into the Hermes iOS app.",
+            emoji="📱",
+        )
+    if not _legacy_platform_enabled():
+        logger.info(
+            "Fetch Inbox legacy platform hidden; use the unified `fetch` platform "
+            "or set %s=1 to expose `hermes_inbox`.",
+            LEGACY_PLATFORM_ENV,
+        )
+        return
+    _register_platform_entry(
+        ctx,
+        name=LEGACY_PLATFORM_NAME,
+        label=DEFAULT_TITLE,
+        platform_hint="Hermes Inbox is a legacy alias for Fetch inbox delivery.",
+        emoji="H",
     )

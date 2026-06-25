@@ -111,6 +111,22 @@ def test_standalone_send_routes_named_channel(monkeypatch):
     assert result["session_id"] == "inbox_researcher"
 
 
+def test_standalone_send_accepts_legacy_hermes_inbox_target(monkeypatch):
+    """Old cron/send targets keep working after Fetch becomes canonical."""
+    inbox = _load_inbox()
+    calls = []
+    monkeypatch.setattr(
+        inbox,
+        "deliver_to_inbox",
+        lambda **kw: calls.append(kw) or inbox.InboxDelivery(session_id="inbox_researcher", message_id=9),
+    )
+
+    result = asyncio.run(inbox.standalone_send(None, "hermes_inbox:researcher", "standup"))
+
+    assert calls == [{"channel": "researcher", "content": "standup", "title": "Researcher", "thread_id": None}]
+    assert result["session_id"] == "inbox_researcher"
+
+
 def test_adapter_get_chat_info_returns_basic_descriptor(monkeypatch):
     inbox = _load_inbox()
     adapter = object.__new__(inbox.FetchInboxAdapter)
@@ -298,6 +314,33 @@ def test_deliver_to_inbox_strips_platform_prefix_for_direct_callers(monkeypatch)
     assert delivery.session_id == "inbox_researcher"
 
 
+def test_deliver_to_inbox_strips_legacy_platform_prefix_for_direct_callers(monkeypatch):
+    """Direct callers passing `hermes_inbox:researcher` land in the same Fetch thread."""
+    inbox = _load_inbox()
+    monkeypatch.setattr(inbox, "SessionDB", lambda **kw: _FakeDB())
+    monkeypatch.setattr(inbox, "_notify_proactive", lambda **kw: None)
+    delivery = inbox.deliver_to_inbox(channel="hermes_inbox:researcher", content="hi", title="Researcher")
+    assert delivery.session_id == "inbox_researcher"
+
+
+def test_repeated_deliveries_to_same_slug_reuse_same_session(monkeypatch):
+    inbox = _load_inbox()
+    created = []
+
+    class _CaptureDB(_FakeDB):
+        def create_session(self, **kw):
+            created.append(kw["session_id"])
+
+    monkeypatch.setattr(inbox, "SessionDB", lambda **kw: _CaptureDB())
+    monkeypatch.setattr(inbox, "_notify_proactive", lambda **kw: None)
+
+    first = inbox.deliver_to_inbox(channel="World Cup", content="match one", title="World Cup")
+    second = inbox.deliver_to_inbox(channel="World Cup", content="match two", title="World Cup")
+
+    assert first.session_id == second.session_id == "inbox_world-cup"
+    assert created == ["inbox_world-cup", "inbox_world-cup"]
+
+
 def test_seed_includes_per_agent_profile_aliases(monkeypatch, tmp_path):
     inbox = _load_inbox()
     home = tmp_path
@@ -315,6 +358,53 @@ def test_seed_includes_per_agent_profile_aliases(monkeypatch, tmp_path):
     assert entries["default"] == "Fetch"
     assert entries["researcher"] == "Researcher"
     assert entries["coder"] == "Coder"
+
+
+def test_seed_prunes_legacy_auto_profile_aliases(monkeypatch, tmp_path):
+    inbox = _load_inbox()
+    home = tmp_path
+    (home / "profiles").mkdir()
+    (home / "profiles" / "researcher").mkdir()
+    (home / "profiles" / "coder").mkdir()
+    monkeypatch.setattr(inbox, "get_hermes_home", lambda: home)
+    monkeypatch.setattr(inbox, "_store_home", lambda: home)
+    monkeypatch.setenv("HERMES_INBOX_HOME_CHANNEL", "default")
+    existing = {
+        "hermes_inbox": {
+            "default": "Fetch",
+            "researcher": "Researcher",
+            "coder": "Coder",
+            "custom": "My Custom Legacy Target",
+            "world-cup": "World Cup",
+        }
+    }
+    (home / ALIASES).write_text(json.dumps(existing), encoding="utf-8")
+
+    inbox.seed_channel_alias()
+
+    data = json.loads((home / ALIASES).read_text(encoding="utf-8"))
+    assert data == {
+        "fetch": {"default": "Fetch", "researcher": "Researcher", "coder": "Coder"},
+        "hermes_inbox": {"custom": "My Custom Legacy Target", "world-cup": "World Cup"},
+    }
+
+
+def test_seed_prunes_stale_legacy_home_alias_after_home_channel_change(monkeypatch, tmp_path):
+    """Stale legacy home alias for a non-current channel (e.g. `leads`) must be
+    pruned even when it no longer matches the current home slug."""
+    inbox = _load_inbox()
+    monkeypatch.setattr(inbox, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setenv("HERMES_INBOX_HOME_CHANNEL", "default")
+    # `leads` was the home channel in the old install; value is the auto-generated marker.
+    existing = {"hermes_inbox": {"leads": "Fetch"}}
+    (tmp_path / ALIASES).write_text(json.dumps(existing), encoding="utf-8")
+
+    inbox.seed_channel_alias()
+
+    data = json.loads((tmp_path / ALIASES).read_text(encoding="utf-8"))
+    assert data == {"fetch": {"default": "Fetch"}}, (
+        "stale legacy home alias 'leads' should be pruned; only the current fetch alias should remain"
+    )
 
 
 class _FakeDB:
