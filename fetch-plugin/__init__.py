@@ -78,8 +78,13 @@ def _is_kanban_worker() -> bool:
 # "is this one of MY channels" rather than enumerating Hermes internals to
 # exclude. It can't rot when Hermes adds a new background job type, because a
 # new job type is simply not in this set.
-FETCH_CHANNELS: frozenset[str] = frozenset({"", "fetch", "fetch-ios", "ios", "mobile", "inbox"})
+#
+# FETCH_APP_SOURCES is the durable per-session ``source`` tag the Fetch app
+# stamps on its own chats; FETCH_CHANNELS is that same set plus the empty-string
+# untagged dashboard-WS chat. Deriving one from the other keeps the two from
+# drifting when a new Fetch source is added.
 FETCH_APP_SOURCES: frozenset[str] = frozenset({"fetch", "fetch-ios", "ios", "mobile", "inbox"})
+FETCH_CHANNELS: frozenset[str] = FETCH_APP_SOURCES | {""}
 
 _FETCH_IOS_TURN_CONTEXT = """[Fetch iOS client context - do not quote or mention this block.
 Client: Fetch iOS app.
@@ -89,6 +94,14 @@ For charts, graphs, reports, dashboards, token usage, rankings, trends, metrics,
 Do not use ASCII/text bar charts, Unicode block charts, SVG links, inline SVG, HTML artifacts, Mermaid diagrams, image links, or external chart files unless the user explicitly asks for those formats.
 For token/usage reports, prefer a card with `stats` plus `chart` or `blocks` containing a native chart.
 ]"""
+
+
+# A session's ``source`` is immutable once persisted, but both the pre_llm_call
+# and post_llm_call hooks resolve it on every turn. Memoize resolved sources so
+# a long conversation doesn't reopen state.db on each turn. Only successfully
+# resolved (string) sources are cached; a None lookup miss is left uncached so a
+# not-yet-persisted session is re-queried until its row appears.
+_SESSION_SOURCE_CACHE: dict[str, str] = {}
 
 
 def _session_source(session_id: str | None) -> str | None:
@@ -101,6 +114,9 @@ def _session_source(session_id: str | None) -> str | None:
     """
     if not session_id:
         return None
+    cached = _SESSION_SOURCE_CACHE.get(session_id)
+    if cached is not None:
+        return cached
     db = None
     try:
         from hermes_state import SessionDB
@@ -119,7 +135,10 @@ def _session_source(session_id: str | None) -> str | None:
     if not row:
         return None
     source = row.get("source")
-    return source if isinstance(source, str) else None
+    if not isinstance(source, str):
+        return None
+    _SESSION_SOURCE_CACHE[session_id] = source
+    return source
 
 
 def _is_fetch_app_session(session_id: str | None) -> bool:
