@@ -133,3 +133,61 @@ def test_fetch_channels_set_is_app_identity_not_hermes_internals(sent):
     assert "dispatch" not in plugin.FETCH_CHANNELS
     assert "weixin" not in plugin.FETCH_CHANNELS
     assert "cron" not in plugin.FETCH_CHANNELS
+
+
+def test_fetch_channels_derives_from_app_sources(sent):
+    plugin, _ = sent
+    # FETCH_CHANNELS is FETCH_APP_SOURCES plus the empty-string untagged chat;
+    # deriving keeps the two from drifting when a new Fetch source is added.
+    assert plugin.FETCH_CHANNELS == plugin.FETCH_APP_SOURCES | {""}
+    assert "" not in plugin.FETCH_APP_SOURCES
+
+
+def test_session_source_caches_resolved_source(sent, monkeypatch):
+    """A session's source is immutable, so it is read from state.db once and
+    then served from the cache — the pre/post hooks both resolve it per turn."""
+    plugin, _ = sent
+    import hermes_state
+
+    opens = []
+
+    class _CountingDB:
+        def __init__(self, *a, **kw):
+            opens.append(1)
+
+        def get_session(self, session_id):
+            return {"source": "fetch"}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(hermes_state, "SessionDB", _CountingDB)
+
+    assert plugin._session_source("sess-1") == "fetch"
+    assert plugin._session_source("sess-1") == "fetch"
+    assert opens == [1], "second lookup should hit the cache, not reopen state.db"
+
+
+def test_session_source_does_not_cache_lookup_miss(sent, monkeypatch):
+    """A not-yet-persisted session returns None and must stay uncached, so the
+    source is picked up once the row appears."""
+    plugin, _ = sent
+    import hermes_state
+
+    rows: dict[str, dict | None] = {"sess-2": None}
+
+    class _DB:
+        def __init__(self, *a, **kw):
+            pass
+
+        def get_session(self, session_id):
+            return rows.get(session_id)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(hermes_state, "SessionDB", _DB)
+
+    assert plugin._session_source("sess-2") is None
+    rows["sess-2"] = {"source": "fetch"}
+    assert plugin._session_source("sess-2") == "fetch"

@@ -69,7 +69,7 @@ def test_hint_lists_every_cardspec_field(registered_platform):
     renderer but the agent shouldn't reach for them."""
     hint = registered_platform["platform_hint"]
     for field in ("title", "subtitle", "image", "url", "footer",
-                  "stats", "items", "cards"):
+                  "stats", "items", "cards", "chart", "blocks"):
         assert field in hint, f"platform_hint missing card field '{field}'"
 
 
@@ -80,6 +80,20 @@ def test_hint_carries_a_worked_example(registered_platform):
     assert '"title"' in hint
     assert '"stats"' in hint
     assert '"items"' in hint
+
+
+def test_hint_documents_native_chart_schema(registered_platform):
+    hint = registered_platform["platform_hint"]
+    for token in ("horizontalBars", "groupedBars", "heatmap", "values", "labels"):
+        assert token in hint, f"platform_hint missing native chart token '{token}'"
+
+
+def test_hint_forbids_non_native_chart_fallbacks(registered_platform):
+    hint = registered_platform["platform_hint"]
+    for token in ("ASCII", "SVG", "HTML", "Mermaid", "image links"):
+        assert token in hint, f"platform_hint must explicitly forbid {token} chart fallbacks"
+    assert "native-card contract wins" in hint, \
+        "Fetch chart contract must override generic Markdown/terminal/SVG chart guidance"
 
 
 def test_hint_points_to_fetch_cards_skill(registered_platform):

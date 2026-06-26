@@ -71,6 +71,74 @@ Notice the long "us-west-2 (Oregon)" value shifts the whole stat block into
 key-value mode. If you want some stats as columns and some as rows, split
 into two cards.
 
+## 2a. Usage report with native chart
+
+Use this when the user asks for a usage/token report, a chart card, a ranking,
+or a trend. The `chart` object is rendered by Fetch's native charting library.
+Do not use ASCII bars in Markdown for this pattern.
+
+```card
+{
+  "title": "Fetch / Hermes Usage Report",
+  "subtitle": "Last 7 days",
+  "stats": [
+    { "label": "Sessions", "value": 115 },
+    { "label": "Total tokens", "value": "12.5M" },
+    { "label": "Prompt", "value": "11.8M" },
+    { "label": "Completion", "value": "706K" }
+  ],
+  "chart": {
+    "type": "horizontalBars",
+    "values": [1189520, 912472, 554273, 497174, 401152],
+    "labels": [
+      "cmux manager",
+      "/learn command",
+      "cmux manager",
+      "untitled",
+      "cmux manager"
+    ],
+    "highlight": 0
+  },
+  "footer": "Cache read: 49.9M · cache write: 0"
+}
+```
+
+For a single card with KPI totals, chart, and a paragraph summary, use a
+`blocks` stack so the body order is explicit:
+
+```card
+{
+  "title": "Token usage",
+  "subtitle": "Last 7 days",
+  "blocks": [
+    {
+      "type": "stats",
+      "stats": [
+        { "label": "Total", "value": "12.5M" },
+        { "label": "Prompt", "value": "11.8M" },
+        { "label": "Completion", "value": "706K" },
+        { "label": "Cache read", "value": "49.9M" }
+      ]
+    },
+    {
+      "type": "chart",
+      "chart": {
+        "type": "horizontalBars",
+        "values": [1189520, 912472, 554273, 497174, 401152],
+        "labels": ["cmux manager", "/learn command", "cmux manager", "untitled", "cmux manager"],
+        "highlight": 0
+      }
+    },
+    {
+      "type": "text",
+      "title": "Summary",
+      "text": "The largest recent session was the June 24 cmux manager run at 1.19M tokens."
+    }
+  ],
+  "footer": "Total tokens = prompt + completion; cache is shown separately."
+}
+```
+
 ## 3. Link carousel
 
 The "hotels in Paris" layout. Use `cards` (plural) to render a horizontal
