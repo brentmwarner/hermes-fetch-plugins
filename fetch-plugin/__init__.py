@@ -78,7 +78,17 @@ def _is_kanban_worker() -> bool:
 # "is this one of MY channels" rather than enumerating Hermes internals to
 # exclude. It can't rot when Hermes adds a new background job type, because a
 # new job type is simply not in this set.
-FETCH_CHANNELS: frozenset[str] = frozenset({"", "fetch", "ios", "mobile", "inbox"})
+FETCH_CHANNELS: frozenset[str] = frozenset({"", "fetch", "fetch-ios", "ios", "mobile", "inbox"})
+FETCH_APP_SOURCES: frozenset[str] = frozenset({"fetch", "fetch-ios", "ios", "mobile", "inbox"})
+
+_FETCH_IOS_TURN_CONTEXT = """[Fetch iOS client context - do not quote or mention this block.
+Client: Fetch iOS app.
+Output surface: native mobile chat, not a terminal, shell, TUI, browser, or file artifact.
+Fetch supports standard Markdown plus fenced `card` JSON blocks rendered as native UI.
+For charts, graphs, reports, dashboards, token usage, rankings, trends, metrics, tables, or other structured visual summaries, emit a fenced ```card JSON payload using Fetch native generative UI.
+Do not use ASCII/text bar charts, Unicode block charts, SVG links, inline SVG, HTML artifacts, Mermaid diagrams, image links, or external chart files unless the user explicitly asks for those formats.
+For token/usage reports, prefer a card with `stats` plus `chart` or `blocks` containing a native chart.
+]"""
 
 
 def _session_source(session_id: str | None) -> str | None:
@@ -110,6 +120,19 @@ def _session_source(session_id: str | None) -> str | None:
         return None
     source = row.get("source")
     return source if isinstance(source, str) else None
+
+
+def _is_fetch_app_session(session_id: str | None) -> bool:
+    """True when the persisted session is owned by the Fetch app surface.
+
+    The iOS app currently speaks the shared dashboard/TUI websocket protocol,
+    and that gateway may instantiate the underlying agent with a generic TUI
+    platform value. The durable signal we own is the session row's source tag,
+    which Fetch stamps as `fetch` on app-created chats and `inbox` on app-owned
+    proactive threads.
+    """
+    source = (_session_source(session_id) or "").strip().lower()
+    return source in FETCH_APP_SOURCES
 
 
 def _platform_from_session_key(session_key: str) -> str | None:
@@ -233,6 +256,21 @@ def _on_pre_approval_request(
     )
 
 
+def _on_pre_llm_call(*, session_id: str = "", **_kwargs):
+    """Inject Fetch's native mobile output contract into every Fetch turn.
+
+    Hermes' dashboard/TUI websocket path can build the agent with a generic TUI
+    platform even when the real client is Fetch iOS. The supported
+    `pre_llm_call` hook lets the plugin add API-call-time context to the current
+    user message without persisting it or showing it in the app transcript.
+    """
+    if _is_kanban_worker():
+        return None
+    if not _is_fetch_app_session(session_id or None):
+        return None
+    return {"context": _FETCH_IOS_TURN_CONTEXT}
+
+
 # Truthy spellings the model may pass for a boolean tool arg (kanban_create's
 # `triage` arrives as a JSON bool, but be tolerant of stringified forms).
 _TRUTHY_ARG = frozenset({True, 1, "1", "true", "True", "yes", "on"})
@@ -322,6 +360,7 @@ def register(ctx) -> None:
     _ensure_fetch_cards_skill()
 
     # Push hooks: notify the app on turn completion / attention-needed.
+    ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     ctx.register_hook("post_llm_call", _on_post_llm_call)
     ctx.register_hook("pre_approval_request", _on_pre_approval_request)
     # Quality gate: require a real `body` on agent-created kanban tasks (FET-16).
@@ -370,6 +409,16 @@ def register(ctx) -> None:
                     "  stats: [{label, value}]         big-number columns (value may be string, number, or bool)\n"
                     "  items: [{title, subtitle, value, url}]   tappable list rows\n"
                     "  cards: [{title, subtitle, image, badge, url}]   horizontal carousel sub-cards\n"
+                    "  chart: {type, values, labels, legend, highlight, caption, value, series}   native chart body\n"
+                    "  blocks: [{type, ...}]           ordered composable body blocks; when present, blocks replace stats/chart/items\n"
+                    "Native chart types: bars, line, diverging, meter, groupedBars, horizontalBars, heatmap. "
+                    "Fetch chart/report contract: when the user asks for a chart, graph, report, dashboard, usage, "
+                    "token, ranking, trend, or visual breakdown in Fetch, emit a `card` fence with a native `chart` "
+                    "or `blocks` chart. Do not answer with ASCII/text bars, SVG links, HTML artifacts, Mermaid, "
+                    "image links, or external chart files unless the user explicitly asks for those formats. "
+                    "For ranked token/usage reports, use `chart:{\"type\":\"horizontalBars\",\"values\":[...],\"labels\":[...]}` "
+                    "or a `blocks` stack with `stats`, `chart`, and `text` blocks. If another skill suggests a "
+                    "Markdown/terminal/SVG chart, the Fetch native-card contract wins. "
                     "Example — daily brief:\n"
                     "```card\n"
                     "{\"title\":\"Today\","

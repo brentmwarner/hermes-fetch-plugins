@@ -152,6 +152,16 @@ def test_adapter_get_chat_info_returns_basic_descriptor(monkeypatch):
     assert researcher == {"name": "Researcher", "type": "dm"}
 
 
+def test_adapter_connect_accepts_reconnect_keyword():
+    inbox = _load_inbox()
+    adapter = object.__new__(inbox.FetchInboxAdapter)
+    calls = []
+    adapter._mark_connected = lambda: calls.append("connected")
+
+    assert asyncio.run(adapter.connect(is_reconnect=True)) is True
+    assert calls == ["connected"]
+
+
 def test_adapter_get_chat_info_preserves_title_for_custom_home_channel(monkeypatch):
     """When HERMES_FETCH_HOME_CHANNEL is a non-default slug, get_chat_info should
     still return DEFAULT_TITLE (not the title-cased slug) for the home channel."""

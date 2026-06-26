@@ -82,7 +82,7 @@ class FetchInboxAdapter(BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform(PLATFORM_NAME))
 
-    async def connect(self) -> bool:
+    async def connect(self, *, is_reconnect: bool = False) -> bool:
         self._mark_connected()
         return True
 
