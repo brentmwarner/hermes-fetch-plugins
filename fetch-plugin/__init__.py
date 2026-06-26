@@ -150,13 +150,41 @@ _runtime = _load_sibling("fetch_plugin_runtime", "_runtime.py")
 _inbox = _load_sibling("fetch_plugin_inbox", "_inbox.py")
 
 
+# Sentinels a directory the plugin installed itself (vs. a user/custom skill it
+# must never touch). Written into every plugin-managed copy on install.
+_MANAGED_MARKER = ".fetch-plugin-managed"
+
+
+def _install_managed_skill(bundled: Path, target: Path) -> None:
+    """Install or refresh a plugin-managed copy of a bundled skill.
+
+    Copies the plugin-owned ``bundled`` skill tree into ``target``. Each copy
+    the plugin installs is marked with a sentinel file and refreshed from the
+    bundled source on every call, so a newer bundled skill propagates on the
+    next plugin load. A pre-existing ``target`` without the sentinel is treated
+    as a user/custom skill and is left untouched.
+    """
+    if not (bundled / "SKILL.md").is_file():
+        return
+    if target.exists() and not (target / _MANAGED_MARKER).is_file():
+        return  # user-customized skill — never overwrite it
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        shutil.rmtree(target)
+    shutil.copytree(bundled, target)
+    (target / _MANAGED_MARKER).write_text("", encoding="utf-8")
+    log.info("Installed bundled Fetch skill: %s", target)
+
+
 def _ensure_fetch_cards_skill() -> None:
     """Expose the bundled fetch-cards skill to Hermes agents.
 
     Plugin platform hints and Fetch cron jobs refer to `fetch-cards`, but Hermes
     only discovers skills under HERMES_HOME/skills. Installing the plugin should
     therefore make the bundled skill visible without requiring a separate manual
-    skill install. Never overwrite an existing user/custom skill.
+    skill install. Plugin-managed installs are refreshed on every load so the
+    bundled skill stays aligned with the app schema; a skill that a user has
+    customized (no plugin sentinel) is never touched.
     """
     bundled = Path(__file__).resolve().parent / "skills" / "fetch-cards"
     if not (bundled / "SKILL.md").is_file():
@@ -164,12 +192,7 @@ def _ensure_fetch_cards_skill() -> None:
     try:
         from hermes_cli.config import get_hermes_home
 
-        target = get_hermes_home() / "skills" / "fetch-cards"
-        if target.exists():
-            return
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(bundled, target)
-        log.info("Installed bundled Fetch skill: %s", target)
+        _install_managed_skill(bundled, get_hermes_home() / "skills" / "fetch-cards")
     except Exception:
         log.debug("Could not install bundled fetch-cards skill", exc_info=True)
 
