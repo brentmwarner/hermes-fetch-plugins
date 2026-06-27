@@ -91,6 +91,89 @@ def test_allows_triage_stub_without_body(plugin):
         assert result is None, f"triage={triage!r} stub should be allowed"
 
 
+@pytest.mark.parametrize("source", ["fetch", "fetch-ios", "ios", "mobile", "inbox"])
+def test_blocks_send_message_to_fetch_from_fetch_session(plugin, monkeypatch, source):
+    monkeypatch.setattr(plugin, "_session_source", lambda session_id: source)
+
+    result = plugin._on_pre_tool_call(
+        tool_name="send_message",
+        args={"target": "fetch", "message": "I finished."},
+        session_id="s1",
+    )
+
+    assert isinstance(result, dict)
+    assert result["action"] == "block"
+    assert "Reply in the current thread" in result["message"]
+
+
+def test_blocks_named_fetch_delivery_from_fetch_session(plugin, monkeypatch):
+    monkeypatch.setattr(plugin, "_session_source", lambda session_id: "fetch")
+
+    result = plugin._on_pre_tool_call(
+        tool_name="send_message",
+        args={"target": "fetch:researcher", "message": "I finished."},
+        session_id="s1",
+    )
+
+    assert result is not None and result["action"] == "block"
+
+
+def test_blocks_send_message_to_fetch_with_task_id_only(plugin, monkeypatch):
+    seen = []
+
+    def source_for(session_id):
+        seen.append(session_id)
+        return "fetch"
+
+    monkeypatch.setattr(plugin, "_session_source", source_for)
+
+    result = plugin._on_pre_tool_call(
+        tool_name="send_message",
+        args={"target": "fetch", "message": "I finished."},
+        task_id="task-123",
+    )
+
+    assert seen == ["task-123"]
+    assert result is not None and result["action"] == "block"
+
+
+@pytest.mark.parametrize("source", ["telegram", "cli", "cron", None, ""])
+def test_allows_send_message_to_fetch_from_non_fetch_or_unknown_session(plugin, monkeypatch, source):
+    monkeypatch.setattr(plugin, "_session_source", lambda session_id: source)
+
+    result = plugin._on_pre_tool_call(
+        tool_name="send_message",
+        args={"target": "fetch", "message": "Deliver this."},
+        session_id="s1",
+    )
+
+    assert result is None
+
+
+def test_allows_send_message_to_other_platform_from_fetch_session(plugin, monkeypatch):
+    monkeypatch.setattr(plugin, "_session_source", lambda session_id: "fetch")
+
+    result = plugin._on_pre_tool_call(
+        tool_name="send_message",
+        args={"target": "telegram", "message": "Deliver this."},
+        session_id="s1",
+    )
+
+    assert result is None
+
+
+def test_allows_send_message_list_from_fetch_session(plugin, monkeypatch):
+    monkeypatch.setattr(plugin, "_session_source", lambda session_id: "fetch")
+
+    result = plugin._on_pre_tool_call(
+        tool_name="send_message",
+        args={"action": "list"},
+        session_id="s1",
+    )
+
+    assert result is None
+
+
 def test_ignores_other_tools(plugin):
     assert plugin._on_pre_tool_call(tool_name="kanban_complete", args={}) is None
     assert plugin._on_pre_tool_call(tool_name="kanban_comment", args={"body": ""}) is None

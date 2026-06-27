@@ -58,13 +58,20 @@ def test_telegram_reply_does_not_push(sent, monkeypatch):
     assert captured.calls == [], "non-Fetch channel must not push"
 
 
-def test_fetch_gateway_reply_pushes_with_empty_source(sent, monkeypatch):
+def test_fetch_gateway_reply_with_empty_source_does_not_push(sent, monkeypatch):
     plugin, captured = sent
-    _set_source(monkeypatch, plugin, "")  # untagged gateway chat = Fetch conversation
+    _set_source(monkeypatch, plugin, "")  # missing/legacy source is ambiguous
+    plugin._on_post_llm_call(session_id="s1", assistant_response="hi")
+    assert captured.calls == [], "blank source must not create a Fetch notification"
+
+
+def test_fetch_app_reply_pushes_with_fetch_source(sent, monkeypatch):
+    plugin, captured = sent
+    _set_source(monkeypatch, plugin, "fetch")
     plugin._on_post_llm_call(session_id="s1", assistant_response="hi")
     assert len(captured.calls) == 1
     assert captured.calls[0]["kind"] == "replies"
-    assert captured.calls[0]["source"] == ""
+    assert captured.calls[0]["source"] == "fetch"
     assert captured.calls[0]["session_id"] == "s1"
 
 
@@ -83,13 +90,12 @@ def test_cron_run_does_not_push(sent, monkeypatch):
     assert captured.calls == [], "cron runs are not Fetch conversations"
 
 
-def test_unknown_source_falls_back_to_pushing(sent, monkeypatch):
-    # Lookup miss must NOT suppress a real Fetch notification.
+def test_unknown_source_does_not_push(sent, monkeypatch):
+    # Lookup misses are ambiguous and must not become Fetch inbox noise.
     plugin, captured = sent
     _set_source(monkeypatch, plugin, None)
     plugin._on_post_llm_call(session_id="s1", assistant_response="hi")
-    assert len(captured.calls) == 1
-    assert captured.calls[0]["source"] is None
+    assert captured.calls == []
 
 
 def test_background_worker_never_pushes(sent, monkeypatch):
