@@ -346,8 +346,11 @@ def _on_pre_tool_call(*, tool_name: str = "", args: dict | None = None, **_kwarg
     """
     args = args if isinstance(args, dict) else {}
     if tool_name == "send_message":
+        session_id = str(
+            _kwargs.get("session_id") or _kwargs.get("task_id") or ""
+        )
         return _block_fetch_self_delivery(
-            args, str(_kwargs.get("session_id") or "")
+            args, session_id
         )
     if tool_name != "kanban_create":
         return None

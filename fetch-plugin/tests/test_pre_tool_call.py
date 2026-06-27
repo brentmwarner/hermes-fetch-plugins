@@ -118,6 +118,25 @@ def test_blocks_named_fetch_delivery_from_fetch_session(plugin, monkeypatch):
     assert result is not None and result["action"] == "block"
 
 
+def test_blocks_send_message_to_fetch_with_task_id_only(plugin, monkeypatch):
+    seen = []
+
+    def source_for(session_id):
+        seen.append(session_id)
+        return "fetch"
+
+    monkeypatch.setattr(plugin, "_session_source", source_for)
+
+    result = plugin._on_pre_tool_call(
+        tool_name="send_message",
+        args={"target": "fetch", "message": "I finished."},
+        task_id="task-123",
+    )
+
+    assert seen == ["task-123"]
+    assert result is not None and result["action"] == "block"
+
+
 @pytest.mark.parametrize("source", ["telegram", "cli", "cron", None, ""])
 def test_allows_send_message_to_fetch_from_non_fetch_or_unknown_session(plugin, monkeypatch, source):
     monkeypatch.setattr(plugin, "_session_source", lambda session_id: source)
