@@ -109,8 +109,8 @@ def _session_source(session_id: str | None) -> str | None:
 
     Returns None when the session can't be found (e.g. a profile-scoped db the
     launch home doesn't see, or a brand-new session whose row hasn't persisted
-    yet). Callers treat None as "unknown — fall back to current behavior" so a
-    lookup miss never accidentally suppresses a Fetch notification.
+    yet). Callers treat None as unknown and should fail closed for user-visible
+    delivery decisions.
     """
     if not session_id:
         return None
@@ -141,6 +141,12 @@ def _session_source(session_id: str | None) -> str | None:
     return source
 
 
+def _normalized_source(source: str | None) -> str | None:
+    if source is None:
+        return None
+    return str(source).strip().lower()
+
+
 def _is_fetch_app_session(session_id: str | None) -> bool:
     """True when the persisted session is owned by the Fetch app surface.
 
@@ -150,7 +156,7 @@ def _is_fetch_app_session(session_id: str | None) -> bool:
     which Fetch stamps as `fetch` on app-created chats and `inbox` on app-owned
     proactive threads.
     """
-    source = (_session_source(session_id) or "").strip().lower()
+    source = _normalized_source(_session_source(session_id))
     return source in FETCH_APP_SOURCES
 
 
@@ -245,11 +251,12 @@ def _on_post_llm_call(*, session_id: str = "", assistant_response: str = "", **_
         return  # FET-5: dispatched workers report on the task, never push.
     # Only push for Fetch-channel conversations. A reply on Telegram/Discord/CLI
     # is not a Fetch conversation — the user is on that surface already — so it
-    # must not ring the phone or create a Fetch inbox thread. If the source
-    # can't be resolved, fall back to pushing (preserves prior behavior) rather
-    # than risk suppressing a real Fetch notification on a lookup miss.
-    source = _session_source(session_id or None)
-    if source is not None and source not in FETCH_CHANNELS:
+    # must not ring the phone or create a Fetch inbox thread. Unknown or blank
+    # sources fail closed: current Fetch iOS sessions are stamped `source=fetch`,
+    # while a lookup miss is exactly the path that previously made background
+    # automation look like a first-party app reply.
+    source = _normalized_source(_session_source(session_id or None))
+    if source not in FETCH_APP_SOURCES:
         return
     body = (assistant_response or "").strip() or "Finished working."
     _relay.send_event_background(
@@ -295,6 +302,31 @@ def _on_pre_llm_call(*, session_id: str = "", **_kwargs):
 _TRUTHY_ARG = frozenset({True, 1, "1", "true", "True", "yes", "on"})
 
 
+def _send_message_target_platform(args: dict) -> str:
+    action = str(args.get("action") or "send").strip().lower()
+    if action != "send":
+        return ""
+    target = args.get("target")
+    if not isinstance(target, str):
+        return ""
+    return target.split(":", 1)[0].strip().lower()
+
+
+def _block_fetch_self_delivery(args: dict, session_id: str) -> dict | None:
+    if _send_message_target_platform(args) != "fetch":
+        return None
+    if not _is_fetch_app_session(session_id or None):
+        return None
+    return {
+        "action": "block",
+        "message": (
+            "Do not use send_message to send a Fetch message from inside a Fetch "
+            "chat. Reply in the current thread instead; using Fetch as the "
+            "delivery target creates a duplicate inbox message for the same user."
+        ),
+    }
+
+
 def _on_pre_tool_call(*, tool_name: str = "", args: dict | None = None, **_kwargs):
     """Enforce that agent-created kanban tasks carry a real spec (FET-16).
 
@@ -312,9 +344,13 @@ def _on_pre_tool_call(*, tool_name: str = "", args: dict | None = None, **_kwarg
     this host (the body requirement is universally good); ``triage`` stubs are
     exempt because a specifier profile fleshes those out later.
     """
+    args = args if isinstance(args, dict) else {}
+    if tool_name == "send_message":
+        return _block_fetch_self_delivery(
+            args, str(_kwargs.get("session_id") or "")
+        )
     if tool_name != "kanban_create":
         return None
-    args = args if isinstance(args, dict) else {}
     body = args.get("body")
     body = body.strip() if isinstance(body, str) else ""
     if body:
