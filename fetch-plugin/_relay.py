@@ -273,7 +273,9 @@ class RelayClient:
             )
         response.raise_for_status()
         pairing = str(response.json()["pairing_secret"])
-        # Persist alongside the existing identity so the next setup reuses it.
+        # Persist alongside the existing identity so the file stays a valid
+        # pairing record (drives `is_pairing_configured()` / tunnel autostart).
+        # Setup always re-mints, so this is not reused as a setup link.
         self._write_credentials(
             RelayCredentials(
                 relay_url=creds.relay_url,
