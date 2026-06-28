@@ -34,6 +34,7 @@ import logging
 import os
 import random
 import re
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,7 @@ _RECONNECT_CAP_S = 5.0  # < dashboard HERMES_TUI_WS_ORPHAN_REAP_GRACE_S (~20s)
 _UNHEALTHY_RECONNECT_CAP_S = 30.0
 _LOOP_WINDOW_S = 30.0
 _LOOP_THRESHOLD = 6
+_LOCK_ROLE = "fetch-tunnel-owner"
 
 # Content types streamed back as a UTF-8 string; everything else is base64'd.
 _TEXTUAL_PREFIXES = ("text/", "application/json", "application/javascript", "application/xml")
@@ -81,6 +83,31 @@ def _process_alive(pid: int) -> bool:
         return False
 
 
+def _process_command(pid: int) -> str | None:
+    try:
+        return subprocess.check_output(
+            ["ps", "-p", str(pid), "-o", "command="],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=1.0,
+        ).strip()
+    except Exception:
+        return None
+
+
+def _command_looks_like_tunnel_owner(command: str | None) -> bool:
+    if not command:
+        return False
+    lowered = command.lower()
+    if "hermes_fetch_tunnel_autostarted_runtime" in lowered:
+        return True
+    if "hermes_cli.main" in lowered and ("dashboard" in lowered or "gateway" in lowered):
+        return True
+    if "/hermes " in lowered and ("dashboard" in lowered or "gateway" in lowered):
+        return True
+    return False
+
+
 def _safe_lock_name(agent_id: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", agent_id).strip("-")
     return safe or "unknown"
@@ -94,6 +121,15 @@ class TunnelOwnerLock:
         self.path = Path(lock_dir) / f"fetch-tunnel-{_safe_lock_name(agent_id)}.pid"
         self.owner_pid: int | None = None
         self.acquired = False
+
+    def _write_owner(self, fh) -> None:
+        data = {
+            "pid": os.getpid(),
+            "role": _LOCK_ROLE,
+            "agent_id": self.agent_id,
+            "created_at": time.time(),
+        }
+        fh.write(json.dumps(data, separators=(",", ":")))
 
     def acquire(self) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -122,7 +158,7 @@ class TunnelOwnerLock:
                     return False
                 continue
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(str(os.getpid()))
+                self._write_owner(fh)
             self.owner_pid = os.getpid()
             self.acquired = True
             return True
@@ -139,38 +175,85 @@ class TunnelOwnerLock:
 
     def _read_owner(self) -> int | None:
         try:
-            return int(self.path.read_text(encoding="utf-8").strip())
-        except (OSError, ValueError):
+            pid, _, _ = self._read_owner_record()
+            return pid
+        except OSError:
             return None
+
+    def _read_owner_record(self) -> tuple[int | None, str | None, str | None]:
+        raw = self.path.read_text(encoding="utf-8").strip()
+        if not raw:
+            return None, None, None
+        if raw.startswith("{"):
+            try:
+                data = json.loads(raw)
+            except ValueError:
+                return None, None, None
+            try:
+                pid = int(data.get("pid"))
+            except (TypeError, ValueError):
+                pid = None
+            if pid is not None and pid <= 0:
+                pid = None
+            role = str(data.get("role") or "") or None
+            agent_id = str(data.get("agent_id") or "") or None
+            return pid, role, agent_id
+        try:
+            pid = int(raw)
+        except ValueError:
+            return None, None, None
+        if pid <= 0:
+            return None, None, None
+        return pid, None, None
 
     def status(self) -> dict[str, Any]:
         try:
-            raw = self.path.read_text(encoding="utf-8").strip()
+            owner_pid, owner_role, owner_agent_id = self._read_owner_record()
         except FileNotFoundError:
             owner_pid = None
+            owner_role = None
+            owner_agent_id = None
             state = "unowned"
             owner_alive = False
+            owner_valid = False
         except OSError as exc:
             return {
                 "state": "unreadable",
                 "agent_id": self.agent_id,
                 "path": str(self.path),
                 "owner_pid": None,
+                "owner_role": None,
+                "owner_agent_id": None,
                 "owner_alive": False,
+                "owner_valid": False,
                 "owner_current_process": False,
                 "error": str(exc),
                 "meaning": "Fetch could not inspect the local tunnel-owner lock file.",
             }
         else:
-            try:
-                owner_pid = int(raw)
-            except ValueError:
-                owner_pid = None
+            if owner_pid is None:
                 state = "invalid"
                 owner_alive = False
+                owner_valid = False
             else:
                 owner_alive = _process_alive(owner_pid)
-                state = "owned" if owner_alive else "stale"
+                owner_current_process = owner_pid == os.getpid()
+                command = _process_command(owner_pid) if owner_alive else None
+                owner_valid = (
+                    owner_current_process
+                    or _command_looks_like_tunnel_owner(command)
+                    or (
+                        owner_role == _LOCK_ROLE
+                        and owner_agent_id == self.agent_id
+                        and command is None
+                    )
+                )
+                if owner_alive and owner_valid:
+                    state = "owned"
+                elif owner_alive:
+                    state = "foreign"
+                else:
+                    state = "stale"
 
         owner_current_process = owner_pid == os.getpid()
         if state == "owned" and not owner_current_process:
@@ -185,6 +268,11 @@ class TunnelOwnerLock:
             meaning = "The previous tunnel owner process is gone; the next tunnel start can reclaim this lock."
         elif state == "invalid":
             meaning = "The tunnel-owner lock file is corrupt; the next tunnel start can replace it."
+        elif state == "foreign":
+            meaning = (
+                "The tunnel-owner lock points at a live process that is not a Fetch relay "
+                "runtime; the next tunnel start can replace it."
+            )
         else:
             meaning = "No local process currently owns the relay uplink for this agent."
 
@@ -193,7 +281,10 @@ class TunnelOwnerLock:
             "agent_id": self.agent_id,
             "path": str(self.path),
             "owner_pid": owner_pid,
+            "owner_role": owner_role,
+            "owner_agent_id": owner_agent_id,
             "owner_alive": owner_alive,
+            "owner_valid": owner_valid,
             "owner_current_process": owner_current_process,
             "meaning": meaning,
         }

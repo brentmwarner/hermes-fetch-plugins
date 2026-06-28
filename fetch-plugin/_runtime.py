@@ -8,11 +8,13 @@ process alive after `hermes setup` exits.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 log = logging.getLogger("fetch_plugin.runtime")
@@ -25,6 +27,7 @@ DISABLE_AUTOSTART_ENV = "HERMES_FETCH_TUNNEL_DISABLE_DASHBOARD_AUTOSTART"
 
 _PID_FILE = "fetch-relay-runtime.pid"
 _LOG_FILE = "fetch-relay-runtime.log"
+_PID_ROLE = "fetch-relay-runtime"
 
 
 def truthy(value: str | None) -> bool:
@@ -58,15 +61,119 @@ def _process_alive(pid: int) -> bool:
         return False
 
 
+def _process_command(pid: int) -> str | None:
+    try:
+        return subprocess.check_output(
+            ["ps", "-p", str(pid), "-o", "command="],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=1.0,
+        ).strip()
+    except Exception:
+        return None
+
+
+def _command_looks_like_runtime(command: str | None) -> bool:
+    if not command:
+        return False
+    lowered = command.lower()
+    if "hermes_fetch_tunnel_autostarted_runtime" in lowered:
+        return True
+    if "hermes_cli.main" in lowered and "dashboard" in lowered:
+        return True
+    if "/hermes " in lowered and "dashboard" in lowered:
+        return True
+    return False
+
+
+def _read_pid_record(path: Path) -> tuple[int | None, str | None]:
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None, None
+    if not raw:
+        return None, None
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return None, None
+        try:
+            pid = int(data.get("pid"))
+        except (TypeError, ValueError):
+            return None, None
+        if pid <= 0:
+            return None, None
+        return pid, str(data.get("role") or "")
+    try:
+        pid = int(raw)
+    except ValueError:
+        return None, None
+    if pid <= 0:
+        return None, None
+    return pid, None
+
+
+def _write_pid_record(path: Path, pid: int) -> None:
+    data = {
+        "pid": pid,
+        "role": _PID_ROLE,
+        "created_at": time.time(),
+    }
+    path.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
+
+
+def _hermes_project_root() -> Path | None:
+    try:
+        import hermes_cli
+
+        return Path(hermes_cli.__file__).resolve().parent.parent
+    except Exception:
+        pass
+    for entry in sys.path:
+        if not entry:
+            continue
+        candidate = Path(entry)
+        if (candidate / "hermes_cli").is_dir():
+            return candidate
+    candidate = _hermes_home() / "hermes-agent"
+    if (candidate / "hermes_cli").is_dir():
+        return candidate
+    return None
+
+
+def _child_pythonpath() -> str:
+    entries: list[str] = []
+    project_root = _hermes_project_root()
+    if project_root is not None:
+        entries.append(str(project_root))
+    return os.pathsep.join(entries)
+
+
+def _child_python_executable() -> str:
+    project_root = _hermes_project_root()
+    if project_root is not None:
+        if os.name == "nt":
+            candidate = project_root / "venv" / "Scripts" / "python.exe"
+        else:
+            candidate = project_root / "venv" / "bin" / "python"
+        if candidate.exists():
+            return str(candidate)
+    return sys.executable
+
+
 def _active_runtime_pid() -> int | None:
     path = _pid_path()
-    try:
-        pid = int(path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
+    pid, role = _read_pid_record(path)
+    if pid is None:
         return None
     if pid == os.getpid():
         return None
-    if _process_alive(pid):
+    alive = _process_alive(pid)
+    command = _process_command(pid) if alive else None
+    if alive and _command_looks_like_runtime(command):
+        return pid
+    if alive and role == _PID_ROLE and command is None:
         return pid
     try:
         path.unlink()
@@ -95,15 +202,19 @@ def enable_tunnel_for_future_starts() -> None:
 
 
 def _child_script() -> str:
+    project_root = _hermes_project_root()
+    project_root_text = str(project_root) if project_root is not None else ""
     return f"""
 import os
 import socket
+import sys
 import time
 
 DASHBOARD_HOST = {DASHBOARD_HOST!r}
 DASHBOARD_PORT = {DASHBOARD_PORT!r}
 TUNNEL_ENABLED_ENV = {TUNNEL_ENABLED_ENV!r}
 AUTOSTART_RUNTIME_ENV = {AUTOSTART_RUNTIME_ENV!r}
+PROJECT_ROOT = {project_root_text!r}
 
 
 def dashboard_listening():
@@ -116,6 +227,9 @@ def dashboard_listening():
 
 os.environ[AUTOSTART_RUNTIME_ENV] = "1"
 os.environ[TUNNEL_ENABLED_ENV] = "1"
+
+if PROJECT_ROOT and PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from hermes_cli.env_loader import load_hermes_dotenv
 load_hermes_dotenv()
@@ -166,11 +280,12 @@ def ensure_relay_runtime() -> str:
     env = os.environ.copy()
     env[TUNNEL_ENABLED_ENV] = "1"
     env[AUTOSTART_RUNTIME_ENV] = "1"
+    env["PYTHONPATH"] = _child_pythonpath()
     log_path = log_dir / _LOG_FILE
     try:
         with open(log_path, "ab") as log_file:
             process = subprocess.Popen(
-                [sys.executable, "-c", _child_script()],
+                [_child_python_executable(), "-c", _child_script()],
                 stdin=subprocess.DEVNULL,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
@@ -178,7 +293,7 @@ def ensure_relay_runtime() -> str:
                 start_new_session=True,
                 close_fds=True,
             )
-        _pid_path().write_text(str(process.pid), encoding="utf-8")
+        _write_pid_record(_pid_path(), process.pid)
         log.info("Fetch relay runtime started in background pid=%s", process.pid)
         return "started"
     except Exception:

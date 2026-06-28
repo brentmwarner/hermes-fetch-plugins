@@ -252,6 +252,14 @@ def _relay_troubleshooting(owner_status: dict, pairing_status: dict) -> list[dic
                 "so the plugin can reclaim the owner lock."
             ),
         })
+    elif owner_status.get("state") == "foreign":
+        items.append({
+            "code": "foreign_tunnel_owner_lock",
+            "message": (
+                "The local tunnel-owner lock points at a live process that is not a Fetch relay runtime. "
+                "Run Fetch setup again so the plugin can reclaim it."
+            ),
+        })
     if not pairing_status.get("configured"):
         items.append({
             "code": "pairing_missing",
