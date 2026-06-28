@@ -16,7 +16,7 @@ optional_env:
     description: Enrollment token for the Fetch push relay, if the relay requires one.
     password: true
   - name: HERMES_FETCH_TUNNEL_ENABLED
-    description: "Set to 1/true to hold a persistent reverse-tunnel WebSocket to the relay so the app can reach this agent without Tailscale. Fetch setup enables this automatically for relay pairing."
+    description: "Set to 1/true to hold a persistent reverse-tunnel WebSocket to the relay so the app can reach this agent without Tailscale. Fetch setup enables this automatically, and paired agents auto-start the tunnel even if this flag is missing. Set to 0/false only to force-disable it."
     password: false
   - name: HERMES_FETCH_TUNNEL_DISABLE_DASHBOARD_AUTOSTART
     description: "Set to 1/true only if you manage the local Hermes dashboard/API process yourself and do not want Fetch to start a headless relay runtime."

@@ -391,13 +391,25 @@ def _relay_runtime_dir(relay_client) -> Path:
     return _runtime._runtime_dir()
 
 
+def _should_start_tunnel() -> bool:
+    configured = os.environ.get("HERMES_FETCH_TUNNEL_ENABLED")
+    if configured is not None and configured.strip():
+        return _truthy(configured)
+    try:
+        return _pairing.is_pairing_configured()
+    except Exception:
+        log.debug("Fetch could not determine pairing state for tunnel autostart", exc_info=True)
+        return False
+
+
 def _spawn_tunnel() -> None:
     """Start the agent-side reverse-tunnel client on a daemon thread, so the
-    phone can reach this NAT'd agent with no inbound port. Gated behind
-    HERMES_FETCH_TUNNEL_ENABLED (default off) and spawn-and-return so it never
-    blocks plugin load. The tunnel module + its `websockets` dep are imported
-    lazily here, so a host without them is unaffected unless the flag is set."""
-    if not _truthy(os.environ.get("HERMES_FETCH_TUNNEL_ENABLED")):
+    phone can reach this NAT'd agent with no inbound port. A first install stays
+    passive; after Fetch relay pairing exists, the tunnel starts by default even
+    if the legacy env flag was not persisted. The tunnel module + its
+    `websockets` dep are imported lazily here, so an unpaired host is unaffected.
+    """
+    if not _should_start_tunnel():
         return
     if _runtime.ensure_relay_runtime() in {"started", "already-running"}:
         return
@@ -435,7 +447,7 @@ def _spawn_tunnel() -> None:
             log.warning("Fetch reverse-tunnel client failed to start", exc_info=True)
 
     threading.Thread(target=_run, daemon=True, name="fetch-tunnel").start()
-    log.info("Fetch reverse-tunnel client starting (HERMES_FETCH_TUNNEL_ENABLED set)")
+    log.info("Fetch reverse-tunnel client starting")
 
 
 def register(ctx) -> None:
