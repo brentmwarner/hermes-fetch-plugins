@@ -127,6 +127,22 @@ def test_loop_health_marks_unhealthy_after_rapid_events():
     assert health.unhealthy_reason == "relay reconnect loop"
 
 
+def test_loop_health_recovers_after_burst_ages_out(monkeypatch):
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(tunnel.time, "monotonic", lambda: clock["now"])
+    health = tunnel._LoopHealth(window_s=30, threshold=2)
+
+    assert health.record(reason="relay reconnect loop") is False
+    assert health.record(reason="relay reconnect loop") is True
+    assert health.unhealthy is True
+
+    # Once the burst ages out of the window the loop must report healthy again
+    # instead of latching unhealthy until process restart.
+    clock["now"] += 31
+    assert health.unhealthy is False
+    assert health.unhealthy_reason is None
+
+
 # --- REST forwarding ---
 
 async def test_rest_text_round_trip():

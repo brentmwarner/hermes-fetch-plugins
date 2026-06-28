@@ -204,20 +204,28 @@ class _LoopHealth:
         self.window_s = window_s
         self.threshold = threshold
         self.events: list[float] = []
-        self.unhealthy_reason: str | None = None
+        self._reason: str | None = None
+
+    def _prune(self) -> None:
+        cutoff = time.monotonic() - self.window_s
+        self.events = [t for t in self.events if t >= cutoff]
 
     def record(self, *, reason: str) -> bool:
-        now = time.monotonic()
-        self.events = [t for t in self.events if now - t <= self.window_s]
-        self.events.append(now)
-        if len(self.events) >= self.threshold:
-            self.unhealthy_reason = reason
-            return True
-        return False
+        self._reason = reason
+        self._prune()
+        self.events.append(time.monotonic())
+        return len(self.events) >= self.threshold
 
     @property
     def unhealthy(self) -> bool:
-        return self.unhealthy_reason is not None
+        # Derive health from the live event window so the loop recovers once a
+        # transient reconnect burst ages out — never a sticky one-shot latch.
+        self._prune()
+        return len(self.events) >= self.threshold
+
+    @property
+    def unhealthy_reason(self) -> str | None:
+        return self._reason if self.unhealthy else None
 
 
 def _jittered_delay(base: float, *, unhealthy: bool = False) -> float:
