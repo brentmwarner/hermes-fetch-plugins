@@ -39,7 +39,10 @@ processes**, coupled only through the relay:
 - **Headless relay runtime** (`_runtime.py`): successful relay setup starts a
   background loopback-only Hermes dashboard/API process with no browser window.
   The reverse tunnel stays alive after `hermes setup` exits, so the phone does
-  not need a public dashboard, Tailscale, or an open browser tab.
+  not need a public dashboard, Tailscale, or an open browser tab. Setup waits
+  for the relay to report this agent's tunnel online before it shows the QR/link;
+  if the tunnel cannot come online, setup hides the link so the app does not
+  receive an unusable pairing.
 - `_relay.py` is the shared relay client, loaded **by file path** from both
   halves (they don't share a Python import).
 
@@ -62,6 +65,8 @@ Then open Fetch on the phone and allow notifications. No Apple account, no
 ## Configuration
 
 Most users set nothing — Fetch setup configures delivery and the tunnel for you.
+After a relay pairing exists, the tunnel starts by default even if the legacy
+enablement flag is missing.
 All env vars are `HERMES_FETCH_*`; there is no separate inbox product.
 
 **Public knobs:**
@@ -70,7 +75,7 @@ All env vars are `HERMES_FETCH_*`; there is no separate inbox product.
 | --- | --- | --- |
 | `HERMES_FETCH_RELAY_URL` | hosted relay (`https://push.tryfetchapp.com`) | Point at a different / local relay. |
 | `HERMES_FETCH_RELAY_REGISTRATION_TOKEN` | _(none)_ | Enrollment token, if the relay requires one. |
-| `HERMES_FETCH_TUNNEL_ENABLED` | enabled by Fetch relay setup | Keep the agent-side reverse tunnel active for relay pairing. |
+| `HERMES_FETCH_TUNNEL_ENABLED` | auto after Fetch relay setup | Keep the agent-side reverse tunnel active for relay pairing. Set `0`/`false` only to force-disable it. |
 | `HERMES_FETCH_TUNNEL_DISABLE_DASHBOARD_AUTOSTART` | _(unset)_ | Opt out if you manage the local Hermes dashboard/API process yourself. |
 
 **Internal / advanced** (written by Fetch setup or the `/api/plugins/fetch/inbox/enable`

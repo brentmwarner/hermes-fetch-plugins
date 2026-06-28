@@ -77,3 +77,75 @@ def test_is_pairing_configured_false_with_only_saved_dashboard_token(tmp_path, m
     monkeypatch.setenv("HERMES_DASHBOARD_SESSION_TOKEN", "direct-token")
 
     assert not pairing.is_pairing_configured()
+
+
+class _FakeInbox:
+    def enable_delivery_for_future_starts(self):
+        pass
+
+
+class _FakeRuntime:
+    def __init__(self, status="started"):
+        self.status = status
+
+    def enable_tunnel_for_future_starts(self):
+        pass
+
+    def ensure_relay_runtime(self):
+        return self.status
+
+
+class _FakeRelayClient:
+    def __init__(self, status):
+        self.status = status
+
+    async def wait_for_tunnel_online(self):
+        return self.status
+
+
+def test_interactive_setup_hides_link_when_tunnel_not_online(monkeypatch, capsys, tmp_path) -> None:
+    link = "https://tryfetchapp.com/setup?agent=a1&pairing=p1"
+    monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(pairing, "is_pairing_configured", lambda: False)
+    monkeypatch.setattr(pairing, "_inbox_module", lambda: _FakeInbox())
+    monkeypatch.setattr(pairing, "_runtime_module", lambda: _FakeRuntime())
+    monkeypatch.setattr(
+        pairing,
+        "_try_build_relay_pairing",
+        lambda: {
+            "client": _FakeRelayClient({"ok": False, "agent_online": False, "reason": "agent_offline"}),
+            "agent_id": "a1",
+            "link": link,
+        },
+    )
+
+    pairing.interactive_setup()
+
+    out = capsys.readouterr().out
+    assert "tunnel is not online yet" in out
+    assert "setup QR is hidden" in out
+    assert link not in out
+
+
+def test_interactive_setup_prints_link_when_tunnel_online(monkeypatch, capsys, tmp_path) -> None:
+    link = "https://tryfetchapp.com/setup?agent=a1&pairing=p1"
+    monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(pairing, "is_pairing_configured", lambda: False)
+    monkeypatch.setattr(pairing, "_inbox_module", lambda: _FakeInbox())
+    monkeypatch.setattr(pairing, "_runtime_module", lambda: _FakeRuntime())
+    monkeypatch.setattr(pairing, "render_qr", lambda data: None)
+    monkeypatch.setattr(
+        pairing,
+        "_try_build_relay_pairing",
+        lambda: {
+            "client": _FakeRelayClient({"ok": True, "agent_online": True}),
+            "agent_id": "a1",
+            "link": link,
+        },
+    )
+
+    pairing.interactive_setup()
+
+    out = capsys.readouterr().out
+    assert "Fetch pairing ready" in out
+    assert link in out

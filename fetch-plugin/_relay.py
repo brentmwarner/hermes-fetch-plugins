@@ -216,13 +216,50 @@ class RelayClient:
 
     async def relay_pairing(self) -> tuple[str, str, str]:
         """Return ``(relay_url, agent_id, pairing)`` for building a relay setup
-        link. Reuses the pairing token captured at registration; mints a fresh
-        one via the relay for agents enrolled before pairing capture existed
-        (the relay only stores the hash, so it can never hand back the original).
+        link. Always mints a fresh token so rerunning Hermes setup after a
+        successful app claim cannot reprint a stale one-time pairing secret.
         """
         creds = await self._credentials()
-        pairing = creds.pairing or await self._mint_pairing(creds)
+        pairing = await self._mint_pairing(creds)
         return self.relay_url, creds.agent_id, pairing
+
+    async def tunnel_status(self) -> dict:
+        """Return the relay's view of this agent's tunnel readiness."""
+        creds = await self._credentials()
+        headers = {
+            "X-Hermes-Agent-Id": creds.agent_id,
+            "Authorization": f"Bearer {creds.agent_secret}",
+        }
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(
+                f"{self.relay_url}/v1/agents/tunnel/status", headers=headers
+            )
+        if response.status_code == 404:
+            return {"ok": False, "reason": "status_unavailable", "status_code": 404}
+        if response.status_code in {200, 503}:
+            try:
+                return response.json()
+            except ValueError:
+                return {"ok": False, "reason": "invalid_status_response"}
+        response.raise_for_status()
+        return response.json()
+
+    async def wait_for_tunnel_online(
+        self, *, timeout_s: float = 20.0, interval_s: float = 0.5
+    ) -> dict:
+        """Poll until the relay sees this agent's tunnel uplink or time expires."""
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        last: dict = {"ok": False, "reason": "not_checked"}
+        while True:
+            try:
+                last = await self.tunnel_status()
+            except Exception as exc:
+                last = {"ok": False, "reason": type(exc).__name__}
+            if bool(last.get("ok") or last.get("agent_online")):
+                return last
+            if time.monotonic() >= deadline:
+                return last
+            await asyncio.sleep(max(0.1, interval_s))
 
     async def _mint_pairing(self, creds: RelayCredentials) -> str:
         """Rotate + fetch a fresh pairing token for an already-enrolled agent."""
@@ -236,7 +273,9 @@ class RelayClient:
             )
         response.raise_for_status()
         pairing = str(response.json()["pairing_secret"])
-        # Persist alongside the existing identity so the next setup reuses it.
+        # Persist alongside the existing identity so the file stays a valid
+        # pairing record (drives `is_pairing_configured()` / tunnel autostart).
+        # Setup always re-mints, so this is not reused as a setup link.
         self._write_credentials(
             RelayCredentials(
                 relay_url=creds.relay_url,

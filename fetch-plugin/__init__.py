@@ -381,13 +381,46 @@ def _fetch_env_enablement():
     return _inbox.env_enablement(force=_pairing.is_pairing_configured())
 
 
+def _relay_runtime_dir(relay_client) -> Path:
+    credentials_path = getattr(relay_client, "credentials_path", None)
+    if credentials_path is not None:
+        try:
+            return Path(credentials_path).parent.parent / "run"
+        except TypeError:
+            pass
+    return _runtime._runtime_dir()
+
+
+def _tunnel_start_reason() -> str | None:
+    configured = os.environ.get("HERMES_FETCH_TUNNEL_ENABLED")
+    if configured is not None and configured.strip():
+        if _truthy(configured):
+            return "enabled by HERMES_FETCH_TUNNEL_ENABLED"
+        return None
+    try:
+        if _pairing.is_pairing_configured():
+            return (
+                "auto-started: relay pairing present; "
+                "set HERMES_FETCH_TUNNEL_ENABLED=0 to disable"
+            )
+    except Exception:
+        log.debug("Fetch could not determine pairing state for tunnel autostart", exc_info=True)
+    return None
+
+
+def _should_start_tunnel() -> bool:
+    return _tunnel_start_reason() is not None
+
+
 def _spawn_tunnel() -> None:
     """Start the agent-side reverse-tunnel client on a daemon thread, so the
-    phone can reach this NAT'd agent with no inbound port. Gated behind
-    HERMES_FETCH_TUNNEL_ENABLED (default off) and spawn-and-return so it never
-    blocks plugin load. The tunnel module + its `websockets` dep are imported
-    lazily here, so a host without them is unaffected unless the flag is set."""
-    if not _truthy(os.environ.get("HERMES_FETCH_TUNNEL_ENABLED")):
+    phone can reach this NAT'd agent with no inbound port. A first install stays
+    passive; after Fetch relay pairing exists, the tunnel starts by default even
+    if the legacy env flag was not persisted. The tunnel module + its
+    `websockets` dep are imported lazily here, so an unpaired host is unaffected.
+    """
+    start_reason = _tunnel_start_reason()
+    if start_reason is None:
         return
     if _runtime.ensure_relay_runtime() in {"started", "already-running"}:
         return
@@ -397,21 +430,35 @@ def _spawn_tunnel() -> None:
             tunnel = _load_sibling("fetch_plugin_tunnel", "_tunnel.py")
 
             async def _boot() -> None:
-                creds = await _relay.relay_client()._credentials()
+                relay_client = _relay.relay_client()
+                creds = await relay_client._credentials()
+                owner = tunnel.TunnelOwnerLock(agent_id=creds.agent_id, lock_dir=_relay_runtime_dir(relay_client))
+                if not owner.acquire():
+                    log.info(
+                        "Fetch reverse-tunnel owner already running for agent %s (pid=%s). "
+                        "This process will share that single agent tunnel; multiple Fetch app clients remain supported. "
+                        "If the app cannot connect, check for stale pairing with /api/plugins/fetch/diagnostics or rerun `hermes setup`.",
+                        creds.agent_id,
+                        owner.owner_pid or "unknown",
+                    )
+                    return
                 client = tunnel.AgentTunnel(
                     relay_url=creds.relay_url,
                     agent_id=creds.agent_id,
                     agent_secret=creds.agent_secret,
                     dashboard_token=os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN"),
                 )
-                await client.run_forever()
+                try:
+                    await client.run_forever()
+                finally:
+                    owner.release()
 
             asyncio.run(_boot())
         except Exception:
             log.warning("Fetch reverse-tunnel client failed to start", exc_info=True)
 
     threading.Thread(target=_run, daemon=True, name="fetch-tunnel").start()
-    log.info("Fetch reverse-tunnel client starting (HERMES_FETCH_TUNNEL_ENABLED set)")
+    log.info("Fetch reverse-tunnel client starting (%s)", start_reason)
 
 
 def register(ctx) -> None:

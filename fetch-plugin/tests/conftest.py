@@ -26,16 +26,23 @@ def _stub_agent_modules() -> None:
         "gateway.platforms.base",
         "hermes_cli",
         "hermes_cli.config",
+        "hermes_cli.cli_output",
         "hermes_cli.push_notifications",
         "hermes_state",
     ):
         sys.modules.setdefault(name, types.ModuleType(name))
+    sys.modules["hermes_cli"].__path__ = []
     sys.modules["gateway.config"].Platform = lambda *a, **k: None
     sys.modules["gateway.config"].PlatformConfig = object
     sys.modules["gateway.platforms.base"].BasePlatformAdapter = object
     sys.modules["gateway.platforms.base"].SendResult = object
     # Sibling modules import get_hermes_home at the top level.
     sys.modules["hermes_cli.config"].get_hermes_home = lambda: Path.home() / ".hermes"
+    sys.modules["hermes_cli.cli_output"].prompt_yes_no = lambda *a, **k: False
+    sys.modules["hermes_cli.cli_output"].print_header = print
+    sys.modules["hermes_cli.cli_output"].print_info = print
+    sys.modules["hermes_cli.cli_output"].print_success = print
+    sys.modules["hermes_cli.cli_output"].print_warning = print
     # SessionDB stub: tests that need source-lookup behavior monkeypatch this.
     class _StubSessionDB:
         def __init__(self, *a, **kw): pass

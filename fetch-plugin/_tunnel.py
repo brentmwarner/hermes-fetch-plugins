@@ -31,6 +31,11 @@ import asyncio
 import base64
 import json
 import logging
+import os
+import random
+import re
+import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -45,6 +50,9 @@ T_WS_CLOSE = "ws-close"
 
 DEFAULT_DASHBOARD = "http://127.0.0.1:9119"
 _RECONNECT_CAP_S = 5.0  # < dashboard HERMES_TUI_WS_ORPHAN_REAP_GRACE_S (~20s)
+_UNHEALTHY_RECONNECT_CAP_S = 30.0
+_LOOP_WINDOW_S = 30.0
+_LOOP_THRESHOLD = 6
 
 # Content types streamed back as a UTF-8 string; everything else is base64'd.
 _TEXTUAL_PREFIXES = ("text/", "application/json", "application/javascript", "application/xml")
@@ -61,6 +69,169 @@ def _http_to_ws(url: str) -> str:
 def _is_textual(content_type: str) -> bool:
     ct = (content_type or "").lower()
     return any(ct.startswith(p) for p in _TEXTUAL_PREFIXES)
+
+
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _safe_lock_name(agent_id: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", agent_id).strip("-")
+    return safe or "unknown"
+
+
+class TunnelOwnerLock:
+    """Cross-process ownership guard for one agent's local Fetch tunnel."""
+
+    def __init__(self, *, agent_id: str, lock_dir: str | Path) -> None:
+        self.agent_id = agent_id
+        self.path = Path(lock_dir) / f"fetch-tunnel-{_safe_lock_name(agent_id)}.pid"
+        self.owner_pid: int | None = None
+        self.acquired = False
+
+    def acquire(self) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        while True:
+            try:
+                fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError:
+                status = self.status()
+                owner = status["owner_pid"]
+                if status["state"] == "owned":
+                    self.owner_pid = owner
+                    return False
+                log.info(
+                    "Fetch tunnel owner lock is %s for agent %s (pid=%s path=%s); reclaiming",
+                    status["state"],
+                    self.agent_id,
+                    owner or "unknown",
+                    self.path,
+                )
+                try:
+                    self.path.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    self.owner_pid = owner
+                    return False
+                continue
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(str(os.getpid()))
+            self.owner_pid = os.getpid()
+            self.acquired = True
+            return True
+
+    def release(self) -> None:
+        if not self.acquired:
+            return
+        try:
+            if self._read_owner() == os.getpid():
+                self.path.unlink()
+        except OSError:
+            pass
+        self.acquired = False
+
+    def _read_owner(self) -> int | None:
+        try:
+            return int(self.path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            return None
+
+    def status(self) -> dict[str, Any]:
+        try:
+            raw = self.path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            owner_pid = None
+            state = "unowned"
+            owner_alive = False
+        except OSError as exc:
+            return {
+                "state": "unreadable",
+                "agent_id": self.agent_id,
+                "path": str(self.path),
+                "owner_pid": None,
+                "owner_alive": False,
+                "owner_current_process": False,
+                "error": str(exc),
+                "meaning": "Fetch could not inspect the local tunnel-owner lock file.",
+            }
+        else:
+            try:
+                owner_pid = int(raw)
+            except ValueError:
+                owner_pid = None
+                state = "invalid"
+                owner_alive = False
+            else:
+                owner_alive = _process_alive(owner_pid)
+                state = "owned" if owner_alive else "stale"
+
+        owner_current_process = owner_pid == os.getpid()
+        if state == "owned" and not owner_current_process:
+            meaning = (
+                "Another local Hermes process owns this agent's single relay uplink. "
+                "That is expected when several Fetch app clients share one Hermes agent; "
+                "it is not a device or app-client limit."
+            )
+        elif state == "owned":
+            meaning = "This process owns the single relay uplink for the agent."
+        elif state == "stale":
+            meaning = "The previous tunnel owner process is gone; the next tunnel start can reclaim this lock."
+        elif state == "invalid":
+            meaning = "The tunnel-owner lock file is corrupt; the next tunnel start can replace it."
+        else:
+            meaning = "No local process currently owns the relay uplink for this agent."
+
+        return {
+            "state": state,
+            "agent_id": self.agent_id,
+            "path": str(self.path),
+            "owner_pid": owner_pid,
+            "owner_alive": owner_alive,
+            "owner_current_process": owner_current_process,
+            "meaning": meaning,
+        }
+
+
+class _LoopHealth:
+    def __init__(self, *, window_s: float = _LOOP_WINDOW_S, threshold: int = _LOOP_THRESHOLD) -> None:
+        self.window_s = window_s
+        self.threshold = threshold
+        self.events: list[float] = []
+        self._reason: str | None = None
+
+    def _prune(self) -> None:
+        cutoff = time.monotonic() - self.window_s
+        self.events = [t for t in self.events if t >= cutoff]
+
+    def record(self, *, reason: str) -> bool:
+        self._reason = reason
+        self._prune()
+        self.events.append(time.monotonic())
+        return len(self.events) >= self.threshold
+
+    @property
+    def unhealthy(self) -> bool:
+        # Derive health from the live event window so the loop recovers once a
+        # transient reconnect burst ages out — never a sticky one-shot latch.
+        self._prune()
+        return len(self.events) >= self.threshold
+
+    @property
+    def unhealthy_reason(self) -> str | None:
+        return self._reason if self.unhealthy else None
+
+
+def _jittered_delay(base: float, *, unhealthy: bool = False) -> float:
+    cap = _UNHEALTHY_RECONNECT_CAP_S if unhealthy else _RECONNECT_CAP_S
+    bounded = min(cap, base)
+    return bounded + random.uniform(0, bounded * 0.25)
 
 
 def _ws_connect(url: str, headers: dict[str, str] | None = None) -> Any:
@@ -120,6 +291,8 @@ class AgentTunnel:
         self._sessions: dict[str, _LocalSession] = {}
         self._send_lock = asyncio.Lock()
         self._stop = False
+        self._reconnect_health = _LoopHealth()
+        self._local_ws_health = _LoopHealth()
         # Injectable transports (production defaults below).
         self._relay_connect = relay_connect or self._default_relay_connect
         self._local_ws_connect = local_ws_connect or self._default_local_ws_connect
@@ -134,6 +307,21 @@ class AgentTunnel:
     def stop(self) -> None:
         self._stop = True
 
+    def health_snapshot(self) -> dict[str, Any]:
+        reasons = [
+            r for r in [
+                self._reconnect_health.unhealthy_reason,
+                self._local_ws_health.unhealthy_reason,
+            ]
+            if r
+        ]
+        return {
+            "ok": not reasons,
+            "state": "unhealthy" if reasons else "healthy",
+            "reasons": reasons,
+            "open_sessions": len(self._sessions),
+        }
+
     async def run_forever(self) -> None:
         backoff = 0.25
         while not self._stop:
@@ -142,9 +330,11 @@ class AgentTunnel:
                 backoff = 0.25
             except Exception:
                 log.debug("Fetch tunnel connection ended; will retry", exc_info=True)
+            if self._reconnect_health.record(reason="relay reconnect loop"):
+                log.warning("Fetch tunnel unhealthy: rapid relay reconnect loop detected")
             if self._stop:
                 break
-            await asyncio.sleep(min(_RECONNECT_CAP_S, backoff))
+            await asyncio.sleep(_jittered_delay(backoff, unhealthy=self._reconnect_health.unhealthy))
             backoff *= 2
 
     async def _serve_once(self) -> None:
@@ -224,6 +414,8 @@ class AgentTunnel:
         existing = self._sessions.get(cid)
         if existing is not None:
             return existing
+        if self._local_ws_health.unhealthy:
+            await asyncio.sleep(_jittered_delay(1.0, unhealthy=True))
         conn = await self._local_ws_connect(self.dashboard_base, self.dashboard_token)
         sess = _LocalSession(conn)
         self._sessions[cid] = sess
@@ -251,6 +443,8 @@ class AgentTunnel:
         except Exception:
             log.debug("Fetch tunnel local pump ended for cid=%s", cid, exc_info=True)
         finally:
+            if self._local_ws_health.record(reason="local /api/ws open/close loop"):
+                log.warning("Fetch tunnel unhealthy: rapid local /api/ws open/close loop detected")
             await self._send(ws, {"t": T_WS_CLOSE, "cid": cid})
 
     async def _close_session(self, cid: str | None) -> None:

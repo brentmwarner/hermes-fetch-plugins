@@ -49,6 +49,27 @@ def test_fetch_registers_exactly_one_platform(tmp_path, monkeypatch):
     assert (skill_dir / fetch._MANAGED_MARKER).is_file()
 
 
+def test_fetch_tunnel_autostarts_after_pairing_without_env(monkeypatch):
+    monkeypatch.delenv("HERMES_FETCH_TUNNEL_ENABLED", raising=False)
+    fetch = _load_module("fetch_plugin_tunnel_auto_test", FETCH_PLUGIN_DIR / "__init__.py")
+    monkeypatch.setattr(fetch._pairing, "is_pairing_configured", lambda: True)
+
+    assert fetch._should_start_tunnel() is True
+    assert fetch._tunnel_start_reason() == (
+        "auto-started: relay pairing present; "
+        "set HERMES_FETCH_TUNNEL_ENABLED=0 to disable"
+    )
+
+
+def test_fetch_tunnel_false_env_overrides_pairing(monkeypatch):
+    monkeypatch.setenv("HERMES_FETCH_TUNNEL_ENABLED", "0")
+    fetch = _load_module("fetch_plugin_tunnel_disable_test", FETCH_PLUGIN_DIR / "__init__.py")
+    monkeypatch.setattr(fetch._pairing, "is_pairing_configured", lambda: True)
+
+    assert fetch._should_start_tunnel() is False
+    assert fetch._tunnel_start_reason() is None
+
+
 def test_fetch_cards_skill_never_overwrites_custom_skill(tmp_path, monkeypatch):
     fetch = _load_module("fetch_plugin_skill_install_test", FETCH_PLUGIN_DIR / "__init__.py")
     target = tmp_path / "skills" / "fetch-cards"
