@@ -381,6 +381,16 @@ def _fetch_env_enablement():
     return _inbox.env_enablement(force=_pairing.is_pairing_configured())
 
 
+def _relay_runtime_dir(relay_client) -> Path:
+    credentials_path = getattr(relay_client, "credentials_path", None)
+    if credentials_path is not None:
+        try:
+            return Path(credentials_path).parent.parent / "run"
+        except TypeError:
+            pass
+    return _runtime._runtime_dir()
+
+
 def _spawn_tunnel() -> None:
     """Start the agent-side reverse-tunnel client on a daemon thread, so the
     phone can reach this NAT'd agent with no inbound port. Gated behind
@@ -397,14 +407,28 @@ def _spawn_tunnel() -> None:
             tunnel = _load_sibling("fetch_plugin_tunnel", "_tunnel.py")
 
             async def _boot() -> None:
-                creds = await _relay.relay_client()._credentials()
+                relay_client = _relay.relay_client()
+                creds = await relay_client._credentials()
+                owner = tunnel.TunnelOwnerLock(agent_id=creds.agent_id, lock_dir=_relay_runtime_dir(relay_client))
+                if not owner.acquire():
+                    log.info(
+                        "Fetch reverse-tunnel owner already running for agent %s (pid=%s). "
+                        "This process will share that single agent tunnel; multiple Fetch app clients remain supported. "
+                        "If the app cannot connect, check for stale pairing with /api/plugins/fetch/diagnostics or rerun `hermes setup`.",
+                        creds.agent_id,
+                        owner.owner_pid or "unknown",
+                    )
+                    return
                 client = tunnel.AgentTunnel(
                     relay_url=creds.relay_url,
                     agent_id=creds.agent_id,
                     agent_secret=creds.agent_secret,
                     dashboard_token=os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN"),
                 )
-                await client.run_forever()
+                try:
+                    await client.run_forever()
+                finally:
+                    owner.release()
 
             asyncio.run(_boot())
         except Exception:

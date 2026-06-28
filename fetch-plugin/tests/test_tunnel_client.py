@@ -78,6 +78,55 @@ def test_relay_ws_url_built():
     assert t.relay_ws_url == "wss://relay.test/v1/tunnel/agent"
 
 
+def test_tunnel_owner_lock_rejects_second_owner(tmp_path):
+    first = tunnel.TunnelOwnerLock(agent_id="agent/one", lock_dir=tmp_path)
+    second = tunnel.TunnelOwnerLock(agent_id="agent/one", lock_dir=tmp_path)
+
+    try:
+        assert first.acquire() is True
+        assert second.acquire() is False
+        assert second.owner_pid == first.owner_pid
+    finally:
+        first.release()
+
+
+def test_tunnel_owner_lock_status_explains_shared_owner(monkeypatch, tmp_path):
+    lock = tunnel.TunnelOwnerLock(agent_id="agent/one", lock_dir=tmp_path)
+    lock.path.write_text("4242", encoding="utf-8")
+    monkeypatch.setattr(tunnel, "_process_alive", lambda pid: True)
+
+    status = lock.status()
+
+    assert status["state"] == "owned"
+    assert status["owner_pid"] == 4242
+    assert status["owner_current_process"] is False
+    assert "not a device or app-client limit" in status["meaning"]
+    assert lock.acquire() is False
+    assert lock.owner_pid == 4242
+
+
+def test_tunnel_owner_lock_reclaims_stale_owner(monkeypatch, tmp_path):
+    lock = tunnel.TunnelOwnerLock(agent_id="agent/one", lock_dir=tmp_path)
+    lock.path.write_text("4242", encoding="utf-8")
+    monkeypatch.setattr(tunnel, "_process_alive", lambda pid: False)
+
+    try:
+        assert lock.status()["state"] == "stale"
+        assert lock.acquire() is True
+        assert lock.status()["owner_current_process"] is True
+    finally:
+        lock.release()
+
+
+def test_loop_health_marks_unhealthy_after_rapid_events():
+    health = tunnel._LoopHealth(window_s=30, threshold=2)
+
+    assert health.record(reason="relay reconnect loop") is False
+    assert health.record(reason="relay reconnect loop") is True
+    assert health.unhealthy is True
+    assert health.unhealthy_reason == "relay reconnect loop"
+
+
 # --- REST forwarding ---
 
 async def test_rest_text_round_trip():
@@ -123,6 +172,23 @@ async def test_rest_error_returns_502():
     assert ws.sent[0]["status"] == 502
 
 
+async def test_rest_only_does_not_open_local_websocket():
+    calls = {"local": 0}
+
+    async def local_connect(base, token):
+        calls["local"] += 1
+        return FakeLocalConn()
+
+    def handler(request):
+        return httpx.Response(200, json={"ok": True})
+
+    t = _client(local_ws_connect=local_connect, http_client_factory=_http_factory(handler))
+    ws = FakeRelayWS()
+    await t._handle_rest(ws, {"t": "rest-req", "cid": "c1", "sid": 1, "method": "GET", "path": "/api/status"})
+
+    assert calls["local"] == 0
+
+
 # --- WS session bridging ---
 
 async def test_ws_open_pumps_local_frames_back():
@@ -149,6 +215,27 @@ async def test_ws_open_pumps_local_frames_back():
     assert frames[0]["data"]["params"]["type"] == "gateway.ready"
     await t._close_session("c1")
     assert fake.closed
+
+
+async def test_multiple_fetch_app_clients_share_one_agent_tunnel():
+    local_connections = []
+
+    async def local_connect(base, token):
+        conn = FakeLocalConn()
+        local_connections.append(conn)
+        return conn
+
+    t = _client(local_ws_connect=local_connect)
+    ws = FakeRelayWS()
+
+    await t._ensure_session(ws, "phone-1")
+    await t._ensure_session(ws, "phone-2")
+    await t._ensure_session(ws, "phone-1")
+
+    assert set(t._sessions) == {"phone-1", "phone-2"}
+    assert len(local_connections) == 2
+    await t._close_all_sessions()
+    assert all(conn.closed for conn in local_connections)
 
 
 async def test_ws_frame_lazy_opens_session_for_drained_send():
