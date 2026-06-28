@@ -94,15 +94,83 @@ def test_tunnel_owner_lock_status_explains_shared_owner(monkeypatch, tmp_path):
     lock = tunnel.TunnelOwnerLock(agent_id="agent/one", lock_dir=tmp_path)
     lock.path.write_text("4242", encoding="utf-8")
     monkeypatch.setattr(tunnel, "_process_alive", lambda pid: True)
+    monkeypatch.setattr(
+        tunnel,
+        "_process_command",
+        lambda pid: "python -m hermes_cli.main dashboard",
+    )
 
     status = lock.status()
 
     assert status["state"] == "owned"
     assert status["owner_pid"] == 4242
+    assert status["owner_valid"] is True
     assert status["owner_current_process"] is False
     assert "not a device or app-client limit" in status["meaning"]
     assert lock.acquire() is False
     assert lock.owner_pid == 4242
+
+
+def test_tunnel_owner_lock_reclaims_live_foreign_pid(monkeypatch, tmp_path):
+    lock = tunnel.TunnelOwnerLock(agent_id="agent/one", lock_dir=tmp_path)
+    lock.path.write_text("4242", encoding="utf-8")
+    monkeypatch.setattr(tunnel, "_process_alive", lambda pid: True)
+    monkeypatch.setattr(
+        tunnel,
+        "_process_command",
+        lambda pid: "python /tmp/fetch_runtime_restart.py",
+    )
+
+    try:
+        status = lock.status()
+
+        assert status["state"] == "foreign"
+        assert status["owner_pid"] == 4242
+        assert status["owner_alive"] is True
+        assert status["owner_valid"] is False
+        assert lock.acquire() is True
+        assert lock.status()["owner_current_process"] is True
+    finally:
+        lock.release()
+
+
+def test_tunnel_owner_lock_rejects_non_positive_json_pid(monkeypatch, tmp_path):
+    lock = tunnel.TunnelOwnerLock(agent_id="agent/one", lock_dir=tmp_path)
+    monkeypatch.setattr(tunnel, "_process_alive", lambda pid: True)
+    monkeypatch.setattr(tunnel, "_process_command", lambda pid: None)
+
+    for pid in (0, -42):
+        lock.path.write_text(
+            json.dumps(
+                {
+                    "pid": pid,
+                    "role": "fetch-tunnel-owner",
+                    "agent_id": "agent/one",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        status = lock.status()
+
+        assert status["state"] == "invalid"
+        assert status["owner_pid"] is None
+        assert status["owner_alive"] is False
+        assert status["owner_valid"] is False
+
+
+def test_tunnel_owner_lock_rejects_non_positive_legacy_pid(monkeypatch, tmp_path):
+    lock = tunnel.TunnelOwnerLock(agent_id="agent/one", lock_dir=tmp_path)
+    monkeypatch.setattr(tunnel, "_process_alive", lambda pid: True)
+
+    for pid in ("0", "-42"):
+        lock.path.write_text(pid, encoding="utf-8")
+
+        status = lock.status()
+
+        assert status["state"] == "invalid"
+        assert status["owner_pid"] is None
+        assert status["owner_alive"] is False
 
 
 def test_tunnel_owner_lock_reclaims_stale_owner(monkeypatch, tmp_path):

@@ -95,6 +95,11 @@ def test_diagnostics_uses_relay_credentials_home_and_explains_shared_owner(monke
     owner.path.parent.mkdir(parents=True)
     owner.path.write_text("4242", encoding="utf-8")
     monkeypatch.setattr(tunnel, "_process_alive", lambda pid: True)
+    monkeypatch.setattr(
+        tunnel,
+        "_process_command",
+        lambda pid: "python -m hermes_cli.main dashboard",
+    )
     monkeypatch.setattr(runtime, "_runtime_dir", lambda: tmp_path / "wrong-run")
     monkeypatch.setattr(api, "_load_sibling", lambda module_name, filename: runtime if filename == "_runtime.py" else tunnel)
 
@@ -108,6 +113,37 @@ def test_diagnostics_uses_relay_credentials_home_and_explains_shared_owner(monke
     codes = {item["code"] for item in body["relay"]["troubleshooting"]}
     assert "shared_tunnel_owner" in codes
     assert "stale_pairing" in codes
+
+
+def test_diagnostics_reports_foreign_tunnel_lock(monkeypatch, tmp_path):
+    runtime = api._load_sibling("fetch_plugin_runtime_foreign_owner_test", "_runtime.py")
+    tunnel = api._load_sibling("fetch_plugin_tunnel_foreign_owner_test", "_tunnel.py")
+    paired_home = tmp_path / "paired-home"
+    owner = tunnel.TunnelOwnerLock(agent_id="agent-1", lock_dir=paired_home / "run")
+    owner.path.parent.mkdir(parents=True)
+    owner.path.write_text("4242", encoding="utf-8")
+    monkeypatch.setattr(tunnel, "_process_alive", lambda pid: True)
+    monkeypatch.setattr(
+        tunnel,
+        "_process_command",
+        lambda pid: "python /tmp/fetch_runtime_restart.py",
+    )
+    monkeypatch.setattr(runtime, "_runtime_dir", lambda: tmp_path / "wrong-run")
+    monkeypatch.setattr(
+        api,
+        "_load_sibling",
+        lambda module_name, filename: runtime if filename == "_runtime.py" else tunnel,
+    )
+
+    c = _client(_FakeClient(credentials_path=paired_home / "push" / "fetch-relay.json"))
+    body = c.get("/diagnostics").json()
+
+    assert body["relay"]["owner_pid"] == 4242
+    assert body["relay"]["owner"]["state"] == "foreign"
+    assert body["relay"]["owner"]["owner_valid"] is False
+    codes = {item["code"] for item in body["relay"]["troubleshooting"]}
+    assert "foreign_tunnel_owner_lock" in codes
+    assert "shared_tunnel_owner" not in codes
 
 
 def test_diagnostics_reports_missing_pairing_separately_from_owner(monkeypatch, tmp_path):
