@@ -374,7 +374,9 @@ def _on_pre_tool_call(*, tool_name: str = "", args: dict | None = None, **_kwarg
 
 
 def _fetch_is_connected(config) -> bool:
-    return bool(_pairing.is_pairing_configured() or _inbox.validate_config(config))
+    # Delivery env/config can survive plugin disable/re-enable cycles. A Fetch
+    # platform is actually connected only once the relay pairing exists.
+    return bool(_pairing.is_pairing_configured())
 
 
 def _fetch_env_enablement():
