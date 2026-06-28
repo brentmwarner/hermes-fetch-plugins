@@ -24,7 +24,7 @@ def test_ensure_relay_runtime_starts_child_with_tunnel_env(tmp_path, monkeypatch
         return FakeProcess()
 
     monkeypatch.setattr(runtime, "_hermes_home", lambda: tmp_path)
-    monkeypatch.setattr(runtime, "_active_runtime_pid", lambda: None)
+    monkeypatch.setattr(runtime, "_active_runtime_pid", lambda **kwargs: None)
     monkeypatch.setattr(runtime, "_child_pythonpath", lambda: "/tmp/hermes-agent")
     monkeypatch.setattr(runtime, "_child_python_executable", lambda: "/tmp/hermes-venv/bin/python")
     monkeypatch.setattr(runtime.subprocess, "Popen", fake_popen)
@@ -75,7 +75,7 @@ def test_child_pythonpath_ignores_parent_interpreter_paths(tmp_path, monkeypatch
 
 
 def test_ensure_relay_runtime_uses_existing_pid(monkeypatch) -> None:
-    monkeypatch.setattr(runtime, "_active_runtime_pid", lambda: 1234)
+    monkeypatch.setattr(runtime, "_active_runtime_pid", lambda **kwargs: 1234)
     monkeypatch.delenv(runtime.DISABLE_AUTOSTART_ENV, raising=False)
     monkeypatch.delenv(runtime.AUTOSTART_RUNTIME_ENV, raising=False)
 
@@ -94,8 +94,127 @@ def test_active_runtime_pid_reclaims_live_foreign_pid(tmp_path, monkeypatch) -> 
         lambda pid: "python /tmp/fetch_runtime_restart.py",
     )
 
-    assert runtime._active_runtime_pid() is None
+    assert runtime._active_runtime_pid(reclaim_legacy=True) is None
     assert not (runtime_dir / "fetch-relay-runtime.pid").exists()
+
+
+def test_active_runtime_pid_retires_legacy_autostart_runtime(tmp_path, monkeypatch) -> None:
+    runtime_dir = tmp_path / "run"
+    runtime_dir.mkdir()
+    (runtime_dir / "fetch-relay-runtime.pid").write_text("4242", encoding="utf-8")
+    terminated = []
+    monkeypatch.setattr(runtime, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(runtime, "_process_alive", lambda pid: True)
+    monkeypatch.setattr(
+        runtime,
+        "_process_command",
+        lambda pid: "python -c HERMES_FETCH_TUNNEL_AUTOSTARTED_RUNTIME",
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_terminate_process",
+        lambda pid: terminated.append(pid) or True,
+    )
+
+    assert runtime._active_runtime_pid(reclaim_legacy=True) is None
+    assert terminated == [4242]
+    assert not (runtime_dir / "fetch-relay-runtime.pid").exists()
+
+
+def test_active_runtime_pid_inspects_legacy_autostart_runtime_without_reclaim(tmp_path, monkeypatch) -> None:
+    runtime_dir = tmp_path / "run"
+    runtime_dir.mkdir()
+    pid_path = runtime_dir / "fetch-relay-runtime.pid"
+    pid_path.write_text("4242", encoding="utf-8")
+    monkeypatch.setattr(runtime, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(runtime, "_process_alive", lambda pid: True)
+    monkeypatch.setattr(
+        runtime,
+        "_process_command",
+        lambda pid: "python -c HERMES_FETCH_TUNNEL_AUTOSTARTED_RUNTIME",
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_terminate_process",
+        lambda pid: (_ for _ in ()).throw(AssertionError("read-only lookup should not terminate")),
+    )
+
+    assert runtime._active_runtime_pid() == 4242
+    assert pid_path.exists()
+
+
+def test_terminate_process_waits_after_sigkill(monkeypatch) -> None:
+    signals = []
+    alive = {"value": True}
+
+    def fake_kill(pid, sig):
+        signals.append(sig)
+        if sig == runtime.signal.SIGKILL:
+            alive["value"] = False
+
+    monkeypatch.setattr(runtime.os, "kill", fake_kill)
+    monkeypatch.setattr(runtime, "_process_alive", lambda pid: alive["value"])
+
+    assert runtime._terminate_process(4242, timeout_s=0) is True
+    assert signals == [runtime.signal.SIGTERM, runtime.signal.SIGKILL]
+
+
+def test_active_runtime_pid_drops_legacy_pid_when_command_unavailable(tmp_path, monkeypatch) -> None:
+    runtime_dir = tmp_path / "run"
+    runtime_dir.mkdir()
+    (runtime_dir / "fetch-relay-runtime.pid").write_text("4242", encoding="utf-8")
+    monkeypatch.setattr(runtime, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(runtime, "_process_alive", lambda pid: True)
+    monkeypatch.setattr(runtime, "_process_command", lambda pid: None)
+    monkeypatch.setattr(
+        runtime,
+        "_terminate_process",
+        lambda pid: (_ for _ in ()).throw(AssertionError("should not terminate unknown process")),
+    )
+
+    assert runtime._active_runtime_pid(reclaim_legacy=True) is None
+    assert not (runtime_dir / "fetch-relay-runtime.pid").exists()
+
+
+def test_active_runtime_pid_inspects_command_unavailable_legacy_pid_without_reclaim(tmp_path, monkeypatch) -> None:
+    runtime_dir = tmp_path / "run"
+    runtime_dir.mkdir()
+    pid_path = runtime_dir / "fetch-relay-runtime.pid"
+    pid_path.write_text("4242", encoding="utf-8")
+    monkeypatch.setattr(runtime, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(runtime, "_process_alive", lambda pid: True)
+    monkeypatch.setattr(runtime, "_process_command", lambda pid: None)
+    monkeypatch.setattr(
+        runtime,
+        "_terminate_process",
+        lambda pid: (_ for _ in ()).throw(AssertionError("read-only lookup should not terminate")),
+    )
+
+    assert runtime._active_runtime_pid() is None
+    assert pid_path.exists()
+
+
+def test_active_runtime_pid_keeps_structured_runtime_record(tmp_path, monkeypatch) -> None:
+    runtime_dir = tmp_path / "run"
+    runtime_dir.mkdir()
+    (runtime_dir / "fetch-relay-runtime.pid").write_text(
+        json.dumps({"pid": 4242, "role": "fetch-relay-runtime"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(runtime, "_process_alive", lambda pid: True)
+    monkeypatch.setattr(
+        runtime,
+        "_process_command",
+        lambda pid: "python -c HERMES_FETCH_TUNNEL_AUTOSTARTED_RUNTIME",
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_terminate_process",
+        lambda pid: (_ for _ in ()).throw(AssertionError("should not terminate")),
+    )
+
+    assert runtime._active_runtime_pid() == 4242
 
 
 def test_active_runtime_pid_rejects_non_positive_json_pid(tmp_path, monkeypatch) -> None:

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -84,6 +85,39 @@ def _command_looks_like_runtime(command: str | None) -> bool:
     if "/hermes " in lowered and "dashboard" in lowered:
         return True
     return False
+
+
+def _terminate_process(pid: int, *, timeout_s: float = 1.0) -> bool:
+    def wait_until_gone(deadline: float) -> bool:
+        while time.monotonic() < deadline:
+            if not _process_alive(pid):
+                return True
+            time.sleep(0.05)
+        return not _process_alive(pid)
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except Exception:
+        log.debug("Fetch could not terminate legacy relay runtime pid=%s", pid, exc_info=True)
+        return False
+
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    if wait_until_gone(deadline):
+        return True
+
+    sigkill = getattr(signal, "SIGKILL", None)
+    if sigkill is not None:
+        try:
+            os.kill(pid, sigkill)
+        except ProcessLookupError:
+            return True
+        except Exception:
+            log.debug("Fetch could not kill legacy relay runtime pid=%s", pid, exc_info=True)
+            return False
+        return wait_until_gone(time.monotonic() + max(0.0, timeout_s))
+    return not _process_alive(pid)
 
 
 def _read_pid_record(path: Path) -> tuple[int | None, str | None]:
@@ -162,7 +196,7 @@ def _child_python_executable() -> str:
     return sys.executable
 
 
-def _active_runtime_pid() -> int | None:
+def _active_runtime_pid(*, reclaim_legacy: bool = False) -> int | None:
     path = _pid_path()
     pid, role = _read_pid_record(path)
     if pid is None:
@@ -171,10 +205,31 @@ def _active_runtime_pid() -> int | None:
         return None
     alive = _process_alive(pid)
     command = _process_command(pid) if alive else None
+    if alive and role != _PID_ROLE and _command_looks_like_runtime(command):
+        if not reclaim_legacy:
+            return pid
+        log.info(
+            "Fetch relay runtime pid file is legacy for pid=%s; restarting it with current plugin code",
+            pid,
+        )
+        if not _terminate_process(pid):
+            return pid
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return None
+    if alive and role != _PID_ROLE and command is None and not reclaim_legacy:
+        return None
+    # If a legacy bare-PID record points at a live process whose command cannot
+    # be inspected, do not terminate it blindly. Startup drops the untrusted PID
+    # file so the current plugin can start and write a structured owner record.
     if alive and _command_looks_like_runtime(command):
         return pid
     if alive and role == _PID_ROLE and command is None:
         return pid
+    if not reclaim_legacy:
+        return None
     try:
         path.unlink()
     except OSError:
@@ -265,7 +320,7 @@ def ensure_relay_runtime() -> str:
         return "disabled"
     if truthy(os.environ.get(AUTOSTART_RUNTIME_ENV)):
         return "self"
-    if _active_runtime_pid() is not None:
+    if _active_runtime_pid(reclaim_legacy=True) is not None:
         return "already-running"
 
     log_dir = _hermes_home() / "logs"
