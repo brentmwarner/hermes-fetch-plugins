@@ -391,15 +391,25 @@ def _relay_runtime_dir(relay_client) -> Path:
     return _runtime._runtime_dir()
 
 
-def _should_start_tunnel() -> bool:
+def _tunnel_start_reason() -> str | None:
     configured = os.environ.get("HERMES_FETCH_TUNNEL_ENABLED")
     if configured is not None and configured.strip():
-        return _truthy(configured)
+        if _truthy(configured):
+            return "enabled by HERMES_FETCH_TUNNEL_ENABLED"
+        return None
     try:
-        return _pairing.is_pairing_configured()
+        if _pairing.is_pairing_configured():
+            return (
+                "auto-started: relay pairing present; "
+                "set HERMES_FETCH_TUNNEL_ENABLED=0 to disable"
+            )
     except Exception:
         log.debug("Fetch could not determine pairing state for tunnel autostart", exc_info=True)
-        return False
+    return None
+
+
+def _should_start_tunnel() -> bool:
+    return _tunnel_start_reason() is not None
 
 
 def _spawn_tunnel() -> None:
@@ -409,7 +419,8 @@ def _spawn_tunnel() -> None:
     if the legacy env flag was not persisted. The tunnel module + its
     `websockets` dep are imported lazily here, so an unpaired host is unaffected.
     """
-    if not _should_start_tunnel():
+    start_reason = _tunnel_start_reason()
+    if start_reason is None:
         return
     if _runtime.ensure_relay_runtime() in {"started", "already-running"}:
         return
@@ -447,7 +458,7 @@ def _spawn_tunnel() -> None:
             log.warning("Fetch reverse-tunnel client failed to start", exc_info=True)
 
     threading.Thread(target=_run, daemon=True, name="fetch-tunnel").start()
-    log.info("Fetch reverse-tunnel client starting")
+    log.info("Fetch reverse-tunnel client starting (%s)", start_reason)
 
 
 def register(ctx) -> None:
