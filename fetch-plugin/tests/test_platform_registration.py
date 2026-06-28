@@ -70,6 +70,34 @@ def test_fetch_tunnel_false_env_overrides_pairing(monkeypatch):
     assert fetch._tunnel_start_reason() is None
 
 
+def test_fetch_is_not_connected_from_stale_delivery_env(monkeypatch):
+    monkeypatch.setenv("HERMES_FETCH_DELIVERY_ENABLED", "1")
+    monkeypatch.setenv("HERMES_FETCH_HOME_CHANNEL", "default")
+    fetch = _load_module(
+        "fetch_plugin_stale_env_status_test",
+        FETCH_PLUGIN_DIR / "__init__.py",
+    )
+    monkeypatch.setattr(fetch._pairing, "is_pairing_configured", lambda: False)
+
+    config = types.SimpleNamespace(home_channel={"chat_id": "default", "name": "Fetch"})
+
+    assert fetch._inbox.validate_config(config) is True
+    assert fetch._fetch_is_connected(config) is False
+
+
+def test_fetch_is_connected_from_relay_pairing(monkeypatch):
+    monkeypatch.setenv("HERMES_FETCH_DELIVERY_ENABLED", "0")
+    fetch = _load_module(
+        "fetch_plugin_pairing_status_test",
+        FETCH_PLUGIN_DIR / "__init__.py",
+    )
+    monkeypatch.setattr(fetch._pairing, "is_pairing_configured", lambda: True)
+
+    config = types.SimpleNamespace(home_channel=None)
+
+    assert fetch._fetch_is_connected(config) is True
+
+
 def test_fetch_cards_skill_never_overwrites_custom_skill(tmp_path, monkeypatch):
     fetch = _load_module("fetch_plugin_skill_install_test", FETCH_PLUGIN_DIR / "__init__.py")
     target = tmp_path / "skills" / "fetch-cards"
