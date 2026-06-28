@@ -155,3 +155,46 @@ async def test_relay_pairing_mints_on_demand_when_missing(monkeypatch, tmp_path)
     assert "/v1/agents/register" not in posted       # used cached identity
     assert "/v1/agents/pairing" in posted            # minted on demand
     assert json.loads(creds_path.read_text())["pairing"] == "p2"  # persisted for reuse
+
+
+async def test_tunnel_status_uses_agent_credentials(monkeypatch, tmp_path):
+    seen = {}
+    def handler(request):
+        seen["path"] = request.url.path
+        seen["agent_id"] = request.headers.get("X-Hermes-Agent-Id")
+        seen["auth"] = request.headers.get("Authorization")
+        if request.url.path == "/v1/agents/tunnel/status":
+            return httpx.Response(503, json={"ok": False, "agent_online": False, "reason": "agent_offline"})
+        return httpx.Response(404)
+    _patch_transport(monkeypatch, handler)
+    creds_path = tmp_path / "c.json"
+    client = relay.RelayClient(relay_url="https://relay.test", credentials_path=creds_path)
+    client._write_credentials(relay.RelayCredentials(
+        relay_url="https://relay.test", agent_id="a1", agent_secret="s1", pairing="p1"))
+
+    status = await client.tunnel_status()
+
+    assert seen == {
+        "path": "/v1/agents/tunnel/status",
+        "agent_id": "a1",
+        "auth": "Bearer s1",
+    }
+    assert status["reason"] == "agent_offline"
+
+
+async def test_wait_for_tunnel_online_polls_until_ready(monkeypatch, tmp_path):
+    statuses = [
+        {"ok": False, "agent_online": False, "reason": "agent_offline"},
+        {"ok": True, "agent_online": True},
+    ]
+    client = relay.RelayClient(relay_url="https://relay.test", credentials_path=tmp_path / "c.json")
+
+    async def fake_status():
+        return statuses.pop(0)
+
+    monkeypatch.setattr(client, "tunnel_status", fake_status)
+
+    status = await client.wait_for_tunnel_online(timeout_s=1.0, interval_s=0.1)
+
+    assert status["ok"] is True
+    assert statuses == []

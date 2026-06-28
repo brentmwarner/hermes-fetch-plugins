@@ -126,12 +126,23 @@ def build_relay_link(*, agent_id: str, pairing: str, relay_url: str) -> str:
 
 def _try_build_relay_link() -> str | None:
     """Best-effort relay pairing link. Returns None if the relay can't be reached."""
+    pairing = _try_build_relay_pairing()
+    return str(pairing["link"]) if pairing is not None else None
+
+
+def _try_build_relay_pairing() -> dict | None:
+    """Best-effort relay pairing details. Returns None if the relay can't be reached."""
     try:
         relay = _relay_module()
-        relay_url, agent_id, pairing = asyncio.run(relay.relay_client().relay_pairing())
+        client = relay.relay_client()
+        relay_url, agent_id, pairing = asyncio.run(client.relay_pairing())
         if not agent_id or not pairing:
             return None
-        return build_relay_link(agent_id=agent_id, pairing=pairing, relay_url=relay_url)
+        return {
+            "client": client,
+            "agent_id": agent_id,
+            "link": build_relay_link(agent_id=agent_id, pairing=pairing, relay_url=relay_url),
+        }
     except Exception:
         return None
 
@@ -213,6 +224,30 @@ def interactive_setup() -> None:
         print(f"    {link}")
         print()
 
+    def _print_tunnel_not_ready(runtime_status: str, tunnel_status: dict) -> None:
+        reason = str(tunnel_status.get("reason") or "agent_offline")
+        print_warning(
+            "Fetch created a relay pairing, but this agent's tunnel is not online yet. "
+            "The setup QR is hidden because the app would fail to connect right now."
+        )
+        print()
+        if runtime_status == "disabled":
+            print_info(
+                "Autostart is disabled. Start the Fetch relay runtime manually:\n"
+                "      HERMES_FETCH_TUNNEL_ENABLED=1 hermes dashboard --no-open"
+            )
+        elif runtime_status == "failed":
+            print_info(
+                "Fetch could not start the relay runtime automatically. Start it manually:\n"
+                "      HERMES_FETCH_TUNNEL_ENABLED=1 hermes dashboard --no-open"
+            )
+        else:
+            print_info("Fetch started the relay runtime, but the relay still reports the agent offline.")
+        print_info(f"Tunnel status: {reason}")
+        print_info(f"Runtime log: {_hermes_home() / 'logs' / 'fetch-relay-runtime.log'}")
+        print_info("After it is online, rerun `hermes setup gateway` and choose Fetch.")
+        print()
+
     print_header("Fetch")
     if is_pairing_configured():
         _inbox_module().enable_delivery_for_future_starts()
@@ -224,13 +259,28 @@ def interactive_setup() -> None:
     print_info("Pair the Fetch iOS app to this agent — like linking WhatsApp Web.")
     print()
 
-    relay_link = _try_build_relay_link()
+    relay_pairing = _try_build_relay_pairing()
 
-    if relay_link:
+    if relay_pairing:
         _inbox_module().enable_delivery_for_future_starts()
         runtime = _runtime_module()
         runtime.enable_tunnel_for_future_starts()
         runtime_status = runtime.ensure_relay_runtime()
+        relay_link = str(relay_pairing["link"])
+        tunnel_status = {"ok": False, "reason": "runtime_not_started"}
+        if runtime_status in {"started", "already-running", "self"}:
+            print_info("Waiting for the Fetch relay tunnel to come online...")
+            tunnel_status = asyncio.run(relay_pairing["client"].wait_for_tunnel_online())
+
+        if not bool(tunnel_status.get("ok") or tunnel_status.get("agent_online")):
+            if tunnel_status.get("reason") != "status_unavailable":
+                _print_tunnel_not_ready(runtime_status, tunnel_status)
+                return
+            print_warning(
+                "This relay does not expose tunnel readiness status, so Fetch cannot verify "
+                "the agent tunnel before showing the setup link."
+            )
+            print()
 
         # Relay is the headline path: works anywhere, no Tailscale. QR + link.
         _print_pairing(

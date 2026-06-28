@@ -39,7 +39,10 @@ processes**, coupled only through the relay:
 - **Headless relay runtime** (`_runtime.py`): successful relay setup starts a
   background loopback-only Hermes dashboard/API process with no browser window.
   The reverse tunnel stays alive after `hermes setup` exits, so the phone does
-  not need a public dashboard, Tailscale, or an open browser tab.
+  not need a public dashboard, Tailscale, or an open browser tab. Setup waits
+  for the relay to report this agent's tunnel online before it shows the QR/link;
+  if the tunnel cannot come online, setup hides the link so the app does not
+  receive an unusable pairing.
 - `_relay.py` is the shared relay client, loaded **by file path** from both
   halves (they don't share a Python import).
 
