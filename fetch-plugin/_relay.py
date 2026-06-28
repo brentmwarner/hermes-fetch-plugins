@@ -216,12 +216,11 @@ class RelayClient:
 
     async def relay_pairing(self) -> tuple[str, str, str]:
         """Return ``(relay_url, agent_id, pairing)`` for building a relay setup
-        link. Reuses the pairing token captured at registration; mints a fresh
-        one via the relay for agents enrolled before pairing capture existed
-        (the relay only stores the hash, so it can never hand back the original).
+        link. Always mints a fresh token so rerunning Hermes setup after a
+        successful app claim cannot reprint a stale one-time pairing secret.
         """
         creds = await self._credentials()
-        pairing = creds.pairing or await self._mint_pairing(creds)
+        pairing = await self._mint_pairing(creds)
         return self.relay_url, creds.agent_id, pairing
 
     async def tunnel_status(self) -> dict:
