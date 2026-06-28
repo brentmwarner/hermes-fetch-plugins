@@ -62,6 +62,17 @@ hermes setup                # choose Fetch, then scan/paste the setup link
 Then open Fetch on the phone and allow notifications. No Apple account, no
 `.p8`, no core edits, no public dashboard URL, and no browser tab to keep open.
 
+## Reconfigure or reset
+
+Run `hermes setup` again, choose Fetch, and confirm the reconfigure prompt. The
+plugin mints a fresh setup link every time.
+
+If Fetch was disabled and later re-enabled, old `HERMES_FETCH_*` delivery values
+may still exist in `~/.hermes/.env`; they are harmless and do not count as a
+connected Fetch setup by themselves. The setup status is based on the relay
+pairing stored at `~/.hermes/push/fetch-relay.json`, because that is the state
+the phone actually needs to reach the agent.
+
 ## Configuration
 
 Most users set nothing — Fetch setup configures delivery and the tunnel for you.
