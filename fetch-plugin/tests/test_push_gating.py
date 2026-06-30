@@ -33,9 +33,10 @@ class _Sent:
     def __init__(self):
         self.calls = []
 
-    def __call__(self, *, kind, session_id, title, body, source=None):
+    def __call__(self, *, kind, session_id, title, body, source=None, data=None):
         self.calls.append({"kind": kind, "session_id": session_id,
-                           "title": title, "body": body, "source": source})
+                           "title": title, "body": body, "source": source,
+                           "data": data or {}})
 
 
 @pytest.fixture
@@ -75,6 +76,24 @@ def test_fetch_app_reply_pushes_with_fetch_source(sent, monkeypatch):
     assert captured.calls[0]["session_id"] == "s1"
 
 
+def test_fetch_app_reply_card_push_uses_readable_body(sent, monkeypatch):
+    plugin, captured = sent
+    _set_source(monkeypatch, plugin, "fetch")
+    plugin._on_post_llm_call(
+        session_id="s1",
+        assistant_response=(
+            "```card\n"
+            '{"title":"World Cup Brief","subtitle":"Today at a glance",'
+            '"stats":[{"label":"Matches","value":2}]}\n'
+            "```"
+        ),
+    )
+
+    assert len(captured.calls) == 1
+    assert captured.calls[0]["body"] == "World Cup Brief, Today at a glance, Matches 2"
+    assert "{" not in captured.calls[0]["body"]
+
+
 def test_inbox_channel_reply_pushes(sent, monkeypatch):
     plugin, captured = sent
     _set_source(monkeypatch, plugin, "inbox")
@@ -107,6 +126,64 @@ def test_background_worker_never_pushes(sent, monkeypatch):
     finally:
         monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     assert captured.calls == []
+
+
+def test_kanban_completed_pushes_task_context_even_in_worker(sent, monkeypatch):
+    plugin, captured = sent
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "task-1")
+    monkeypatch.setattr(
+        plugin,
+        "_kanban_task_snapshot",
+        lambda task_id, board: {"title": "Ship notifications", "assignee": "codex"},
+    )
+
+    plugin._on_kanban_task_completed(
+        task_id="task-1",
+        board="default",
+        assignee=None,
+        run_id=42,
+        summary="Added task deep links.",
+    )
+
+    assert len(captured.calls) == 1
+    assert captured.calls[0]["kind"] == "proactive"
+    assert captured.calls[0]["session_id"] is None
+    assert captured.calls[0]["source"] == "kanban"
+    assert captured.calls[0]["title"] == "Task finished"
+    assert captured.calls[0]["body"] == "Ship notifications: Added task deep links."
+    assert captured.calls[0]["data"] == {
+        "target": "task",
+        "task_id": "task-1",
+        "task_status": "done",
+        "board": "default",
+        "assignee": "codex",
+        "run_id": "42",
+    }
+
+
+def test_kanban_blocked_pushes_attention_context(sent, monkeypatch):
+    plugin, captured = sent
+    monkeypatch.setattr(
+        plugin,
+        "_kanban_task_snapshot",
+        lambda task_id, board: {"title": "Fix CI", "assignee": ""},
+    )
+
+    plugin._on_kanban_task_blocked(
+        task_id="task-2",
+        board="mobile",
+        assignee="reviewer",
+        run_id=7,
+        reason="Needs a signing decision.",
+    )
+
+    assert len(captured.calls) == 1
+    assert captured.calls[0]["kind"] == "attention"
+    assert captured.calls[0]["title"] == "Task blocked"
+    assert captured.calls[0]["body"] == "Fix CI: Needs a signing decision."
+    assert captured.calls[0]["data"]["target"] == "task"
+    assert captured.calls[0]["data"]["task_id"] == "task-2"
+    assert captured.calls[0]["data"]["task_status"] == "blocked"
 
 
 def test_approval_always_pushes_with_platform_source(sent, monkeypatch):
