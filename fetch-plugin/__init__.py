@@ -7,10 +7,11 @@ credentials on this host:
     appears in ``hermes setup`` next to Telegram/Discord, with a relay pairing
     flow (``setup_fn``) that prints a setup link + QR for the iOS app. Same
     plugin extension point Discord uses (``ctx.register_platform``).
-  * **Push hooks** — two agent hooks notify the app like a messaging app:
+  * **Push hooks** — agent hooks notify the app like a messaging app:
       - ``post_llm_call``        — a turn finished anywhere → "Fetch replied".
       - ``pre_approval_request`` — agent waiting on approval/question/secret →
                                    "needs attention".
+      - ``kanban_task_*``        — tasks finished/blocked → contextual task push.
   * **Generative-UI platform hint** — the ``platform_hint`` registered with
     the platform teaches the agent (via the cached system prompt, Fetch
     sessions only) to emit ``card`` fences the iOS app renders natively as
@@ -39,6 +40,7 @@ and its ``register(ctx)`` is called once at agent startup.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
 import logging
 import os
@@ -196,6 +198,7 @@ _relay = _load_sibling("fetch_plugin_relay", "_relay.py")
 _pairing = _load_sibling("fetch_plugin_pairing", "_pairing.py")
 _runtime = _load_sibling("fetch_plugin_runtime", "_runtime.py")
 _inbox = _load_sibling("fetch_plugin_inbox", "_inbox.py")
+_preview = _load_sibling("fetch_plugin_preview", "_preview.py")
 
 
 # Sentinels a directory the plugin installed itself (vs. a user/custom skill it
@@ -258,7 +261,10 @@ def _on_post_llm_call(*, session_id: str = "", assistant_response: str = "", **_
     source = _normalized_source(_session_source(session_id or None))
     if source not in FETCH_APP_SOURCES:
         return
-    body = (assistant_response or "").strip() or "Finished working."
+    body = _preview.notification_body(
+        assistant_response,
+        fallback="Finished working.",
+    )
     _relay.send_event_background(
         kind="replies", session_id=session_id or None, title="Fetch replied",
         body=body, source=source,
@@ -271,7 +277,10 @@ def _on_pre_approval_request(
     """The agent is blocking on an approval / question / secret."""
     if _is_kanban_worker():
         return  # FET-5: a worker's approval prompt is automation, not a message.
-    detail = (description or command or "").strip() or "Open Fetch to continue."
+    detail = _preview.notification_body(
+        description or command,
+        fallback="Open Fetch to continue.",
+    )
     # Approvals always notify (the agent needs the user regardless of surface).
     # Carry the channel parsed from the session_key so the device can later
     # decide inbox membership; session_key shape is ``agent:<profile>:<platform>:<type>:<id>``.
@@ -279,6 +288,136 @@ def _on_pre_approval_request(
     _relay.send_event_background(
         kind="attention", session_id=session_key or None,
         title="Fetch needs your attention", body=detail, source=source,
+    )
+
+
+def _compact_text(value: object, *, fallback: str = "", limit: int = 500) -> str:
+    text = _preview.plain_text(value)
+    if not text:
+        return fallback
+    return text[:limit]
+
+
+def _kanban_task_snapshot(task_id: str, board: str | None) -> dict[str, str]:
+    """Best-effort durable task context for notification copy."""
+    if not task_id:
+        return {}
+    try:
+        from hermes_cli import kanban_db as kb
+
+        with contextlib.closing(kb.connect(board=board or None)) as conn:
+            task = kb.get_task(conn, task_id)
+    except Exception:
+        log.debug("Fetch plugin could not load kanban task context", exc_info=True)
+        return {}
+    if task is None:
+        return {}
+    return {
+        "title": _compact_text(getattr(task, "title", ""), fallback="Task"),
+        "status": _compact_text(getattr(task, "status", "")),
+        "assignee": _compact_text(getattr(task, "assignee", "")),
+    }
+
+
+def _task_push_body(*, title: str, detail: object, fallback: str) -> str:
+    clean_title = _compact_text(title, fallback="Task", limit=160)
+    clean_detail = _compact_text(detail, limit=340)
+    if clean_title and clean_detail:
+        return f"{clean_title}: {clean_detail}"[:500]
+    return clean_detail or clean_title or fallback
+
+
+def _task_push_data(
+    *,
+    task_id: str,
+    board: str | None,
+    assignee: str | None,
+    run_id: int | None,
+    status: str,
+) -> dict[str, str]:
+    data = {
+        "target": "task",
+        "task_id": task_id,
+        "task_status": status,
+    }
+    if board:
+        data["board"] = str(board)
+    if assignee:
+        data["assignee"] = str(assignee)
+    if run_id is not None:
+        data["run_id"] = str(run_id)
+    return data
+
+
+def _on_kanban_task_completed(
+    *,
+    task_id: str = "",
+    board: str | None = None,
+    assignee: str | None = None,
+    run_id: int | None = None,
+    summary: str | None = None,
+    **_kwargs,
+) -> None:
+    """A kanban worker finished a task; notify with task-specific context."""
+    task_id = _compact_text(task_id, limit=160)
+    if not task_id:
+        return
+    snapshot = _kanban_task_snapshot(task_id, board)
+    title = snapshot.get("title") or "Task"
+    body = _task_push_body(
+        title=title,
+        detail=summary,
+        fallback="Task finished.",
+    )
+    _relay.send_event_background(
+        kind="proactive",
+        session_id=None,
+        title="Task finished",
+        body=body,
+        source="kanban",
+        data=_task_push_data(
+            task_id=task_id,
+            board=board,
+            assignee=assignee or snapshot.get("assignee"),
+            run_id=run_id,
+            status="done",
+        ),
+    )
+
+
+def _on_kanban_task_blocked(
+    *,
+    task_id: str = "",
+    board: str | None = None,
+    assignee: str | None = None,
+    run_id: int | None = None,
+    reason: str | None = None,
+    **_kwargs,
+) -> None:
+    """A kanban task needs human attention."""
+    task_id = _compact_text(task_id, limit=160)
+    if not task_id:
+        return
+    snapshot = _kanban_task_snapshot(task_id, board)
+    title = snapshot.get("title") or "Task"
+    body = _task_push_body(
+        title=title,
+        detail=reason,
+        fallback="Task blocked.",
+    )
+    _relay.send_event_background(
+        kind="attention",
+        session_id=None,
+        title="Task blocked",
+        body=body,
+        source="kanban",
+        data=_task_push_data(
+            task_id=task_id,
+            board=board,
+            assignee=assignee or snapshot.get("assignee"),
+            run_id=run_id,
+            status="blocked",
+        ),
     )
 
 
@@ -470,6 +609,8 @@ def register(ctx) -> None:
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     ctx.register_hook("post_llm_call", _on_post_llm_call)
     ctx.register_hook("pre_approval_request", _on_pre_approval_request)
+    ctx.register_hook("kanban_task_completed", _on_kanban_task_completed)
+    ctx.register_hook("kanban_task_blocked", _on_kanban_task_blocked)
     # Quality gate: require a real `body` on agent-created kanban tasks (FET-16).
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
 

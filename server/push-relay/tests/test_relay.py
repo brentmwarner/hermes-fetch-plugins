@@ -101,6 +101,51 @@ def test_agent_device_push_flow_uses_custom_copy_by_default() -> None:
     assert attention_res.json()["sent"] == 0
 
 
+def test_push_flow_includes_custom_payload_data() -> None:
+    client, fake_apns = _client()
+    headers = _register_agent(client)
+
+    device_res = client.post(
+        "/v1/devices/register",
+        headers=headers,
+        json={
+            "token": "device-token",
+            "platform": "ios",
+            "environment": "sandbox",
+            "bundle_id": "com.brentwarner.fetch",
+            "preferences": {"proactive": True},
+        },
+    )
+    assert device_res.status_code == 200
+
+    push_res = client.post(
+        "/v1/push/events",
+        headers=headers,
+        json={
+            "type": "proactive",
+            "title": "Task finished",
+            "body": "Ship notifications: Done.",
+            "source": "kanban",
+            "data": {
+                "target": "task",
+                "task_id": "task-1",
+                "task_status": "done",
+                "aps": "ignored",
+                "source": "ignored",
+            },
+        },
+    )
+
+    assert push_res.status_code == 200
+    assert push_res.json()["sent"] == 1
+    payload = fake_apns.sent[0]["payload"]
+    assert payload["target"] == "task"
+    assert payload["task_id"] == "task-1"
+    assert payload["task_status"] == "done"
+    assert payload["source"] == "kanban"
+    assert payload["aps"]["alert"]["title"] == "Task finished"
+
+
 def test_push_flow_uses_generic_copy_when_custom_body_disabled() -> None:
     client, fake_apns = _client(allow_custom_body=False)
     headers = _register_agent(client)

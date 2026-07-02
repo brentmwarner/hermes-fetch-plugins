@@ -241,6 +241,28 @@ def test_deliver_to_inbox_passes_source_inbox(monkeypatch):
     assert relay_calls and relay_calls[0]["source"] == "inbox"
 
 
+def test_deliver_to_inbox_card_push_body_is_readable(monkeypatch):
+    inbox = _load_inbox()
+    relay_calls = []
+    fake_relay = type("R", (), {"send_event_background": staticmethod(lambda **kw: relay_calls.append(kw))})
+    monkeypatch.setattr(inbox, "_load_relay", lambda: fake_relay)
+    monkeypatch.setattr(inbox, "SessionDB", lambda **kw: _FakeDB())
+    body = """
+Cronjob Response: Morning World Cup
+(job_id: abc123)
+
+```card
+{"title":"World Cup Brief","subtitle":"Today at a glance","stats":[{"label":"Matches","value":2}],"items":[{"title":"Spain vs Japan","subtitle":"9 AM ET"}]}
+```
+"""
+
+    inbox.deliver_to_inbox(channel="default", content=body, title="Morning World Cup")
+
+    assert relay_calls[0]["body"] == "World Cup Brief, Today at a glance, Matches 2, Spain vs Japan, 9 AM ET"
+    assert "{" not in relay_calls[0]["body"]
+    assert relay_calls[0]["source"] == "inbox"
+
+
 def test_deliver_to_inbox_uses_store_home_override(monkeypatch, tmp_path):
     """A delivery under a worker profile persists into the override home's db."""
     inbox = _load_inbox()

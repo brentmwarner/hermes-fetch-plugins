@@ -24,6 +24,7 @@ from push_relay import tunnel
 logger = logging.getLogger(__name__)
 
 PushKind = Literal["replies", "attention", "proactive"]
+PushDataValue = str | int | float | bool | None
 
 _PROD_HOST = "https://api.push.apple.com"
 _SANDBOX_HOST = "https://api.sandbox.push.apple.com"
@@ -171,6 +172,7 @@ class PushEventBody(BaseModel):
     title: str | None = Field(default=None, max_length=120)
     body: str | None = Field(default=None, max_length=500)
     source: str | None = Field(default=None, max_length=80)
+    data: dict[str, PushDataValue] = Field(default_factory=dict)
 
 
 def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
@@ -676,6 +678,7 @@ class PushService:
         title: str | None,
         body: str | None,
         source: str | None = None,
+        data: dict[str, PushDataValue] | None = None,
     ) -> dict:
         devices = self._store.list_devices(agent_id=agent_id, category=kind)
         event_id = self._store.record_event(
@@ -710,6 +713,7 @@ class PushService:
                 session_id=session_id,
                 sound=device.sound,
                 source=source,
+                data=data,
             )
             # No apns-collapse-id: each reply/attention/proactive message is its own
             # notification. Grouping is handled by aps "thread-id" (see _payload), so
@@ -936,6 +940,7 @@ def create_app(
             title=body.title,
             body=body.body,
             source=body.source,
+            data=body.data,
         )
 
     if settings.enable_tunnel:
@@ -1028,6 +1033,7 @@ def _payload(
     session_id: str | None,
     sound: bool,
     source: str | None,
+    data: dict[str, PushDataValue] | None = None,
 ) -> dict:
     aps = {
         "alert": {"title": title, "body": body[:160]},
@@ -1037,7 +1043,27 @@ def _payload(
         aps["interruption-level"] = "time-sensitive"
     if sound:
         aps["sound"] = "default"
-    return {"aps": aps, "session_id": session_id or "", "type": kind, "source": source}
+    payload = {"aps": aps, "session_id": session_id or "", "type": kind, "source": source}
+    payload.update(_custom_payload_data(data or {}))
+    return payload
+
+
+def _custom_payload_data(data: dict[str, PushDataValue]) -> dict[str, PushDataValue]:
+    reserved = {"aps", "session_id", "type", "source"}
+    payload: dict[str, PushDataValue] = {}
+    for raw_key, value in data.items():
+        key = str(raw_key).strip()
+        if not key or key in reserved or key.startswith("aps"):
+            continue
+        if value is None:
+            continue
+        if isinstance(value, str):
+            payload[key[:64]] = value[:500]
+        elif isinstance(value, bool):
+            payload[key[:64]] = value
+        elif isinstance(value, (int, float)):
+            payload[key[:64]] = value
+    return payload
 
 
 app = create_app()
