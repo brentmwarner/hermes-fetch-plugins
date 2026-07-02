@@ -137,11 +137,11 @@ class RelayClient:
         await self._post("/v1/devices/unregister", {"token": token}, authenticated=True)
 
     async def send_event(self, *, kind: str, session_id: str | None, title: str, body: str,
-                         source: str | None = None) -> None:
+                         source: str | None = None, data: dict | None = None) -> None:
         await self._post(
             "/v1/push/events",
             {"type": kind, "session_id": session_id, "title": title, "body": body,
-             "source": source},
+             "source": source, "data": data or {}},
             authenticated=True,
         )
 
@@ -379,6 +379,7 @@ def send_event_background(
     title: str,
     body: str,
     source: str | None = None,
+    data: dict | None = None,
     hermes_home: Path | None = None,
 ) -> None:
     """Fire-and-forget a push event to the relay. Never blocks the caller.
@@ -392,19 +393,27 @@ def send_event_background(
     Fetch-channel pushes become inbox threads) instead of maintaining a
     Hermes-specific denylist.
     """
-    if _is_duplicate(f"{kind}:{session_id or ''}:{(body or '')[:80]}"):
+    data_key = ""
+    if isinstance(data, dict):
+        data_key = str(data.get("target") or "") + ":" + str(data.get("task_id") or "")
+    if _is_duplicate(f"{kind}:{session_id or ''}:{data_key}:{(body or '')[:80]}"):
         return
     threading.Thread(
-        target=_send_sync, args=(kind, session_id, title, body, source, hermes_home),
+        target=_send_sync, args=(kind, session_id, title, body, source, data, hermes_home),
         daemon=True, name=f"fetch-push-{kind}"
     ).start()
 
 
 def _send_sync(kind: str, session_id: str | None, title: str, body: str,
-               source: str | None, hermes_home: Path | None) -> None:
+               source: str | None, data: dict | None, hermes_home: Path | None) -> None:
     try:
         asyncio.run(relay_client(hermes_home=hermes_home).send_event(
-            kind=kind, session_id=session_id, title=title, body=body, source=source
+            kind=kind,
+            session_id=session_id,
+            title=title,
+            body=body,
+            source=source,
+            data=data,
         ))
     except Exception:
         log.debug("Fetch push event delivery failed", exc_info=True)

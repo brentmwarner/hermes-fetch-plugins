@@ -48,6 +48,7 @@ CHANNEL_LABEL = "Fetch"
 STORE_HOME_ENV = "HERMES_FETCH_STORE_HOME"
 
 _relay_module = None
+_preview_module = None
 
 
 @dataclass(frozen=True)
@@ -320,13 +321,31 @@ def _load_relay():
     return _relay_module
 
 
+def _load_preview():
+    global _preview_module
+    if _preview_module is not None:
+        return _preview_module
+    path = Path(__file__).resolve().parent / "_preview.py"
+    spec = importlib.util.spec_from_file_location("fetch_inbox_preview", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    _preview_module = module
+    return _preview_module
+
+
 def _notify_proactive(*, session_id: str, title: str, body: str) -> None:
     try:
+        notification_body = _load_preview().notification_body(
+            body,
+            fallback="Open Fetch to view the update.",
+        )
         _load_relay().send_event_background(
             kind="proactive",
             session_id=session_id,
             title=(title or "")[:120],
-            body=(body or "")[:500],
+            body=notification_body,
             # Stamp source="inbox" so the device routes the push into the
             # phone-owned inbox (it's in the app's inboxSources allowlist).
             # Without this the iOS push gate skips the push and the thread
