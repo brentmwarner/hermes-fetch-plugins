@@ -72,3 +72,17 @@ def test_malformed_card_fence_falls_back():
     preview = _load_preview()
 
     assert preview.notification_body('```card\n{"title":"Daily"', fallback="Open Fetch") == "Open Fetch"
+
+
+def test_cron_wrapped_malformed_card_fence_falls_back():
+    preview = _load_preview()
+
+    raw = """
+Cronjob Response: Daily digest
+(job_id: abc123)
+
+```card
+{"title":"Daily"
+"""
+
+    assert preview.notification_body(raw, fallback="Open Fetch") == "Open Fetch"

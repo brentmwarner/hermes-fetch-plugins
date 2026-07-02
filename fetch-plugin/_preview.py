@@ -24,7 +24,7 @@ def notification_body(raw: object, *, fallback: str, limit: int = 500) -> str:
 
 
 def plain_text(raw: object) -> str:
-    card_probe = _normalize(str(raw or ""))[:CARD_INPUT_CAP]
+    card_probe = _strip_cron_wrapper(_normalize(str(raw or "")))[:CARD_INPUT_CAP]
     text = card_probe[:INPUT_CAP]
 
     card_summary = _generated_card_summary(text)
