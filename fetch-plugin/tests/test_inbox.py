@@ -9,6 +9,7 @@ import asyncio
 import importlib.util
 import json
 import sys
+import types
 from pathlib import Path
 
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
@@ -405,3 +406,95 @@ class _FakeDB:
     def set_session_title(self, sid, title): pass
     def append_message(self, **kw): return 1
     def close(self): pass
+
+
+class _RoutingCaptureDB:
+    """Capture create_session/title calls for cron-routing assertions."""
+
+    def __init__(self, captured):
+        self._captured = captured
+
+    def create_session(self, **kw): self._captured["create"] = kw
+    def reopen_session(self, sid): self._captured["reopen"] = sid
+    def set_session_title(self, sid, title): self._captured["title"] = (sid, title)
+    def append_message(self, **kw): self._captured["append"] = kw; return 1
+    def close(self): pass
+
+
+def test_deliver_to_inbox_routes_cron_by_job_id_without_header(monkeypatch):
+    """Scheduler metadata is the primary cron signal. With `cron.wrap_response:
+    false` the content has no "Cronjob Response" header, but the delivery must
+    still land in its per-job inbox_cron-* thread instead of collapsing into
+    inbox_default (where the iOS app hides it as a generic delivery)."""
+    inbox = _load_inbox()
+    captured = {}
+    monkeypatch.setattr(inbox, "SessionDB", lambda **kw: _RoutingCaptureDB(captured))
+    monkeypatch.setattr(inbox, "_notify_proactive", lambda **kw: None)
+
+    delivery = inbox.deliver_to_inbox(
+        channel="default",
+        content="Weather and inbox summary",
+        title="Fetch",
+        cron_job_id="abc123",
+    )
+
+    assert delivery.session_id == "inbox_cron-abc123"
+    assert captured["create"]["user_id"] == "cron-abc123"
+    assert captured["title"] == ("inbox_cron-abc123", "Cron Abc123")
+
+
+def test_deliver_to_inbox_job_id_does_not_hijack_explicit_agent_channel(monkeypatch):
+    """A cron job that delivers to `fetch:researcher` explicitly stays in the
+    researcher DM — only bare home-channel deliveries split into cron threads,
+    mirroring the content-header behavior."""
+    inbox = _load_inbox()
+    captured = {}
+    monkeypatch.setattr(inbox, "SessionDB", lambda **kw: _RoutingCaptureDB(captured))
+    monkeypatch.setattr(inbox, "_notify_proactive", lambda **kw: None)
+
+    delivery = inbox.deliver_to_inbox(
+        channel="researcher",
+        content="standup",
+        title="Researcher",
+        cron_job_id="abc123",
+    )
+
+    assert delivery.session_id == "inbox_researcher"
+
+
+def test_adapter_send_routes_cron_by_metadata_job_id(monkeypatch):
+    """The live gateway path: the Hermes scheduler calls adapter.send() with
+    metadata={"job_id": ...} — the adapter must forward it so cron routing
+    doesn't depend on the wrapped content header."""
+    inbox = _load_inbox()
+    calls = []
+    monkeypatch.setenv("HERMES_FETCH_HOME_CHANNEL", "default")
+    monkeypatch.setattr(inbox, "SendResult", lambda **kw: types.SimpleNamespace(**kw))
+    monkeypatch.setattr(
+        inbox,
+        "deliver_to_inbox",
+        lambda **kw: calls.append(kw) or inbox.InboxDelivery(session_id="inbox_cron-abc123", message_id=3),
+    )
+    adapter = object.__new__(inbox.FetchInboxAdapter)
+
+    result = asyncio.run(adapter.send("default", "Weather summary", metadata={"job_id": "abc123"}))
+
+    assert result.success is True
+    assert calls[0]["cron_job_id"] == "abc123"
+
+
+def test_adapter_send_without_metadata_passes_no_job_id(monkeypatch):
+    inbox = _load_inbox()
+    calls = []
+    monkeypatch.setenv("HERMES_FETCH_HOME_CHANNEL", "default")
+    monkeypatch.setattr(inbox, "SendResult", lambda **kw: types.SimpleNamespace(**kw))
+    monkeypatch.setattr(
+        inbox,
+        "deliver_to_inbox",
+        lambda **kw: calls.append(kw) or inbox.InboxDelivery(session_id="inbox_default", message_id=4),
+    )
+    adapter = object.__new__(inbox.FetchInboxAdapter)
+
+    asyncio.run(adapter.send("default", "hello", metadata=None))
+
+    assert calls[0]["cron_job_id"] is None

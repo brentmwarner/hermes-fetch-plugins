@@ -115,7 +115,9 @@ the same channel append to the same app thread. Bare `--deliver fetch` uses
 `HERMES_FETCH_HOME_CHANNEL` (default `default`). Cron responses delivered to the
 home channel are split by cron job id (`inbox_cron-<job-id>`) so each scheduled
 job gets a stable thread instead of all proactive output collapsing into one
-thread.
+thread. The job id comes from the scheduler's send metadata (`{"job_id": ...}`)
+first, with the wrapped `Cronjob Response:` content header as fallback — so the
+split survives `cron.wrap_response: false`.
 
 (`inbox` here is an internal wire tag — the session `source` value and
 `inbox_<slug>` session-id prefix the iOS app keys its inbox off. The user only
