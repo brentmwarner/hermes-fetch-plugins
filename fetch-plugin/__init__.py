@@ -102,8 +102,11 @@ For token/usage reports, prefer a card with `stats` plus `chart` or `blocks` con
 # and post_llm_call hooks resolve it on every turn. Memoize resolved sources so
 # a long conversation doesn't reopen state.db on each turn. Only successfully
 # resolved (string) sources are cached; a None lookup miss is left uncached so a
-# not-yet-persisted session is re-queried until its row appears.
+# not-yet-persisted session is re-queried until its row appears. Bounded so a
+# long-lived gateway/runtime process can't grow it without limit; on overflow
+# the whole memo resets (entries are one cheap db lookup to rebuild).
 _SESSION_SOURCE_CACHE: dict[str, str] = {}
+_SESSION_SOURCE_CACHE_MAX = 512
 
 
 def _session_source(session_id: str | None) -> str | None:
@@ -139,6 +142,8 @@ def _session_source(session_id: str | None) -> str | None:
     source = row.get("source")
     if not isinstance(source, str):
         return None
+    if len(_SESSION_SOURCE_CACHE) >= _SESSION_SOURCE_CACHE_MAX:
+        _SESSION_SOURCE_CACHE.clear()
     _SESSION_SOURCE_CACHE[session_id] = source
     return source
 
@@ -284,7 +289,12 @@ def _on_pre_approval_request(
     # Approvals always notify (the agent needs the user regardless of surface).
     # Carry the channel parsed from the session_key so the device can later
     # decide inbox membership; session_key shape is ``agent:<profile>:<platform>:<type>:<id>``.
+    # A Fetch-owned channel (incl. the empty untagged gateway segment) is
+    # reported as the app's own durable source "fetch" so the device threads
+    # the approval into its inbox; foreign surfaces keep their platform tag.
     source = _platform_from_session_key(session_key)
+    if source is not None and source in FETCH_CHANNELS:
+        source = "fetch"
     _relay.send_event_background(
         kind="attention", session_id=session_key or None,
         title="Fetch needs your attention", body=detail, source=source,

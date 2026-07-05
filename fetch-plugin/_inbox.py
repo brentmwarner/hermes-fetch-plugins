@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -68,13 +69,33 @@ _CRON_RESPONSE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Process-level cache mapping home-channel → last resolved cron channel.
+# Process-level cache mapping home-channel → (last resolved cron channel, stamp).
 # When Hermes chunks a long cron response, only the first chunk starts with
 # "Cronjob Response... (job_id: ...)"; later chunks lack the header and would
 # otherwise fall back to the home channel, splitting one run between
-# inbox_cron-* and inbox_default. This cache survives long enough to carry
-# the resolved channel across the remaining chunks in the same delivery.
-_cron_channel_cache: dict[str, str] = {}
+# inbox_cron-* and inbox_default. Entries are honored only within
+# _CRON_CACHE_TTL of the cron chunk that set them — long enough to carry one
+# delivery's chunks, short enough that the next unrelated home message goes
+# home instead of being captured by a finished cron thread.
+_CRON_CACHE_TTL = 180.0
+_cron_channel_cache: dict[str, tuple[str, float]] = {}
+
+
+def _now() -> float:
+    return time.monotonic()
+
+
+# The gateway broadcasts lifecycle notices to every session with a live agent
+# when it stops (gateway/run.py: "⚠️ Gateway shutting down — …"). For a
+# messaging surface these are transport control-flow, not something that
+# messaged the user: never persist them into a thread or push them to the
+# phone. Matches the exact core format; if upstream wording changes we fail
+# open to delivering again.
+_GATEWAY_NOTICE_RE = re.compile(r"\A\s*⚠️\s*Gateway (?:shutting down|restarting) — ")
+
+
+def _is_gateway_control_notice(content: str) -> bool:
+    return bool(_GATEWAY_NOTICE_RE.match(str(content or "")))
 
 
 class FetchInboxAdapter(BasePlatformAdapter):
@@ -194,10 +215,18 @@ async def standalone_send(
         if _cron_channel_from_content(str(message or "")):
             # First chunk of a cron response: cache the resolved channel so
             # subsequent chunks (which lack the header) route to the same thread.
-            _cron_channel_cache[channel] = resolved_channel
-        elif channel in _cron_channel_cache:
-            # Subsequent chunk: reuse the cached cron channel.
-            resolved_channel = _cron_channel_cache[channel]
+            _cron_channel_cache[channel] = (resolved_channel, _now())
+        else:
+            cached = _cron_channel_cache.get(channel)
+            if cached is not None:
+                cached_channel, stamp = cached
+                if _now() - stamp <= _CRON_CACHE_TTL:
+                    # Subsequent chunk of the same delivery: follow its thread.
+                    resolved_channel = cached_channel
+                else:
+                    # Stale carry from a finished delivery: drop it so later
+                    # home messages are never captured by an old cron thread.
+                    _cron_channel_cache.pop(channel, None)
     title = _default_title_for_delivery(
         channel=channel,
         content=str(message or ""),
@@ -230,6 +259,12 @@ def deliver_to_inbox(
     delivery into its per-job thread even when ``cron.wrap_response`` is off
     and the content lacks the "Cronjob Response" header.
     """
+    if _is_gateway_control_notice(content):
+        logger.debug("Fetch dropped a gateway lifecycle notice (control-flow, not a message)")
+        return InboxDelivery(
+            session_id=_session_id_for_channel(_normalize_channel(_strip_platform_prefix(channel))),
+            message_id=0,
+        )
     clean_channel = _delivery_channel(
         channel=channel,
         content=content,
