@@ -136,6 +136,9 @@ class RelayClient:
     async def unregister_device(self, *, token: str) -> None:
         await self._post("/v1/devices/unregister", {"token": token}, authenticated=True)
 
+    async def report_badge(self, *, token: str, count: int) -> None:
+        await self._post("/v1/devices/badge", {"token": token, "count": int(count)}, authenticated=True)
+
     async def send_event(self, *, kind: str, session_id: str | None, title: str, body: str,
                          source: str | None = None, data: dict | None = None) -> None:
         await self._post(
