@@ -24,6 +24,11 @@ class _FakeClient:
         if self.needs and not kw.get("attestation"):
             raise api._relay.NeedsAttestation("need it")
     async def unregister_device(self, **kw): pass
+    async def report_badge(self, **kw):
+        self.badge_reports = getattr(self, "badge_reports", [])
+        self.badge_reports.append(kw)
+        if getattr(self, "badge_fails", False):
+            raise RuntimeError("relay down")
 
 
 def _client(fake):
@@ -58,6 +63,29 @@ def test_register_422_on_partial_attestation():
     res = c.post("/register", json={"token": "t", "environment": "sandbox",
                                     "bundle_id": "com.brentwarner.fetch", "attestation": "AAAA"})  # missing key_id+challenge
     assert res.status_code == 422
+
+
+def test_badge_proxies_token_and_count():
+    fake = _FakeClient()
+    c = _client(fake)
+    res = c.post("/badge", json={"token": "tok-1", "count": 3})
+    assert res.status_code == 200
+    assert res.json() == {"ok": True}
+    assert fake.badge_reports == [{"token": "tok-1", "count": 3}]
+
+
+def test_badge_rejects_negative_count():
+    c = _client(_FakeClient())
+    assert c.post("/badge", json={"token": "tok-1", "count": -1}).status_code == 422
+
+
+def test_badge_is_best_effort_when_relay_fails():
+    fake = _FakeClient()
+    fake.badge_fails = True
+    c = _client(fake)
+    res = c.post("/badge", json={"token": "tok-1", "count": 0})
+    assert res.status_code == 200
+    assert res.json() == {"ok": True}
 
 
 def test_diagnostics_reports_tunnel_owner_and_provider(monkeypatch, tmp_path):

@@ -111,6 +111,11 @@ class UnregisterBody(BaseModel):
     token: str = Field(min_length=1, max_length=512)
 
 
+class BadgeBody(BaseModel):
+    token: str = Field(min_length=1, max_length=512)
+    count: int = Field(ge=0)
+
+
 def _active_model_config() -> dict:
     try:
         from hermes_cli.config import load_config
@@ -316,6 +321,19 @@ async def unregister(body: UnregisterBody) -> dict:
         await _relay.relay_client().unregister_device(token=body.token)
     except Exception as exc:  # best-effort; the device ages out via APNs feedback anyway
         log.warning("Fetch push device unregister failed: %s", exc)
+    return {"ok": True}
+
+
+@router.post("/badge")
+async def badge(body: BadgeBody) -> dict:
+    """Proxy the device's unread-count report to the relay, which rebases the
+    ``aps.badge`` it stamps on pushes. Best-effort like unregister: a missed
+    report is corrected by the next one, so relay hiccups never surface to the
+    app's badge sync."""
+    try:
+        await _relay.relay_client().report_badge(token=body.token, count=body.count)
+    except Exception as exc:
+        log.warning("Fetch push badge report failed: %s", exc)
     return {"ok": True}
 
 
