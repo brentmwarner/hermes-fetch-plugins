@@ -58,9 +58,17 @@ _LOCK_ROLE = "fetch-tunnel-owner"
 # Repeated 401/403 handshakes mean the relay no longer accepts our credentials
 # and no newer ones exist on disk — a fast retry loop can never succeed, it just
 # floods the relay. After the threshold, back off this hard until a human (or a
-# reconfigure writing fresh credentials) intervenes.
+# reconfigure writing fresh credentials) intervenes. The long backoff is polled
+# (not one uninterrupted sleep) so a reconfigure written mid-backoff heals within
+# a poll interval instead of after the full wait.
 _AUTH_REJECT_THRESHOLD = 3
 _AUTH_REJECT_BACKOFF_S = 300.0
+_AUTH_REJECT_POLL_S = 2.0
+
+# Outcome of inspecting freshly re-read relay credentials.
+_CREDS_UNCHANGED = "unchanged"
+_CREDS_ADOPTED = "adopted"        # rotated secret, same agent id: retry now
+_CREDS_SUPERSEDED = "superseded"  # new agent id: exit so the owner re-locks
 
 # Content types streamed back as a UTF-8 string; everything else is base64'd.
 _TEXTUAL_PREFIXES = ("text/", "application/json", "application/javascript", "application/xml")
@@ -458,50 +466,64 @@ class AgentTunnel:
             except Exception as exc:
                 if _auth_rejection_status(exc) is not None:
                     auth_rejected = True
-                    if self._handle_auth_rejection():
-                        return  # superseded: caller re-acquires under the new id
+                    outcome = self._handle_auth_rejection()
+                    if outcome == _CREDS_SUPERSEDED:
+                        return  # caller re-acquires under the new id
+                    if outcome == _CREDS_ADOPTED:
+                        backoff = 0.25  # retry the fresh secret now, not after backoff
                 log.debug("Fetch tunnel connection ended; will retry", exc_info=True)
             if self._reconnect_health.record(reason="relay reconnect loop"):
                 log.warning("Fetch tunnel unhealthy: rapid relay reconnect loop detected")
             if self._stop:
                 break
             if auth_rejected and self._consecutive_auth_rejects >= _AUTH_REJECT_THRESHOLD:
-                # Credentials are dead and disk has nothing newer: crawling, not
-                # flooding. A reconfigure meanwhile still heals us — the next
-                # (slow) attempt reloads whatever setup wrote.
-                await asyncio.sleep(
-                    _AUTH_REJECT_BACKOFF_S + random.uniform(0, _AUTH_REJECT_BACKOFF_S * 0.1)
-                )
+                # Credentials are dead and disk has nothing newer: crawl, don't
+                # flood — but poll disk so a reconfigure written mid-backoff heals
+                # within a poll interval instead of after the full wait.
+                outcome = await self._sleep_until_credentials_change(_AUTH_REJECT_BACKOFF_S)
+                if outcome == _CREDS_SUPERSEDED:
+                    return
+                if outcome == _CREDS_ADOPTED:
+                    backoff = 0.25
                 continue
             await asyncio.sleep(_jittered_delay(backoff, unhealthy=self._reconnect_health.unhealthy))
             backoff *= 2
 
-    def _handle_auth_rejection(self) -> bool:
-        """React to a 401/403 handshake. Returns True when this tunnel must exit
-        because disk credentials now carry a different agent id."""
-        self._consecutive_auth_rejects += 1
-        fresh = None
-        if self._reload_credentials is not None:
-            try:
-                fresh = self._reload_credentials()
-            except Exception:
-                log.debug("Fetch tunnel could not re-read relay credentials", exc_info=True)
+    def _reload_creds(self):
+        if self._reload_credentials is None:
+            return None
+        try:
+            return self._reload_credentials()
+        except Exception:
+            log.debug("Fetch tunnel could not re-read relay credentials", exc_info=True)
+            return None
+
+    def _apply_fresh_credentials(self, fresh) -> str:
+        """Adopt re-read credentials. Returns a ``_CREDS_*`` outcome."""
         fresh_id = getattr(fresh, "agent_id", None)
         fresh_secret = getattr(fresh, "agent_secret", None)
-        if fresh_id and fresh_secret and fresh_id != self.agent_id:
+        if not (fresh_id and fresh_secret):
+            return _CREDS_UNCHANGED
+        if fresh_id != self.agent_id:
             self.superseded_by = fresh
             log.info(
                 "Fetch tunnel credentials were re-minted (agent %s -> %s); handing the uplink to the new identity",
                 self.agent_id,
                 fresh_id,
             )
-            return True
-        if fresh_id and fresh_secret and fresh_secret != self.agent_secret:
+            return _CREDS_SUPERSEDED
+        if fresh_secret != self.agent_secret:
             log.info("Fetch tunnel adopted rotated relay credentials for agent %s", self.agent_id)
             self.agent_secret = fresh_secret
             self._consecutive_auth_rejects = 0
-            return False
-        if self._consecutive_auth_rejects == _AUTH_REJECT_THRESHOLD:
+            return _CREDS_ADOPTED
+        return _CREDS_UNCHANGED
+
+    def _handle_auth_rejection(self) -> str:
+        """React to a 401/403 handshake. Returns a ``_CREDS_*`` outcome."""
+        self._consecutive_auth_rejects += 1
+        outcome = self._apply_fresh_credentials(self._reload_creds())
+        if outcome == _CREDS_UNCHANGED and self._consecutive_auth_rejects == _AUTH_REJECT_THRESHOLD:
             log.warning(
                 "The Fetch relay rejected this agent's credentials %d times and no newer "
                 "credentials exist on disk; slowing reconnects to every ~%.0fs. "
@@ -509,7 +531,24 @@ class AgentTunnel:
                 self._consecutive_auth_rejects,
                 _AUTH_REJECT_BACKOFF_S,
             )
-        return False
+        return outcome
+
+    async def _sleep_until_credentials_change(self, total_s: float) -> str:
+        """Back off up to ``total_s``, re-reading disk credentials every
+        ``_AUTH_REJECT_POLL_S`` so a reconfigure written mid-backoff heals
+        promptly. Returns the ``_CREDS_*`` outcome (``UNCHANGED`` on timeout)."""
+        deadline = time.monotonic() + total_s + random.uniform(0, total_s * 0.1)
+        while not self._stop:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return _CREDS_UNCHANGED
+            await asyncio.sleep(min(_AUTH_REJECT_POLL_S, remaining))
+            if self._stop:
+                return _CREDS_UNCHANGED
+            outcome = self._apply_fresh_credentials(self._reload_creds())
+            if outcome != _CREDS_UNCHANGED:
+                return outcome
+        return _CREDS_UNCHANGED
 
     async def _serve_once(self) -> None:
         ws = await self._relay_connect(self.relay_ws_url, self._headers)

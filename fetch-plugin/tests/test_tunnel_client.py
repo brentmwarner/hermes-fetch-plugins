@@ -459,3 +459,67 @@ def test_network_errors_do_not_trip_auth_slowdown():
 
     assert t._consecutive_auth_rejects == 0
     assert t.superseded_by is None
+
+
+def test_adopting_rotated_secret_resets_backoff(monkeypatch):
+    """Grown exponential backoff must reset when fresh creds are adopted, so the
+    self-heal retries the new secret promptly instead of after a long wait."""
+    bases = []
+
+    def capture(base, **kw):
+        bases.append(base)
+        return 0.0  # don't actually wait
+
+    monkeypatch.setattr(tunnel, "_jittered_delay", capture)
+
+    fresh = _fake_creds("a1", "s2")
+    calls = []
+
+    async def connect(url, headers):
+        calls.append(headers["Authorization"])
+        n = len(calls)
+        if n <= 2:
+            raise RuntimeError("network blip")   # grows backoff: 0.25 -> 0.5
+        if n == 3:
+            raise _RejectedHandshakeNew(403)      # adopt rotated s2
+        t.stop()
+        raise RuntimeError("closed")
+
+    t = _client(relay_connect=connect, reload_credentials=lambda: fresh)
+    asyncio.run(asyncio.wait_for(t.run_forever(), timeout=5))
+
+    # Two network blips grow the backoff; adopting the rotated secret resets it
+    # to 0.25 rather than continuing to double from the grown value.
+    assert bases[:3] == [0.25, 0.5, 0.25]
+    assert t.agent_secret == "s2"
+
+
+def test_reconfigure_during_long_backoff_heals_promptly(monkeypatch):
+    """A rotated secret written while crawling at the auth-reject backoff is
+    picked up on the next poll, not after the full ~300s sleep expires."""
+    monkeypatch.setattr(tunnel, "_jittered_delay", lambda base, **kw: 0.0)
+    monkeypatch.setattr(tunnel, "_AUTH_REJECT_BACKOFF_S", 30.0)  # "long"
+    monkeypatch.setattr(tunnel, "_AUTH_REJECT_POLL_S", 0.01)     # fast poll for test
+
+    reloads = []
+
+    def reload():
+        reloads.append(1)
+        # Disk gains a rotated secret only once we're inside the long backoff
+        # (after the 3 rejects each consumed one reload).
+        return _fake_creds("a1", "s2") if len(reloads) >= 4 else None
+
+    calls = []
+
+    async def connect(url, headers):
+        calls.append(headers["Authorization"])
+        if headers["Authorization"] == "Bearer s2":
+            t.stop()  # healed: reconnected with the fresh secret
+            raise RuntimeError("closed")
+        raise _RejectedHandshakeOld(403)
+
+    t = _client(relay_connect=connect, reload_credentials=reload)
+    asyncio.run(asyncio.wait_for(t.run_forever(), timeout=5))
+
+    assert t.agent_secret == "s2"
+    assert "Bearer s2" in calls
