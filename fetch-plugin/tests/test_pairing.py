@@ -85,21 +85,30 @@ class _FakeInbox:
 
 
 class _FakeRuntime:
-    def __init__(self, status="started"):
+    def __init__(self, status="started", handoff=None):
         self.status = status
+        self.handoff = handoff or {"stopped": [], "left_running": []}
+        self.calls = []
 
     def enable_tunnel_for_future_starts(self):
-        pass
+        self.calls.append("enable_tunnel_for_future_starts")
+
+    def restart_relay_runtime_for_reconfigure(self):
+        self.calls.append("restart_relay_runtime_for_reconfigure")
+        return self.handoff
 
     def ensure_relay_runtime(self):
+        self.calls.append("ensure_relay_runtime")
         return self.status
 
 
 class _FakeRelayClient:
     def __init__(self, status):
         self.status = status
+        self.wait_kwargs = None
 
-    async def wait_for_tunnel_online(self):
+    async def wait_for_tunnel_online(self, **kwargs):
+        self.wait_kwargs = kwargs
         return self.status
 
 
@@ -148,4 +157,33 @@ def test_interactive_setup_prints_link_when_tunnel_online(monkeypatch, capsys, t
 
     out = capsys.readouterr().out
     assert "Fetch pairing ready" in out
+    assert link in out
+
+
+def test_interactive_setup_hands_off_runtime_before_start(monkeypatch, capsys, tmp_path) -> None:
+    """Reconfigure must stop the superseded runtime BEFORE ensuring a fresh one,
+    so the new process boots with the just-written credentials."""
+    link = "https://tryfetchapp.com/setup?agent=a1&pairing=p1"
+    fake_runtime = _FakeRuntime(handoff={"stopped": [5151], "left_running": []})
+    client = _FakeRelayClient({"ok": True, "agent_online": True})
+    monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(pairing, "is_pairing_configured", lambda: False)
+    monkeypatch.setattr(pairing, "_inbox_module", lambda: _FakeInbox())
+    monkeypatch.setattr(pairing, "_runtime_module", lambda: fake_runtime)
+    monkeypatch.setattr(pairing, "render_qr", lambda data: None)
+    monkeypatch.setattr(
+        pairing,
+        "_try_build_relay_pairing",
+        lambda: {"client": client, "agent_id": "a1", "link": link},
+    )
+
+    pairing.interactive_setup()
+
+    handoff_index = fake_runtime.calls.index("restart_relay_runtime_for_reconfigure")
+    ensure_index = fake_runtime.calls.index("ensure_relay_runtime")
+    assert handoff_index < ensure_index
+    assert client.wait_kwargs["timeout_s"] == 60.0
+    assert callable(client.wait_kwargs["on_poll"])
+    out = capsys.readouterr().out
+    assert "Restarted the Fetch relay runtime" in out
     assert link in out

@@ -583,26 +583,36 @@ def _spawn_tunnel() -> None:
             async def _boot() -> None:
                 relay_client = _relay.relay_client()
                 creds = await relay_client._credentials()
-                owner = tunnel.TunnelOwnerLock(agent_id=creds.agent_id, lock_dir=_relay_runtime_dir(relay_client))
-                if not owner.acquire():
-                    log.info(
-                        "Fetch reverse-tunnel owner already running for agent %s (pid=%s). "
-                        "This process will share that single agent tunnel; multiple Fetch app clients remain supported. "
-                        "If the app cannot connect, check for stale pairing with /api/plugins/fetch/diagnostics or rerun `hermes setup`.",
-                        creds.agent_id,
-                        owner.owner_pid or "unknown",
+                # Loop so a reconfigure that re-mints the agent identity hands
+                # the uplink over in-process: the old tunnel exits with
+                # `superseded_by` set, we drop the old per-agent lock and
+                # re-acquire under the new id.
+                while True:
+                    owner = tunnel.TunnelOwnerLock(agent_id=creds.agent_id, lock_dir=_relay_runtime_dir(relay_client))
+                    if not owner.acquire():
+                        log.info(
+                            "Fetch reverse-tunnel owner already running for agent %s (pid=%s). "
+                            "This process will share that single agent tunnel; multiple Fetch app clients remain supported. "
+                            "If the app cannot connect, check for stale pairing with /api/plugins/fetch/diagnostics or rerun `hermes setup`.",
+                            creds.agent_id,
+                            owner.owner_pid or "unknown",
+                        )
+                        return
+                    client = tunnel.AgentTunnel(
+                        relay_url=creds.relay_url,
+                        agent_id=creds.agent_id,
+                        agent_secret=creds.agent_secret,
+                        dashboard_token=os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN"),
+                        reload_credentials=relay_client._read_credentials,
                     )
-                    return
-                client = tunnel.AgentTunnel(
-                    relay_url=creds.relay_url,
-                    agent_id=creds.agent_id,
-                    agent_secret=creds.agent_secret,
-                    dashboard_token=os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN"),
-                )
-                try:
-                    await client.run_forever()
-                finally:
-                    owner.release()
+                    try:
+                        await client.run_forever()
+                    finally:
+                        owner.release()
+                    superseded = getattr(client, "superseded_by", None)
+                    if superseded is None:
+                        return
+                    creds = superseded
 
             asyncio.run(_boot())
         except Exception:

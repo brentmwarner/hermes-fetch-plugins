@@ -306,6 +306,66 @@ else:
 """
 
 
+def restart_relay_runtime_for_reconfigure() -> dict:
+    """Hand the relay uplink over cleanly after (re)pairing.
+
+    Stops the autostarted relay runtime child and any tunnel-owner lock holder
+    that is itself an autostarted runtime, so the following
+    ``ensure_relay_runtime()`` boots a fresh process that reads the credentials
+    setup just wrote — instead of an old PID looping 403s against the relay
+    with the credentials it booted with.
+
+    A live agent/gateway process that owns the uplink is deliberately NOT
+    killed (that would tear down the user's sessions); its tunnel self-heals by
+    reloading credentials from disk on the next auth rejection.
+    """
+    stopped: list[int] = []
+    left_running: list[int] = []
+
+    pid = _active_runtime_pid()
+    if pid is not None and _terminate_process(pid):
+        stopped.append(pid)
+        try:
+            _pid_path().unlink()
+        except OSError:
+            pass
+
+    try:
+        locks = sorted(_runtime_dir().glob("fetch-tunnel-*.pid"))
+    except OSError:
+        locks = []
+    for lock in locks:
+        lock_pid, _role = _read_pid_record(lock)
+        if lock_pid is None or lock_pid == os.getpid() or not _process_alive(lock_pid):
+            # Dead/corrupt/self-owned lock: clear it so the fresh runtime can
+            # claim ownership immediately.
+            try:
+                lock.unlink()
+            except OSError:
+                pass
+            continue
+        command = _process_command(lock_pid)
+        if command and AUTOSTART_RUNTIME_ENV.lower() in command.lower():
+            if _terminate_process(lock_pid):
+                stopped.append(lock_pid)
+                try:
+                    lock.unlink()
+                except OSError:
+                    pass
+            continue
+        left_running.append(lock_pid)
+
+    if stopped:
+        log.info("Fetch stopped superseded relay processes for reconfigure: %s", stopped)
+    if left_running:
+        log.info(
+            "Fetch left live tunnel owner(s) %s running during reconfigure; "
+            "they adopt the new credentials from disk on their next reconnect",
+            left_running,
+        )
+    return {"stopped": stopped, "left_running": left_running}
+
+
 def ensure_relay_runtime() -> str:
     """Start a long-lived headless relay runtime unless one is already running.
 

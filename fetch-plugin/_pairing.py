@@ -265,12 +265,28 @@ def interactive_setup() -> None:
         _inbox_module().enable_delivery_for_future_starts()
         runtime = _runtime_module()
         runtime.enable_tunnel_for_future_starts()
+        # Hand the uplink over: stop any superseded autostarted runtime so the
+        # fresh one below boots with the credentials we just wrote, instead of
+        # an old PID looping 403s while the QR never comes online.
+        handoff = runtime.restart_relay_runtime_for_reconfigure()
+        if handoff.get("stopped"):
+            print_info("Restarted the Fetch relay runtime so it picks up this pairing.")
         runtime_status = runtime.ensure_relay_runtime()
         relay_link = str(relay_pairing["link"])
         tunnel_status = {"ok": False, "reason": "runtime_not_started"}
         if runtime_status in {"started", "already-running", "self"}:
-            print_info("Waiting for the Fetch relay tunnel to come online...")
-            tunnel_status = asyncio.run(relay_pairing["client"].wait_for_tunnel_online())
+            print_info("Waiting for the Fetch relay tunnel to come online (up to 60s)...")
+            _progress_tick = {"last": 0}
+
+            def _progress(elapsed: float) -> None:
+                tick = int(elapsed // 10)
+                if tick > _progress_tick["last"]:
+                    _progress_tick["last"] = tick
+                    print_info(f"    ... still waiting ({int(elapsed)}s)")
+
+            tunnel_status = asyncio.run(
+                relay_pairing["client"].wait_for_tunnel_online(timeout_s=60.0, on_poll=_progress)
+            )
 
         if not bool(tunnel_status.get("ok") or tunnel_status.get("agent_online")):
             if tunnel_status.get("reason") != "status_unavailable":

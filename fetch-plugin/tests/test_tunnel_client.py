@@ -358,3 +358,104 @@ async def test_run_forever_exits_when_stopped():
     t = _client()
     t.stop()
     await asyncio.wait_for(t.run_forever(), timeout=1)
+
+
+# --- stale-credential self-heal (reconfigure recovery) ---
+
+
+class _RejectedHandshakeNew(Exception):
+    """websockets >= 14 shape: carries .response.status_code."""
+
+    def __init__(self, code):
+        super().__init__(f"rejected {code}")
+        self.response = type("R", (), {"status_code": code})()
+
+
+class _RejectedHandshakeOld(Exception):
+    """websockets <= 13 shape: carries .status_code."""
+
+    def __init__(self, code):
+        super().__init__(f"rejected {code}")
+        self.status_code = code
+
+
+def _fake_creds(agent_id, agent_secret):
+    return type("C", (), {"agent_id": agent_id, "agent_secret": agent_secret})()
+
+
+def test_auth_rejection_status_detects_both_websockets_shapes():
+    assert tunnel._auth_rejection_status(_RejectedHandshakeNew(403)) == 403
+    assert tunnel._auth_rejection_status(_RejectedHandshakeOld(401)) == 401
+    assert tunnel._auth_rejection_status(_RejectedHandshakeNew(500)) is None
+    assert tunnel._auth_rejection_status(RuntimeError("conn reset")) is None
+
+
+def test_run_forever_adopts_rotated_secret_from_disk():
+    """Same agent id, new secret on disk (reconfigure): the running owner swaps
+    credentials in place instead of flooding 403s with the ones it booted with."""
+    fresh = _fake_creds("a1", "s2")
+    seen = []
+
+    async def connect(url, headers):
+        seen.append(headers["Authorization"])
+        if len(seen) == 1:
+            raise _RejectedHandshakeNew(403)
+        t.stop()
+        raise RuntimeError("closed")
+
+    t = _client(relay_connect=connect, reload_credentials=lambda: fresh)
+    asyncio.run(t.run_forever())
+
+    assert seen == ["Bearer s1", "Bearer s2"]
+    assert t.agent_secret == "s2"
+    assert t.superseded_by is None
+    assert t._consecutive_auth_rejects == 0
+
+
+def test_run_forever_hands_off_when_identity_reminted():
+    """New agent id on disk: this tunnel exits so its owner can re-acquire the
+    per-agent lock under the new identity."""
+    fresh = _fake_creds("a2", "s9")
+
+    async def connect(url, headers):
+        raise _RejectedHandshakeNew(403)
+
+    t = _client(relay_connect=connect, reload_credentials=lambda: fresh)
+    asyncio.run(asyncio.wait_for(t.run_forever(), timeout=2))
+
+    assert t.superseded_by is fresh
+
+
+def test_repeated_auth_rejection_slows_reconnects(monkeypatch):
+    """Dead credentials + nothing newer on disk: after the threshold the loop
+    crawls instead of hammering the relay every few seconds."""
+    monkeypatch.setattr(tunnel, "_AUTH_REJECT_BACKOFF_S", 0.01)
+    calls = []
+
+    async def connect(url, headers):
+        calls.append(1)
+        if len(calls) >= 4:
+            t.stop()
+        raise _RejectedHandshakeOld(403)
+
+    t = _client(relay_connect=connect, reload_credentials=lambda: None)
+    asyncio.run(asyncio.wait_for(t.run_forever(), timeout=10))
+
+    assert t._consecutive_auth_rejects >= tunnel._AUTH_REJECT_THRESHOLD
+    assert t.superseded_by is None
+
+
+def test_network_errors_do_not_trip_auth_slowdown():
+    calls = []
+
+    async def connect(url, headers):
+        calls.append(1)
+        if len(calls) >= 2:
+            t.stop()
+        raise RuntimeError("connection reset")
+
+    t = _client(relay_connect=connect, reload_credentials=lambda: _fake_creds("a2", "s9"))
+    asyncio.run(asyncio.wait_for(t.run_forever(), timeout=5))
+
+    assert t._consecutive_auth_rejects == 0
+    assert t.superseded_by is None
