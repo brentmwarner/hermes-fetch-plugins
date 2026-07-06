@@ -265,3 +265,94 @@ def test_enable_tunnel_for_future_starts_sets_current_env(monkeypatch) -> None:
     runtime.enable_tunnel_for_future_starts()
 
     assert os.environ[runtime.TUNNEL_ENABLED_ENV] == "1"
+
+
+# --- reconfigure handoff: stop superseded relay processes ---
+
+
+def _write_tunnel_lock(run_dir, name, pid, agent_id="agent-old"):
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / name
+    path.write_text(
+        json.dumps({"pid": pid, "role": "fetch-tunnel-owner", "agent_id": agent_id}),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_reconfigure_stops_runtime_child_and_its_lock(tmp_path, monkeypatch) -> None:
+    """The autostarted runtime (and the tunnel lock it holds) is terminated so
+    ensure_relay_runtime() boots a fresh process with the new credentials."""
+    run_dir = tmp_path / "run"
+    monkeypatch.setattr(runtime, "_hermes_home", lambda: tmp_path)
+    lock = _write_tunnel_lock(run_dir, "fetch-tunnel-agent-old.pid", 5151)
+    runtime._write_pid_record(runtime._pid_path(), 5151)
+
+    alive = {5151: True}
+    killed = []
+
+    monkeypatch.setattr(runtime, "_process_alive", lambda pid: alive.get(pid, False))
+    monkeypatch.setattr(
+        runtime,
+        "_process_command",
+        lambda pid: "python -c import os ... HERMES_FETCH_TUNNEL_AUTOSTARTED_RUNTIME ... dashboard",
+    )
+
+    def fake_terminate(pid, **kwargs):
+        killed.append(pid)
+        alive[pid] = False
+        return True
+
+    monkeypatch.setattr(runtime, "_terminate_process", fake_terminate)
+
+    result = runtime.restart_relay_runtime_for_reconfigure()
+
+    assert killed == [5151]
+    assert result["stopped"] == [5151]
+    assert result["left_running"] == []
+    assert not runtime._pid_path().exists()
+    assert not lock.exists()
+
+
+def test_reconfigure_leaves_live_gateway_owner_running(tmp_path, monkeypatch) -> None:
+    """A gateway process that owns the uplink is NOT killed (it would take the
+    user's sessions down); it self-heals by reloading credentials on the next
+    auth rejection."""
+    run_dir = tmp_path / "run"
+    monkeypatch.setattr(runtime, "_hermes_home", lambda: tmp_path)
+    lock = _write_tunnel_lock(run_dir, "fetch-tunnel-agent-old.pid", 6161)
+
+    monkeypatch.setattr(runtime, "_process_alive", lambda pid: True)
+    monkeypatch.setattr(
+        runtime, "_process_command", lambda pid: "python -m hermes_cli.main gateway"
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_terminate_process",
+        lambda pid, **kwargs: (_ for _ in ()).throw(AssertionError("must not kill gateway")),
+    )
+
+    result = runtime.restart_relay_runtime_for_reconfigure()
+
+    assert result["stopped"] == []
+    assert result["left_running"] == [6161]
+    assert lock.exists()
+
+
+def test_reconfigure_clears_dead_owner_locks(tmp_path, monkeypatch) -> None:
+    run_dir = tmp_path / "run"
+    monkeypatch.setattr(runtime, "_hermes_home", lambda: tmp_path)
+    lock = _write_tunnel_lock(run_dir, "fetch-tunnel-agent-old.pid", 7171)
+
+    monkeypatch.setattr(runtime, "_process_alive", lambda pid: False)
+    monkeypatch.setattr(
+        runtime,
+        "_terminate_process",
+        lambda pid, **kwargs: (_ for _ in ()).throw(AssertionError("nothing to kill")),
+    )
+
+    result = runtime.restart_relay_runtime_for_reconfigure()
+
+    assert result["stopped"] == []
+    assert result["left_running"] == []
+    assert not lock.exists()

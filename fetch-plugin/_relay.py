@@ -248,10 +248,15 @@ class RelayClient:
         return response.json()
 
     async def wait_for_tunnel_online(
-        self, *, timeout_s: float = 20.0, interval_s: float = 0.5
+        self, *, timeout_s: float = 20.0, interval_s: float = 0.5, on_poll=None
     ) -> dict:
-        """Poll until the relay sees this agent's tunnel uplink or time expires."""
-        deadline = time.monotonic() + max(0.0, timeout_s)
+        """Poll until the relay sees this agent's tunnel uplink or time expires.
+
+        ``on_poll`` (elapsed seconds -> None) lets interactive callers show
+        progress while a cold-started runtime spawns and dials the relay.
+        """
+        start = time.monotonic()
+        deadline = start + max(0.0, timeout_s)
         last: dict = {"ok": False, "reason": "not_checked"}
         while True:
             try:
@@ -262,6 +267,11 @@ class RelayClient:
                 return last
             if time.monotonic() >= deadline:
                 return last
+            if on_poll is not None:
+                try:
+                    on_poll(time.monotonic() - start)
+                except Exception:
+                    pass
             await asyncio.sleep(max(0.1, interval_s))
 
     async def _mint_pairing(self, creds: RelayCredentials) -> str:
