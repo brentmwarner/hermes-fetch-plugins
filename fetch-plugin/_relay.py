@@ -32,6 +32,8 @@ log = logging.getLogger("fetch_plugin.relay")
 # Hosted Fetch push relay. Override with HERMES_FETCH_RELAY_URL (e.g. point at a
 # locally-run relay during development: http://127.0.0.1:8787).
 DEFAULT_RELAY_URL = "https://push.tryfetchapp.com"
+REGISTRATION_TOKEN_ENV = "HERMES_FETCH_RELAY_REGISTRATION_TOKEN"
+ENROLLMENT_TOKEN_ENV = "HERMES_FETCH_ENROLLMENT_TOKEN"
 
 _DEDUPE_WINDOW_S = 10.0
 
@@ -89,6 +91,10 @@ class NeedsAttestation(Exception):
     """Relay requires an App Attest attestation to enroll this agent."""
 
 
+class RelayRegistrationError(Exception):
+    """Relay rejected first-time agent enrollment with an actionable setup error."""
+
+
 @dataclass(frozen=True)
 class RelayCredentials:
     relay_url: str
@@ -105,10 +111,18 @@ class RelayCredentials:
 class RelayClient:
     """Talks the Fetch push relay's ``/v1/*`` contract with per-agent auth."""
 
-    def __init__(self, *, relay_url: str, credentials_path: Path, registration_token: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        relay_url: str,
+        credentials_path: Path,
+        registration_token: str | None = None,
+        enrollment_token: str | None = None,
+    ) -> None:
         self.relay_url = relay_url.rstrip("/")
         self.credentials_path = Path(credentials_path)
         self.registration_token = registration_token
+        self.enrollment_token = enrollment_token
 
     async def get_attest_challenge(self) -> str:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -180,6 +194,8 @@ class RelayClient:
         if self.registration_token:
             headers["X-Hermes-Relay-Registration-Token"] = self.registration_token
         body: dict = {"app": "fetch-ios"}
+        if self.enrollment_token:
+            body["enrollment_token"] = self.enrollment_token
         if attestation:
             try:
                 body.update({"attestation": attestation["attestation"],
@@ -203,6 +219,23 @@ class RelayClient:
                 detail = response.text or ""
             if "attestation required" in detail.lower():
                 raise NeedsAttestation("relay requires attestation to enroll")
+        if response.status_code in {401, 403, 503}:
+            detail = _response_detail(response)
+            if self.enrollment_token:
+                raise RelayRegistrationError(
+                    "The Fetch setup code was rejected. Generate a fresh code in the Fetch app, "
+                    "then run `hermes setup` again."
+                )
+            if self.registration_token:
+                raise RelayRegistrationError(
+                    "The relay rejected HERMES_FETCH_RELAY_REGISTRATION_TOKEN. "
+                    "Check that it matches the relay's configured registration token."
+                )
+            raise RelayRegistrationError(
+                "Fetch setup needs a setup code from the signed-in iOS app. "
+                "Open Fetch, tap Create setup code, then paste that code here."
+                + (f" Relay response: {detail}" if detail else "")
+            )
         response.raise_for_status()
         data = response.json()
         pairing = data.get("pairing_secret")
@@ -359,14 +392,25 @@ def relay_client(*, hermes_home: Path | None = None) -> RelayClient:
             relay_url = _config_value(
                 "HERMES_FETCH_RELAY_URL", DEFAULT_RELAY_URL, hermes_home=home
             ) or DEFAULT_RELAY_URL
-            token = _config_value("HERMES_FETCH_RELAY_REGISTRATION_TOKEN", hermes_home=home)
+            token = _config_value(REGISTRATION_TOKEN_ENV, hermes_home=home)
+            enrollment_token = _config_value(ENROLLMENT_TOKEN_ENV, hermes_home=home)
             client = RelayClient(
                 relay_url=relay_url,
                 credentials_path=home / "push" / "fetch-relay.json",
                 registration_token=token,
+                enrollment_token=enrollment_token,
             )
             _client_singletons[home] = client
         return client
+
+
+def _response_detail(response: httpx.Response) -> str:
+    try:
+        data = response.json()
+    except ValueError:
+        return (response.text or "").strip()
+    detail = data.get("detail") if isinstance(data, dict) else None
+    return str(detail or "").strip()
 
 
 _recent: dict[str, float] = {}

@@ -56,11 +56,13 @@ first use.
 ```bash
 hermes plugins install brentmwarner/hermes-fetch-plugins/fetch-plugin --enable
 hermes gateway restart      # (and restart `hermes dashboard` if running separately)
-hermes setup                # choose Fetch, then scan/paste the setup link
+hermes setup                # choose Fetch, paste the Fetch setup code, then scan/paste the setup link
 ```
 
-Then open Fetch on the phone and allow notifications. No Apple account, no
-`.p8`, no core edits, no public dashboard URL, and no browser tab to keep open.
+Before `hermes setup`, open Fetch on the phone, sign in, and create a setup
+code. That code enrolls the agent into your Fetch account; the relay link shown
+afterward pairs this phone to the enrolled agent. No Apple account, no `.p8`, no
+core edits, no public dashboard URL, and no browser tab to keep open.
 
 ## Reconfigure or reset
 
@@ -85,7 +87,8 @@ All env vars are `HERMES_FETCH_*`; there is no separate inbox product.
 | Env var | Default | Purpose |
 | --- | --- | --- |
 | `HERMES_FETCH_RELAY_URL` | hosted relay (`https://push.tryfetchapp.com`) | Point at a different / local relay. |
-| `HERMES_FETCH_RELAY_REGISTRATION_TOKEN` | _(none)_ | Enrollment token, if the relay requires one. |
+| `HERMES_FETCH_ENROLLMENT_TOKEN` | _(none)_ | One-time setup code from the signed-in Fetch app. Usually pasted interactively during setup. |
+| `HERMES_FETCH_RELAY_REGISTRATION_TOKEN` | _(none)_ | Operator/private relay registration token. Public Fetch users should not need this. |
 | `HERMES_FETCH_TUNNEL_ENABLED` | auto after Fetch relay setup | Keep the agent-side reverse tunnel active for relay pairing. Set `0`/`false` only to force-disable it. |
 | `HERMES_FETCH_TUNNEL_DISABLE_DASHBOARD_AUTOSTART` | _(unset)_ | Opt out if you manage the local Hermes dashboard/API process yourself. |
 

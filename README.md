@@ -24,10 +24,11 @@ hermes gateway restart
 hermes setup
 ```
 
-In setup, choose Fetch and scan/paste the generated relay link in the iOS app.
-Relay setup starts the local headless runtime automatically; if you run
-`hermes dashboard` separately, restart it only if you want that visible
-dashboard process to pick up plugin changes too.
+Open Fetch on your iPhone, sign in, and create a setup code. In `hermes setup`,
+choose Fetch, paste that code if prompted, then scan/paste the generated relay
+link in the iOS app. Relay setup starts the local headless runtime
+automatically; if you run `hermes dashboard` separately, restart it only if you
+want that visible dashboard process to pick up plugin changes too.
 
 Use `fetch` for scheduled or message delivery:
 
@@ -47,7 +48,8 @@ Optional environment variables:
 | Name | Purpose |
 | --- | --- |
 | `HERMES_FETCH_RELAY_URL` | Override the hosted Fetch push relay URL. |
-| `HERMES_FETCH_RELAY_REGISTRATION_TOKEN` | Enrollment token, if your relay requires one. |
+| `HERMES_FETCH_ENROLLMENT_TOKEN` | One-time setup code from the signed-in Fetch app. Usually pasted interactively during setup. |
+| `HERMES_FETCH_RELAY_REGISTRATION_TOKEN` | Operator/private relay registration token. Public Fetch users should not need this. |
 | `HERMES_FETCH_TUNNEL_ENABLED` | Enabled automatically by Fetch relay setup so the agent keeps a reverse tunnel to the hosted relay. |
 | `HERMES_FETCH_TUNNEL_DISABLE_DASHBOARD_AUTOSTART` | Opt out of Fetch's headless local dashboard/API autostart if you run that process yourself. |
 

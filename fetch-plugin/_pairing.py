@@ -104,6 +104,19 @@ def _has_relay_pairing_credentials() -> bool:
     return bool(agent_id and pairing)
 
 
+def _has_relay_agent_credentials() -> bool:
+    try:
+        path = _hermes_home() / "push" / "fetch-relay.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    agent_id = str(data.get("agent_id") or "").strip()
+    agent_secret = str(data.get("agent_secret") or "").strip()
+    return bool(agent_id and agent_secret)
+
+
 def is_pairing_configured() -> bool:
     """True when setup can be re-run as a reconfiguration flow."""
     return _has_relay_pairing_credentials()
@@ -127,7 +140,9 @@ def build_relay_link(*, agent_id: str, pairing: str, relay_url: str) -> str:
 def _try_build_relay_link() -> str | None:
     """Best-effort relay pairing link. Returns None if the relay can't be reached."""
     pairing = _try_build_relay_pairing()
-    return str(pairing["link"]) if pairing is not None else None
+    if pairing is None or pairing.get("error"):
+        return None
+    return str(pairing["link"])
 
 
 def _try_build_relay_pairing() -> dict | None:
@@ -143,8 +158,52 @@ def _try_build_relay_pairing() -> dict | None:
             "agent_id": agent_id,
             "link": build_relay_link(agent_id=agent_id, pairing=pairing, relay_url=relay_url),
         }
-    except Exception:
-        return None
+    except Exception as exc:
+        return {"error": _relay_setup_error(exc)}
+
+
+def _relay_setup_error(exc: Exception) -> str:
+    relay = _relay_module()
+    if isinstance(exc, getattr(relay, "RelayRegistrationError", ())):
+        return str(exc)
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if status == 401:
+        return (
+            "The relay rejected this agent enrollment. Generate a fresh setup code "
+            "in the Fetch app, then run `hermes setup` again."
+        )
+    if status == 404:
+        return "This relay does not expose Fetch pairing endpoints. Check the relay URL or update the relay."
+    if status == 503:
+        return "The relay is reachable, but agent registration is disabled or unavailable."
+    if status is not None:
+        return f"Relay pairing failed with HTTP {status}."
+    return "Relay pairing unavailable. Check that the relay is reachable, then run Fetch setup again."
+
+
+def _has_setup_admission_token() -> bool:
+    relay = _relay_module()
+    home = _hermes_home()
+    registration = relay._config_value(relay.REGISTRATION_TOKEN_ENV, hermes_home=home)
+    enrollment = relay._config_value(relay.ENROLLMENT_TOKEN_ENV, hermes_home=home)
+    return bool(registration or enrollment)
+
+
+def _maybe_prompt_for_enrollment_token() -> None:
+    if _has_setup_admission_token() or _has_relay_agent_credentials() or not sys.stdin.isatty():
+        return
+    relay = _relay_module()
+    print()
+    print(
+        "Open Fetch on your iPhone, tap Create setup code, then paste that code here."
+    )
+    try:
+        code = input("Fetch setup code: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return
+    if code:
+        os.environ[relay.ENROLLMENT_TOKEN_ENV] = code
 
 
 def render_qr(data: str) -> str | None:
@@ -259,9 +318,10 @@ def interactive_setup() -> None:
     print_info("Pair the Fetch iOS app to this agent — like linking WhatsApp Web.")
     print()
 
+    _maybe_prompt_for_enrollment_token()
     relay_pairing = _try_build_relay_pairing()
 
-    if relay_pairing:
+    if relay_pairing and not relay_pairing.get("error"):
         _inbox_module().enable_delivery_for_future_starts()
         runtime = _runtime_module()
         runtime.enable_tunnel_for_future_starts()
@@ -323,8 +383,6 @@ def interactive_setup() -> None:
     # Relay is the only supported setup path. Failing closed avoids producing a
     # second, confusing URL/token pairing mode.
     _inbox_module().enable_delivery_for_future_starts()
-    print_warning(
-        "Relay pairing unavailable. Check that the relay is reachable and "
-        "started with HERMES_RELAY_ENABLE_TUNNEL=1, then run Fetch setup again."
-    )
+    error = str(relay_pairing.get("error")) if relay_pairing else ""
+    print_warning(error or "Relay pairing unavailable. Check that the relay is reachable, then run Fetch setup again.")
     print()
