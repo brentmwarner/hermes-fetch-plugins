@@ -79,6 +79,31 @@ def test_is_pairing_configured_false_with_only_saved_dashboard_token(tmp_path, m
     assert not pairing.is_pairing_configured()
 
 
+def test_has_relay_agent_credentials_true_without_pairing(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)
+    push_dir = tmp_path / "push"
+    push_dir.mkdir()
+    (push_dir / "fetch-relay.json").write_text(
+        json.dumps(
+            {
+                "agent_id": "agent-1",
+                "agent_secret": "secret",
+                "relay_url": pairing._DEFAULT_RELAY_URL,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert pairing._has_relay_agent_credentials()
+    assert not pairing.is_pairing_configured()
+
+
+def test_try_build_relay_link_returns_none_for_relay_error(monkeypatch) -> None:
+    monkeypatch.setattr(pairing, "_try_build_relay_pairing", lambda: {"error": "needs setup code"})
+
+    assert pairing._try_build_relay_link() is None
+
+
 class _FakeInbox:
     def enable_delivery_for_future_starts(self):
         pass
@@ -187,3 +212,20 @@ def test_interactive_setup_hands_off_runtime_before_start(monkeypatch, capsys, t
     out = capsys.readouterr().out
     assert "Restarted the Fetch relay runtime" in out
     assert link in out
+
+
+def test_interactive_setup_prints_relay_registration_error(monkeypatch, capsys, tmp_path) -> None:
+    monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(pairing, "is_pairing_configured", lambda: False)
+    monkeypatch.setattr(pairing, "_inbox_module", lambda: _FakeInbox())
+    monkeypatch.setattr(
+        pairing,
+        "_try_build_relay_pairing",
+        lambda: {"error": "Fetch setup needs a setup code from the signed-in iOS app."},
+    )
+
+    pairing.interactive_setup()
+
+    out = capsys.readouterr().out
+    assert "Fetch setup needs a setup code" in out
+    assert "HERMES_RELAY_ENABLE_TUNNEL" not in out

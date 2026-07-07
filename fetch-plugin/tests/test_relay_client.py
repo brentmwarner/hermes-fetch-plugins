@@ -104,6 +104,77 @@ async def test_legacy_enroll_without_attestation_succeeds(monkeypatch, tmp_path)
                                  bundle_id="com.brentwarner.fetch", preferences={})  # must not raise
 
 
+async def test_enrollment_token_is_sent_when_registering(monkeypatch, tmp_path):
+    seen = {}
+
+    def handler(request):
+        if request.url.path == "/v1/agents/register":
+            seen["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"agent_id": "a1", "agent_secret": "s1"})
+        if request.url.path == "/v1/devices/register":
+            return httpx.Response(200, json={"ok": True, "device_id": "d1"})
+        return httpx.Response(404)
+
+    _patch_transport(monkeypatch, handler)
+    client = relay.RelayClient(
+        relay_url="https://relay.test",
+        credentials_path=tmp_path / "c.json",
+        enrollment_token="fetch_setup_code",
+    )
+
+    await client.register_device(
+        token="t",
+        platform="ios",
+        environment="sandbox",
+        bundle_id="com.brentwarner.fetch",
+        preferences={},
+    )
+
+    assert seen["body"]["enrollment_token"] == "fetch_setup_code"
+
+
+async def test_registration_401_without_token_explains_setup_code(monkeypatch, tmp_path):
+    def handler(request):
+        if request.url.path == "/v1/agents/register":
+            return httpx.Response(401, json={"detail": "Unauthorized"})
+        return httpx.Response(404)
+
+    _patch_transport(monkeypatch, handler)
+    client = relay.RelayClient(relay_url="https://relay.test", credentials_path=tmp_path / "c.json")
+
+    with pytest.raises(relay.RelayRegistrationError, match="setup code"):
+        await client.register_device(
+            token="t",
+            platform="ios",
+            environment="sandbox",
+            bundle_id="com.brentwarner.fetch",
+            preferences={},
+        )
+
+
+async def test_rejected_enrollment_token_asks_for_fresh_code(monkeypatch, tmp_path):
+    def handler(request):
+        if request.url.path == "/v1/agents/register":
+            return httpx.Response(401, json={"detail": "setup code is invalid or expired"})
+        return httpx.Response(404)
+
+    _patch_transport(monkeypatch, handler)
+    client = relay.RelayClient(
+        relay_url="https://relay.test",
+        credentials_path=tmp_path / "c.json",
+        enrollment_token="stale",
+    )
+
+    with pytest.raises(relay.RelayRegistrationError, match="fresh code"):
+        await client.register_device(
+            token="t",
+            platform="ios",
+            environment="sandbox",
+            bundle_id="com.brentwarner.fetch",
+            preferences={},
+        )
+
+
 async def test_400_without_attestation_word_does_not_raise_needs_attestation(monkeypatch, tmp_path):
     def handler(request):
         if request.url.path == "/v1/agents/register":
