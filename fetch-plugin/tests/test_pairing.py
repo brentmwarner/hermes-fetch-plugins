@@ -248,8 +248,14 @@ def test_no_warning_when_dashboard_is_ungated_or_unreachable() -> None:
     assert pairing._gated_dashboard_warning(None) is None
 
 
-def test_local_dashboard_status_swallows_connection_failures() -> None:
-    assert pairing._local_dashboard_status(base="http://127.0.0.1:1") is None
+def test_local_dashboard_status_swallows_connection_failures(monkeypatch) -> None:
+    import httpx
+
+    def _refuse(*args, **kwargs):
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(httpx, "get", _refuse)
+    assert pairing._local_dashboard_status(base="http://127.0.0.1:9119") is None
 
 
 def test_interactive_setup_warns_when_dashboard_is_gated(monkeypatch, capsys, tmp_path) -> None:
