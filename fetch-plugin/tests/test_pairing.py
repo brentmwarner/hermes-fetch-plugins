@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -142,6 +143,7 @@ def test_interactive_setup_hides_link_when_tunnel_not_online(monkeypatch, capsys
     monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(pairing, "is_pairing_configured", lambda: False)
     monkeypatch.setattr(pairing, "_inbox_module", lambda: _FakeInbox())
+    monkeypatch.setattr(pairing, "_ensure_dashboard_session_token", lambda: "session-tok")
     monkeypatch.setattr(pairing, "_runtime_module", lambda: _FakeRuntime())
     monkeypatch.setattr(
         pairing,
@@ -166,6 +168,7 @@ def test_interactive_setup_prints_link_when_tunnel_online(monkeypatch, capsys, t
     monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(pairing, "is_pairing_configured", lambda: False)
     monkeypatch.setattr(pairing, "_inbox_module", lambda: _FakeInbox())
+    monkeypatch.setattr(pairing, "_ensure_dashboard_session_token", lambda: "session-tok")
     monkeypatch.setattr(pairing, "_runtime_module", lambda: _FakeRuntime())
     monkeypatch.setattr(pairing, "render_qr", lambda data: None)
     monkeypatch.setattr(
@@ -194,6 +197,7 @@ def test_interactive_setup_hands_off_runtime_before_start(monkeypatch, capsys, t
     monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(pairing, "is_pairing_configured", lambda: False)
     monkeypatch.setattr(pairing, "_inbox_module", lambda: _FakeInbox())
+    monkeypatch.setattr(pairing, "_ensure_dashboard_session_token", lambda: "session-tok")
     monkeypatch.setattr(pairing, "_runtime_module", lambda: fake_runtime)
     monkeypatch.setattr(pairing, "render_qr", lambda data: None)
     monkeypatch.setattr(
@@ -218,6 +222,7 @@ def test_interactive_setup_prints_relay_registration_error(monkeypatch, capsys, 
     monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(pairing, "is_pairing_configured", lambda: False)
     monkeypatch.setattr(pairing, "_inbox_module", lambda: _FakeInbox())
+    monkeypatch.setattr(pairing, "_ensure_dashboard_session_token", lambda: "session-tok")
     monkeypatch.setattr(
         pairing,
         "_try_build_relay_pairing",
@@ -229,3 +234,97 @@ def test_interactive_setup_prints_relay_registration_error(monkeypatch, capsys, 
     out = capsys.readouterr().out
     assert "Fetch setup needs a setup code" in out
     assert "HERMES_RELAY_ENABLE_TUNNEL" not in out
+
+
+def test_gated_dashboard_warning_carries_the_loopback_fix() -> None:
+    warning = pairing._gated_dashboard_warning({"auth_required": True})
+    assert warning is not None
+    assert "127.0.0.1" in warning
+
+
+def test_no_warning_when_dashboard_is_ungated_or_unreachable() -> None:
+    assert pairing._gated_dashboard_warning({"auth_required": False}) is None
+    assert pairing._gated_dashboard_warning({}) is None
+    assert pairing._gated_dashboard_warning(None) is None
+
+
+def test_local_dashboard_status_swallows_connection_failures(monkeypatch) -> None:
+    import httpx
+
+    def _refuse(*args, **kwargs):
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(httpx, "get", _refuse)
+    assert pairing._local_dashboard_status(base="http://127.0.0.1:9119") is None
+
+
+def test_interactive_setup_warns_when_dashboard_is_gated(monkeypatch, capsys, tmp_path) -> None:
+    link = "https://tryfetchapp.com/setup?agent=a1&pairing=p1"
+    monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(pairing, "is_pairing_configured", lambda: False)
+    monkeypatch.setattr(pairing, "_inbox_module", lambda: _FakeInbox())
+    monkeypatch.setattr(pairing, "_ensure_dashboard_session_token", lambda: "session-tok")
+    monkeypatch.setattr(pairing, "_runtime_module", lambda: _FakeRuntime())
+    monkeypatch.setattr(pairing, "render_qr", lambda data: None)
+    monkeypatch.setattr(pairing, "_local_dashboard_status", lambda: {"auth_required": True})
+    monkeypatch.setattr(
+        pairing,
+        "_try_build_relay_pairing",
+        lambda: {
+            "client": _FakeRelayClient({"ok": True, "agent_online": True}),
+            "agent_id": "a1",
+            "link": link,
+        },
+    )
+
+    pairing.interactive_setup()
+
+    out = capsys.readouterr().out
+    assert "127.0.0.1" in out
+    # The warning must not hide the pairing — the link still works once the
+    # user rebinds the dashboard.
+    assert link in out
+
+
+def test_ensure_dashboard_session_token_generates_and_persists_when_absent(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("HERMES_DASHBOARD_SESSION_TOKEN", raising=False)
+    monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)  # empty .env dir
+    saved = {}
+    monkeypatch.setattr(pairing, "_save_env_value", lambda k, v: saved.__setitem__(k, v))
+
+    token = pairing._ensure_dashboard_session_token()
+
+    assert token and len(token) >= 20
+    # Persisted to ~/.hermes/.env so the dashboard and the tunnel share it,
+    assert saved["HERMES_DASHBOARD_SESSION_TOKEN"] == token
+    # and exported so the runtime this process starts inherits it immediately.
+    assert os.environ["HERMES_DASHBOARD_SESSION_TOKEN"] == token
+
+
+def test_ensure_dashboard_session_token_keeps_existing_value(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("HERMES_DASHBOARD_SESSION_TOKEN", "already-set-token")
+    monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)
+    calls = []
+    monkeypatch.setattr(pairing, "_save_env_value", lambda k, v: calls.append((k, v)))
+
+    token = pairing._ensure_dashboard_session_token()
+
+    assert token == "already-set-token"
+    assert calls == []  # never overwrite a working token
+
+
+def test_ensure_dashboard_session_token_survives_persistence_failure(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("HERMES_DASHBOARD_SESSION_TOKEN", raising=False)
+    monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)
+
+    def _boom(key, value):
+        raise RuntimeError("read-only .env")
+
+    monkeypatch.setattr(pairing, "_save_env_value", _boom)
+
+    token = pairing._ensure_dashboard_session_token()
+
+    # A failed write must not crash pairing; the current process still gets the
+    # token so the runtime it starts next can share it.
+    assert token
+    assert os.environ["HERMES_DASHBOARD_SESSION_TOKEN"] == token

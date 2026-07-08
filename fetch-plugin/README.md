@@ -64,6 +64,29 @@ code. That code enrolls the agent into your Fetch account; the relay link shown
 afterward pairs this phone to the enrolled agent. No Apple account, no `.p8`, no
 core edits, no public dashboard URL, and no browser tab to keep open.
 
+## Running on a VPS or headless server
+
+Fully supported, and nothing needs to be exposed to the internet: the agent
+dials **outbound** to the relay (`wss://push.tryfetchapp.com`) and the phone
+comes in through that reverse tunnel.
+
+- Keep the Hermes dashboard bound to **`127.0.0.1`** (the default). Binding a
+  non-loopback host (`0.0.0.0`, the VPS IP) makes Hermes auto-engage its login
+  gate, and the Fetch app will be locked out with "This server uses a login" —
+  `hermes setup` warns about this. For browser access from your laptop, use SSH
+  forwarding (`ssh -L 9119:127.0.0.1:9119 <vps>`) instead.
+- Do **not** set `GATEWAY_RELAY_URL`, `gateway.relay_url`, or any
+  `HERMES_RELAY_*` variables for Fetch — none are client-side settings. The
+  `HERMES_RELAY_*` names configure the relay **server**, and `GATEWAY_RELAY_URL`
+  activates an unrelated experimental gateway connector that will just dial the
+  push relay's `/relay` path forever and get 403s.
+- If you run your **own** `hermes dashboard`/`gateway` process (rather than
+  letting the plugin's headless runtime own it), it must share the dashboard
+  session token with the Fetch tunnel or the app fails with "token not
+  accepted". `hermes setup` now pins a `HERMES_DASHBOARD_SESSION_TOKEN` in
+  `~/.hermes/.env` for this; **restart your own dashboard after setup** so it
+  reloads `.env` and picks up the same token.
+
 ## Reconfigure or reset
 
 Run `hermes setup` again, choose Fetch, and confirm the reconfigure prompt. The
