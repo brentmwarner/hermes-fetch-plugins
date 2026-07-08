@@ -82,6 +82,50 @@ def _inbox_module():
     return module
 
 
+def _tunnel_module():
+    """Load the reverse-tunnel helper by file path."""
+    existing = sys.modules.get("fetch_plugin_tunnel")
+    if existing is not None:
+        return existing
+    path = Path(__file__).resolve().parent / "_tunnel.py"
+    spec = importlib.util.spec_from_file_location("fetch_plugin_tunnel", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _local_dashboard_status(base: str | None = None) -> dict | None:
+    """Best-effort ``/api/status`` of the local dashboard the tunnel forwards
+    to. None when unreachable — tunnel readiness is checked elsewhere."""
+    import httpx
+
+    target = (base or _tunnel_module().DEFAULT_DASHBOARD).rstrip("/")
+    try:
+        response = httpx.get(f"{target}/api/status", timeout=3.0)
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _gated_dashboard_warning(status: dict | None) -> str | None:
+    """Hermes auto-engages its login gate when the dashboard binds a
+    non-loopback host. The Fetch app has no login form on the relay path, so
+    pairing against a gated dashboard dead-ends at "This server uses a login"
+    — warn at setup time, where the fix is one config change away."""
+    if not status or not status.get("auth_required"):
+        return None
+    return (
+        "This machine's Hermes dashboard requires a login (it is bound to a "
+        "non-loopback address), so the Fetch app will be locked out after "
+        "pairing. Bind the dashboard to 127.0.0.1 and restart Hermes — Fetch "
+        "connects through the relay, so nothing needs to be public."
+    )
+
+
 def _hermes_home() -> Path:
     try:
         from hermes_cli.config import get_hermes_home
@@ -356,6 +400,11 @@ def interactive_setup() -> None:
                 "This relay does not expose tunnel readiness status, so Fetch cannot verify "
                 "the agent tunnel before showing the setup link."
             )
+            print()
+
+        gated = _gated_dashboard_warning(_local_dashboard_status())
+        if gated:
+            print_warning(gated)
             print()
 
         # Relay is the headline path: works anywhere, no Tailscale. QR + link.

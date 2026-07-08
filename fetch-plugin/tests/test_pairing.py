@@ -229,3 +229,46 @@ def test_interactive_setup_prints_relay_registration_error(monkeypatch, capsys, 
     out = capsys.readouterr().out
     assert "Fetch setup needs a setup code" in out
     assert "HERMES_RELAY_ENABLE_TUNNEL" not in out
+
+
+def test_gated_dashboard_warning_carries_the_loopback_fix() -> None:
+    warning = pairing._gated_dashboard_warning({"auth_required": True})
+    assert warning is not None
+    assert "127.0.0.1" in warning
+
+
+def test_no_warning_when_dashboard_is_ungated_or_unreachable() -> None:
+    assert pairing._gated_dashboard_warning({"auth_required": False}) is None
+    assert pairing._gated_dashboard_warning({}) is None
+    assert pairing._gated_dashboard_warning(None) is None
+
+
+def test_local_dashboard_status_swallows_connection_failures() -> None:
+    assert pairing._local_dashboard_status(base="http://127.0.0.1:1") is None
+
+
+def test_interactive_setup_warns_when_dashboard_is_gated(monkeypatch, capsys, tmp_path) -> None:
+    link = "https://tryfetchapp.com/setup?agent=a1&pairing=p1"
+    monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(pairing, "is_pairing_configured", lambda: False)
+    monkeypatch.setattr(pairing, "_inbox_module", lambda: _FakeInbox())
+    monkeypatch.setattr(pairing, "_runtime_module", lambda: _FakeRuntime())
+    monkeypatch.setattr(pairing, "render_qr", lambda data: None)
+    monkeypatch.setattr(pairing, "_local_dashboard_status", lambda: {"auth_required": True})
+    monkeypatch.setattr(
+        pairing,
+        "_try_build_relay_pairing",
+        lambda: {
+            "client": _FakeRelayClient({"ok": True, "agent_online": True}),
+            "agent_id": "a1",
+            "link": link,
+        },
+    )
+
+    pairing.interactive_setup()
+
+    out = capsys.readouterr().out
+    assert "127.0.0.1" in out
+    # The warning must not hide the pairing — the link still works once the
+    # user rebinds the dashboard.
+    assert link in out
