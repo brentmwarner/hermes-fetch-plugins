@@ -80,6 +80,12 @@ comes in through that reverse tunnel.
   `HERMES_RELAY_*` names configure the relay **server**, and `GATEWAY_RELAY_URL`
   activates an unrelated experimental gateway connector that will just dial the
   push relay's `/relay` path forever and get 403s.
+- If you run your **own** `hermes dashboard`/`gateway` process (rather than
+  letting the plugin's headless runtime own it), it must share the dashboard
+  session token with the Fetch tunnel or the app fails with "token not
+  accepted". `hermes setup` now pins a `HERMES_DASHBOARD_SESSION_TOKEN` in
+  `~/.hermes/.env` for this; **restart your own dashboard after setup** so it
+  reloads `.env` and picks up the same token.
 
 ## Reconfigure or reset
 

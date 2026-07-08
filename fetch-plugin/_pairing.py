@@ -111,6 +111,44 @@ def _local_dashboard_status(base: str | None = None) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _save_env_value(key: str, value: str) -> None:
+    """Persist a value to ``~/.hermes/.env`` via core (indirection for tests)."""
+    from hermes_cli.config import save_env_value
+
+    save_env_value(key, value)
+
+
+def _ensure_dashboard_session_token() -> str:
+    """Guarantee a shared dashboard session token before the tunnel starts.
+
+    In loopback mode the dashboard gates ``/api/`` on a session token that is
+    either ``HERMES_DASHBOARD_SESSION_TOKEN`` or a random per-process value.
+    The Fetch tunnel forwards that env var, so unless it is set and persisted,
+    a self-hosted dashboard mints a random token the tunnel never knows and the
+    app dead-ends on "token not accepted" (only the desktop app used to set it).
+    Persist one to ``~/.hermes/.env`` and export it so the dashboard and tunnel
+    this setup starts both read the same value. Never overwrites an existing
+    token — that would break a dashboard already running with it."""
+    import secrets
+
+    existing = _relay_module()._config_value(
+        "HERMES_DASHBOARD_SESSION_TOKEN", hermes_home=_hermes_home()
+    )
+    if existing:
+        os.environ["HERMES_DASHBOARD_SESSION_TOKEN"] = existing
+        return existing
+    token = secrets.token_urlsafe(32)
+    try:
+        _save_env_value("HERMES_DASHBOARD_SESSION_TOKEN", token)
+    except Exception:
+        # Persistence is best-effort — a failed write must never break pairing
+        # that otherwise works. Exporting still lets the runtime we start next
+        # share the token for this session.
+        pass
+    os.environ["HERMES_DASHBOARD_SESSION_TOKEN"] = token
+    return token
+
+
 def _gated_dashboard_warning(status: dict | None) -> str | None:
     """Hermes auto-engages its login gate when the dashboard binds a
     non-loopback host. The Fetch app has no login form on the relay path, so
@@ -367,6 +405,10 @@ def interactive_setup() -> None:
 
     if relay_pairing and not relay_pairing.get("error"):
         _inbox_module().enable_delivery_for_future_starts()
+        # Pin a shared dashboard session token BEFORE (re)starting the runtime,
+        # so the loopback dashboard and the tunnel authenticate against the same
+        # value instead of the app hitting "token not accepted".
+        _ensure_dashboard_session_token()
         runtime = _runtime_module()
         runtime.enable_tunnel_for_future_starts()
         # Hand the uplink over: stop any superseded autostarted runtime so the

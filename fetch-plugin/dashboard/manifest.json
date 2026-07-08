@@ -3,7 +3,7 @@
   "label": "Fetch Push",
   "description": "Fetch iOS device-token registration plus inbox delivery configuration (status/enable/test).",
   "icon": "Bell",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "tab": {
     "path": "/fetch-push",
     "hidden": true
