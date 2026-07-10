@@ -73,6 +73,18 @@ _CREDS_SUPERSEDED = "superseded"  # new agent id: exit so the owner re-locks
 # Content types streamed back as a UTF-8 string; everything else is base64'd.
 _TEXTUAL_PREFIXES = ("text/", "application/json", "application/javascript", "application/xml")
 
+# A rest-resp is ONE WebSocket JSON frame end-to-end; the relay's uvicorn drops
+# the whole agent uplink (close 1009) past its 16MiB receive cap, so a single
+# fat response knocks the agent offline for every paired device. Cap well under
+# that (JSON escaping inflates the frame beyond the raw body).
+_REST_RESP_MAX_BODY_BYTES = 4 * 1024 * 1024
+
+# Synthetic tunnel-side endpoint: /api/sessions rows carry full system_prompt +
+# preview (~18KB/row), useless weight when the app only needs start times for
+# the usage heatmap. Served here, not by the dashboard — the plugin must not
+# patch core routes.
+_LITE_SESSION_STARTS_PATH = "/api/fetch/session-starts"
+
 
 def _http_to_ws(url: str) -> str:
     if url.startswith("https://"):
@@ -591,12 +603,43 @@ class AgentTunnel:
     async def _handle_rest(self, ws, frame: dict) -> None:
         cid, sid = frame.get("cid"), frame.get("sid")
         try:
-            status, headers, body, is_b64 = await self._rest_call(frame)
+            if (frame.get("path") or "") == _LITE_SESSION_STARTS_PATH:
+                status, headers, body, is_b64 = await self._session_starts(frame)
+            else:
+                status, headers, body, is_b64 = await self._rest_call(frame)
         except Exception as exc:
             await self._send(ws, {"t": T_REST_RESP, "cid": cid, "sid": sid, "status": 502, "error": str(exc)})
             return
+        if len(body) > _REST_RESP_MAX_BODY_BYTES:
+            await self._send(ws, {"t": T_REST_RESP, "cid": cid, "sid": sid, "status": 502,
+                                  "error": f"response too large for relay tunnel ({len(body)} bytes)"})
+            return
         await self._send(ws, {"t": T_REST_RESP, "cid": cid, "sid": sid, "status": status,
                               "headers": headers, "body": body, "body_b64": is_b64})
+
+    async def _session_starts(self, frame: dict) -> tuple[int, dict, str, bool]:
+        query = frame.get("query") or {}
+        try:
+            days = int(str(query.get("days", "")).strip() or 30)
+        except ValueError:
+            days = 30
+        days = max(1, min(days, 365))
+        status, _, body, is_b64 = await self._rest_call({
+            "method": "GET",
+            "path": "/api/sessions",
+            "query": {"limit": "1000", "offset": "0", "order": "recent", "archived": "include"},
+            "headers": frame.get("headers"),
+        })
+        json_headers = {"content-type": "application/json"}
+        if status != 200 or is_b64:
+            return status, json_headers, json.dumps({"detail": "session list unavailable"}), False
+        rows = json.loads(body).get("sessions") or []
+        cutoff = time.time() - days * 86400
+        starts = sorted(
+            s for s in (row.get("started_at") for row in rows)
+            if isinstance(s, (int, float)) and s >= cutoff
+        )
+        return 200, json_headers, json.dumps({"starts": starts, "days": days, "total": len(starts)}), False
 
     async def _rest_call(self, frame: dict) -> tuple[int, dict, str, bool]:
         method = (frame.get("method") or "GET").upper()

@@ -523,3 +523,101 @@ def test_reconfigure_during_long_backoff_heals_promptly(monkeypatch):
 
     assert t.agent_secret == "s2"
     assert "Bearer s2" in calls
+
+
+# --- lite session-starts endpoint + response size cap ---
+#
+# /api/sessions rows carry full system_prompt + preview text (~18KB/row
+# measured), so 1000 rows ≈ 15-20MB — one rest-resp frame that big blows
+# uvicorn's 16MiB WebSocket cap on the relay and kills the agent uplink.
+# The tunnel therefore (a) serves a synthetic tiny endpoint that returns
+# just session start epochs, and (b) refuses to emit oversized bodies.
+
+import time as _time
+
+
+def _sessions_payload(rows):
+    return httpx.Response(200, json={"sessions": rows, "total": len(rows)})
+
+
+async def test_session_starts_lite_returns_epochs_within_window():
+    now = _time.time()
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.path)
+        assert request.url.path == "/api/sessions"
+        assert request.url.params["limit"] == "1000"
+        assert request.url.params["archived"] == "include"
+        assert request.url.params["order"] == "recent"
+        return _sessions_payload([
+            {"started_at": now - 3600, "system_prompt": "x" * 20_000},
+            {"started_at": now - 6 * 86400, "preview": "y" * 20_000},
+            {"started_at": now - 40 * 86400},          # outside 7d window
+            {"started_at": None},                       # tolerated
+            {"title": "no started_at at all"},          # tolerated
+        ])
+
+    t = _client(dashboard_token="tok", http_client_factory=_http_factory(handler))
+    ws = FakeRelayWS()
+    await t._handle_rest(ws, {"t": "rest-req", "cid": "c1", "sid": 9, "method": "GET",
+                              "path": "/api/fetch/session-starts", "query": {"days": "7"}})
+
+    assert seen == ["/api/sessions"]  # synthetic path never hits the dashboard
+    r = ws.sent[0]
+    assert r["t"] == "rest-resp" and r["sid"] == 9 and r["status"] == 200
+    body = json.loads(r["body"])
+    assert body["days"] == 7
+    assert body["starts"] == sorted([now - 6 * 86400, now - 3600])
+    assert len(r["body"]) < 10_000  # the whole point: tiny payload
+
+
+async def test_session_starts_bad_days_defaults_to_30():
+    now = _time.time()
+
+    def handler(request):
+        return _sessions_payload([
+            {"started_at": now - 29 * 86400},
+            {"started_at": now - 45 * 86400},
+        ])
+
+    t = _client(http_client_factory=_http_factory(handler))
+    ws = FakeRelayWS()
+    await t._handle_rest(ws, {"t": "rest-req", "cid": "c1", "sid": 10, "method": "GET",
+                              "path": "/api/fetch/session-starts", "query": {"days": "banana"}})
+
+    body = json.loads(ws.sent[0]["body"])
+    assert body["days"] == 30
+    assert body["starts"] == [now - 29 * 86400]
+
+
+async def test_session_starts_dashboard_error_passes_status():
+    def handler(request):
+        assert request.url.path == "/api/sessions"  # proves the intercept rewrote the path
+        return httpx.Response(500, json={"detail": "boom"})
+
+    t = _client(http_client_factory=_http_factory(handler))
+    ws = FakeRelayWS()
+    await t._handle_rest(ws, {"t": "rest-req", "cid": "c1", "sid": 11, "method": "GET",
+                              "path": "/api/fetch/session-starts"})
+
+    r = ws.sent[0]
+    assert r["status"] == 500
+    assert len(r.get("body") or "") < 1000
+
+
+async def test_oversized_rest_resp_becomes_502(monkeypatch):
+    monkeypatch.setattr(tunnel, "_REST_RESP_MAX_BODY_BYTES", 512)
+
+    def handler(request):
+        return httpx.Response(200, text="z" * 2048)
+
+    t = _client(http_client_factory=_http_factory(handler))
+    ws = FakeRelayWS()
+    await t._handle_rest(ws, {"t": "rest-req", "cid": "c1", "sid": 12, "method": "GET",
+                              "path": "/api/big"})
+
+    r = ws.sent[0]
+    assert r["status"] == 502
+    assert "too large" in r["error"]
+    assert len(r.get("body") or "") < 512  # never forwards the oversized body
