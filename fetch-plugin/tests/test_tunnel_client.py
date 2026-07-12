@@ -3,6 +3,7 @@ import base64
 import importlib.util
 import json
 import sys
+import time as _time
 from pathlib import Path
 
 import httpx
@@ -533,8 +534,6 @@ def test_reconfigure_during_long_backoff_heals_promptly(monkeypatch):
 # The tunnel therefore (a) serves a synthetic tiny endpoint that returns
 # just session start epochs, and (b) refuses to emit oversized bodies.
 
-import time as _time
-
 
 def _sessions_payload(rows):
     return httpx.Response(200, json={"sessions": rows, "total": len(rows)})
@@ -621,3 +620,22 @@ async def test_oversized_rest_resp_becomes_502(monkeypatch):
     assert r["status"] == 502
     assert "too large" in r["error"]
     assert len(r.get("body") or "") < 512  # never forwards the oversized body
+
+
+async def test_oversized_non_ascii_rest_resp_becomes_502(monkeypatch):
+    # Each "文" is 1 Python str char but 3 UTF-8 bytes on the wire: 200 chars
+    # stays under a char-counted cap while 600 bytes blows past a byte-counted
+    # one. Guards against measuring len(body) instead of its encoded size.
+    monkeypatch.setattr(tunnel, "_REST_RESP_MAX_BODY_BYTES", 512)
+
+    def handler(request):
+        return httpx.Response(200, text="文" * 200)
+
+    t = _client(http_client_factory=_http_factory(handler))
+    ws = FakeRelayWS()
+    await t._handle_rest(ws, {"t": "rest-req", "cid": "c1", "sid": 13, "method": "GET",
+                              "path": "/api/big"})
+
+    r = ws.sent[0]
+    assert r["status"] == 502
+    assert "too large" in r["error"]

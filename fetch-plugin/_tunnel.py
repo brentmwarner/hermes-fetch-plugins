@@ -610,9 +610,10 @@ class AgentTunnel:
         except Exception as exc:
             await self._send(ws, {"t": T_REST_RESP, "cid": cid, "sid": sid, "status": 502, "error": str(exc)})
             return
-        if len(body) > _REST_RESP_MAX_BODY_BYTES:
+        body_bytes = len(body) if isinstance(body, (bytes, bytearray)) else len(body.encode("utf-8"))
+        if body_bytes > _REST_RESP_MAX_BODY_BYTES:
             await self._send(ws, {"t": T_REST_RESP, "cid": cid, "sid": sid, "status": 502,
-                                  "error": f"response too large for relay tunnel ({len(body)} bytes)"})
+                                  "error": f"response too large for relay tunnel ({body_bytes} bytes)"})
             return
         await self._send(ws, {"t": T_REST_RESP, "cid": cid, "sid": sid, "status": status,
                               "headers": headers, "body": body, "body_b64": is_b64})
