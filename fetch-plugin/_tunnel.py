@@ -37,7 +37,7 @@ import re
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -469,10 +469,16 @@ class AgentTunnel:
 
     async def run_forever(self) -> None:
         backoff = 0.25
+
+        def mark_connected() -> None:
+            nonlocal backoff
+            backoff = 0.25
+            self._consecutive_auth_rejects = 0
+
         while not self._stop:
             auth_rejected = False
             try:
-                await self._serve_once()
+                await self._serve_once(on_connected=mark_connected)
                 backoff = 0.25
                 self._consecutive_auth_rejects = 0
             except Exception as exc:
@@ -562,8 +568,10 @@ class AgentTunnel:
                 return outcome
         return _CREDS_UNCHANGED
 
-    async def _serve_once(self) -> None:
+    async def _serve_once(self, *, on_connected: Callable[[], None] | None = None) -> None:
         ws = await self._relay_connect(self.relay_ws_url, self._headers)
+        if on_connected is not None:
+            on_connected()
         try:
             async for raw in ws:
                 try:

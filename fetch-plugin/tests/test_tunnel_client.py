@@ -462,6 +462,39 @@ def test_network_errors_do_not_trip_auth_slowdown():
     assert t.superseded_by is None
 
 
+def test_successful_open_resets_reconnect_backoff(monkeypatch):
+    bases = []
+    calls = []
+
+    def capture(base, **kw):
+        bases.append(base)
+        return 0.0
+
+    class OpenThenDrops:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise RuntimeError("transport dropped")
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(tunnel, "_jittered_delay", capture)
+
+    async def connect(url, headers):
+        calls.append(1)
+        if len(calls) == 4:
+            t.stop()
+        return OpenThenDrops()
+
+    t = _client(relay_connect=connect)
+    asyncio.run(asyncio.wait_for(t.run_forever(), timeout=5))
+
+    assert len(calls) == 4
+    assert bases == [0.25, 0.25, 0.25]
+
+
 def test_adopting_rotated_secret_resets_backoff(monkeypatch):
     """Grown exponential backoff must reset when fresh creds are adopted, so the
     self-heal retries the new secret promptly instead of after a long wait."""
