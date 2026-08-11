@@ -95,7 +95,7 @@ def _load_inbox():
 
 
 router = APIRouter()
-_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+_MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024
 _ATTACHMENT_ENDPOINT_HEADER = {"X-Fetch-Attachment-Endpoint": "1"}
 
 
@@ -160,7 +160,7 @@ def download_attachment(path: str = Query(min_length=1, max_length=4096)):
     if size > _MAX_ATTACHMENT_BYTES:
         raise HTTPException(
             status_code=413,
-            detail="Attachment exceeds the 25 MB limit",
+            detail="Attachment exceeds the 100 MB limit",
             headers=_ATTACHMENT_ENDPOINT_HEADER,
         )
     return FileResponse(

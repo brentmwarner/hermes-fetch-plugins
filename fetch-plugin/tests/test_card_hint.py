@@ -58,7 +58,7 @@ def test_hint_documents_host_file_delivery(registered_platform):
     hint = registered_platform["platform_hint"]
     assert "MEDIA:/absolute/path" in hint
     assert "own line" in hint
-    assert "25 MB" in hint
+    assert "100 MB" in hint
     assert "previewable, downloadable attachment" in hint
 
 

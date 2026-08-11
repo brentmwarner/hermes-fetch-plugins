@@ -289,7 +289,7 @@ async def standalone_send(
     return {"success": True, "message_id": str(delivery.message_id), "session_id": delivery.session_id}
 
 
-_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+_MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024
 
 
 def _validated_media_path(path: str) -> str | None:
@@ -339,7 +339,7 @@ def _content_with_media(message, media_files) -> str:
             rejected_media = True
             continue
         if size > _MAX_ATTACHMENT_BYTES:
-            raise ValueError("Fetch attachments must be 25 MB or smaller")
+            raise ValueError("Fetch attachments must be 100 MB or smaller")
         seen.add(safe_path)
         parts.append(f"MEDIA:{safe_path}")
     if rejected_media:

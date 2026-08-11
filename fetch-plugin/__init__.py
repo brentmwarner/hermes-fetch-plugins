@@ -92,7 +92,7 @@ _FETCH_ATTACHMENT_HINT = (
     "Fetch can receive files from this host. When a requested file is complete, "
     "attach it by putting `MEDIA:/absolute/path/to/file.ext` on its own line, "
     "outside code fences and separate from the human description. The path must "
-    "name an existing regular, non-sensitive file no larger than 25 MB. Fetch "
+    "name an existing regular, non-sensitive file no larger than 100 MB. Fetch "
     "renders supported images and videos inline and every other file as a "
     "previewable, downloadable attachment. Do not use a `file://` link or paste "
     "binary content into the reply. "

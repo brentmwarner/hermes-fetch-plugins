@@ -170,7 +170,7 @@ as its own DM target — `fetch:researcher` → "Researcher".
 
 ### File attachments
 
-Fetch turns can include any safe, regular host file up to 25 MB. The agent uses
+Fetch turns can include any safe, regular host file up to 100 MB. The agent uses
 Hermes' standard attachment contract by placing the completed file on its own
 line in the response:
 

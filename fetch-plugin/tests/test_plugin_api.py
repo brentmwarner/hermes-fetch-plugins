@@ -131,6 +131,35 @@ def test_missing_attachment_identifies_available_download_endpoint(monkeypatch, 
     assert res.headers["x-fetch-attachment-endpoint"] == "1"
 
 
+def test_attachment_download_enforces_100_mb_limit(monkeypatch, tmp_path):
+    assert api._MAX_ATTACHMENT_BYTES == 100 * 1024 * 1024
+    attachment = tmp_path / "large.bin"
+    with attachment.open("wb") as handle:
+        handle.truncate(api._MAX_ATTACHMENT_BYTES)
+    monkeypatch.setattr(api, "_safe_attachment_path", lambda path: attachment)
+    client = _client(_FakeClient())
+
+    accepted = client.get(
+        "/attachments/download",
+        params={"path": str(attachment)},
+        headers={"Range": "bytes=0-0"},
+    )
+
+    assert accepted.status_code == 206
+    assert accepted.content == b"\0"
+
+    with attachment.open("r+b") as handle:
+        handle.truncate(api._MAX_ATTACHMENT_BYTES + 1)
+    rejected = client.get(
+        "/attachments/download",
+        params={"path": str(attachment)},
+    )
+
+    assert rejected.status_code == 413
+    assert rejected.json() == {"detail": "Attachment exceeds the 100 MB limit"}
+    assert rejected.headers["x-fetch-attachment-endpoint"] == "1"
+
+
 def test_diagnostics_reports_tunnel_owner_and_provider(monkeypatch, tmp_path):
     runtime = api._load_sibling("fetch_plugin_runtime_diag_test", "_runtime.py")
     tunnel = api._load_sibling("fetch_plugin_tunnel_diag_test", "_tunnel.py")

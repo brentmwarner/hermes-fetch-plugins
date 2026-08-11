@@ -175,6 +175,7 @@ def test_standalone_send_accepts_media_only_delivery(tmp_path, monkeypatch):
 
 def test_standalone_send_reports_oversized_attachment(tmp_path, monkeypatch):
     inbox = _load_inbox()
+    assert inbox._MAX_ATTACHMENT_BYTES == 100 * 1024 * 1024
     archive = tmp_path / "oversized.zip"
     with archive.open("wb") as handle:
         handle.truncate(inbox._MAX_ATTACHMENT_BYTES + 1)
@@ -189,7 +190,7 @@ def test_standalone_send_reports_oversized_attachment(tmp_path, monkeypatch):
 
     assert result == {
         "success": False,
-        "error": "Fetch attachments must be 25 MB or smaller",
+        "error": "Fetch attachments must be 100 MB or smaller",
     }
 
 
