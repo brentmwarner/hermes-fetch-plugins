@@ -88,6 +88,34 @@ def test_badge_is_best_effort_when_relay_fails():
     assert res.json() == {"ok": True}
 
 
+def test_attachment_download_supports_byte_ranges(monkeypatch, tmp_path):
+    report = tmp_path / "report.pdf"
+    report.write_bytes(b"0123456789")
+    monkeypatch.setattr(api, "_safe_attachment_path", lambda path: report)
+
+    res = _client(_FakeClient()).get(
+        "/attachments/download",
+        params={"path": "/outside/managed/root/report.pdf"},
+        headers={"Range": "bytes=2-5"},
+    )
+
+    assert res.status_code == 206
+    assert res.content == b"2345"
+    assert res.headers["content-type"] == "application/octet-stream"
+    assert res.headers["content-range"] == "bytes 2-5/10"
+
+
+def test_attachment_download_rejects_unsafe_path(monkeypatch):
+    monkeypatch.setattr(api, "_safe_attachment_path", lambda path: None)
+
+    res = _client(_FakeClient()).get(
+        "/attachments/download",
+        params={"path": "/etc/passwd"},
+    )
+
+    assert res.status_code == 403
+
+
 def test_diagnostics_reports_tunnel_owner_and_provider(monkeypatch, tmp_path):
     runtime = api._load_sibling("fetch_plugin_runtime_diag_test", "_runtime.py")
     tunnel = api._load_sibling("fetch_plugin_tunnel_diag_test", "_tunnel.py")

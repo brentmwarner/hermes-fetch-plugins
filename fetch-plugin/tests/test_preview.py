@@ -53,6 +53,23 @@ def test_plain_text_strips_markdown_but_preserves_message():
     assert preview.notification_body("## Done\n- **Report** is `ready`", fallback="fallback") == "Done Report is ready"
 
 
+def test_media_paths_become_filename_only_attachment_labels():
+    preview = _load_preview()
+    raw = "The report is ready.\nMEDIA:/Users/agent/private/reports/Q3 report.pdf"
+
+    body = preview.notification_body(raw, fallback="fallback")
+
+    assert body == "The report is ready. Attachment: Q3 report.pdf"
+    assert "/Users/agent" not in body
+
+
+def test_quoted_bulleted_media_path_becomes_attachment_label():
+    preview = _load_preview()
+    raw = '- MEDIA:"C:\\Users\\agent\\private\\forecast.xlsx"'
+
+    assert preview.notification_body(raw, fallback="fallback") == "Attachment: forecast.xlsx"
+
+
 def test_unsummarized_json_falls_back():
     preview = _load_preview()
 

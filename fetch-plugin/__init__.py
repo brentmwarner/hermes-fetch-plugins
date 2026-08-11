@@ -88,10 +88,21 @@ def _is_kanban_worker() -> bool:
 FETCH_APP_SOURCES: frozenset[str] = frozenset({"fetch", "fetch-ios", "ios", "mobile", "inbox"})
 FETCH_CHANNELS: frozenset[str] = FETCH_APP_SOURCES | {""}
 
+_FETCH_ATTACHMENT_HINT = (
+    "Fetch can receive files from this host. When a requested file is complete, "
+    "attach it by putting `MEDIA:/absolute/path/to/file.ext` on its own line, "
+    "outside code fences and separate from the human description. The path must "
+    "name an existing regular, non-sensitive file no larger than 25 MB. Fetch "
+    "renders supported images and videos inline and every other file as a "
+    "previewable, downloadable attachment. Do not use a `file://` link or paste "
+    "binary content into the reply. "
+)
+
 _FETCH_IOS_TURN_CONTEXT = """[Fetch iOS client context - do not quote or mention this block.
 Client: Fetch iOS app.
 Output surface: native mobile chat, not a terminal, shell, TUI, browser, or file artifact.
 Fetch supports standard Markdown plus fenced `card` JSON blocks rendered as native UI.
+""" + _FETCH_ATTACHMENT_HINT + """
 For charts, graphs, reports, dashboards, token usage, rankings, trends, metrics, tables, or other structured visual summaries, emit a fenced ```card JSON payload using Fetch native generative UI.
 Do not use ASCII/text bar charts, Unicode block charts, SVG links, inline SVG, HTML artifacts, Mermaid diagrams, image links, or external chart files unless the user explicitly asks for those formats.
 For token/usage reports, prefer a card with `stats` plus `chart` or `blocks` containing a native chart.
@@ -655,7 +666,9 @@ def register(ctx) -> None:
                 platform_hint=(
                     "You are chatting in the Fetch iOS app. Fetch renders "
                     "standard Markdown (bold, italic, headings, lists, code "
-                    "blocks, tables) and additionally supports generative-UI "
+                    "blocks, tables). "
+                    + _FETCH_ATTACHMENT_HINT
+                    + "Fetch additionally supports generative-UI "
                     "cards: emit a fenced code block whose language is `card` "
                     "containing a JSON object, and the app renders a native "
                     "tappable card instead of a code block. Use a card when "

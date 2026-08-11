@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 log = logging.getLogger("fetch_plugin.api")
@@ -94,6 +95,7 @@ def _load_inbox():
 
 
 router = APIRouter()
+_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 
 
 class RegisterBody(BaseModel):
@@ -114,6 +116,38 @@ class UnregisterBody(BaseModel):
 class BadgeBody(BaseModel):
     token: str = Field(min_length=1, max_length=512)
     count: int = Field(ge=0)
+
+
+def _safe_attachment_path(raw_path: str) -> Path | None:
+    try:
+        from gateway.platforms.base import validate_media_delivery_path
+    except Exception:
+        log.exception("Fetch attachment validator is unavailable")
+        return None
+    safe_path = validate_media_delivery_path(raw_path)
+    return Path(safe_path) if safe_path else None
+
+
+@router.get("/attachments/download")
+def download_attachment(path: str = Query(min_length=1, max_length=4096)):
+    """Serve one Hermes-approved MEDIA file to the authenticated Fetch app."""
+    target = _safe_attachment_path(path)
+    if target is None:
+        raise HTTPException(status_code=403, detail="Attachment path is not allowed")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    try:
+        size = target.stat().st_size
+    except OSError:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    if size > _MAX_ATTACHMENT_BYTES:
+        raise HTTPException(status_code=413, detail="Attachment exceeds the 25 MB limit")
+    return FileResponse(
+        path=str(target),
+        filename=target.name,
+        media_type="application/octet-stream",
+        content_disposition_type="attachment",
+    )
 
 
 def _active_model_config() -> dict:
