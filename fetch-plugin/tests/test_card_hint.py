@@ -54,6 +54,14 @@ def test_hint_identifies_fetch_surface(registered_platform):
     assert "Fetch iOS" in hint, "must tell the agent it's on the Fetch iOS app"
 
 
+def test_hint_documents_host_file_delivery(registered_platform):
+    hint = registered_platform["platform_hint"]
+    assert "MEDIA:/absolute/path" in hint
+    assert "own line" in hint
+    assert "100 MB" in hint
+    assert "previewable, downloadable attachment" in hint
+
+
 def test_hint_documents_card_fence_syntax(registered_platform):
     hint = registered_platform["platform_hint"]
     assert "```card" in hint, "must show the ```card fence language"

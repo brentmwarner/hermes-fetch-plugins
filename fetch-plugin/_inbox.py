@@ -133,6 +133,50 @@ class FetchInboxAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=str(exc))
         return SendResult(success=True, message_id=str(delivery.message_id))
 
+    async def _send_attachment(self, chat_id, path, caption=None, reply_to=None, metadata=None):
+        try:
+            content = _content_with_media(caption, [(path, False)])
+        except ValueError as exc:
+            return SendResult(success=False, error=str(exc))
+        return await self.send(
+            chat_id=chat_id,
+            content=content,
+            reply_to=reply_to,
+            metadata=metadata,
+        )
+
+    async def send_document(
+        self, chat_id, file_path, caption=None, file_name=None,
+        reply_to=None, metadata=None, **kwargs,
+    ):
+        return await self._send_attachment(
+            chat_id, file_path, caption=caption, reply_to=reply_to, metadata=metadata,
+        )
+
+    async def send_image_file(
+        self, chat_id, image_path, caption=None,
+        reply_to=None, metadata=None, **kwargs,
+    ):
+        return await self._send_attachment(
+            chat_id, image_path, caption=caption, reply_to=reply_to, metadata=metadata,
+        )
+
+    async def send_video(
+        self, chat_id, video_path, caption=None,
+        reply_to=None, metadata=None, **kwargs,
+    ):
+        return await self._send_attachment(
+            chat_id, video_path, caption=caption, reply_to=reply_to, metadata=metadata,
+        )
+
+    async def send_voice(
+        self, chat_id, audio_path, caption=None,
+        reply_to=None, metadata=None, **kwargs,
+    ):
+        return await self._send_attachment(
+            chat_id, audio_path, caption=caption, reply_to=reply_to, metadata=metadata,
+        )
+
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         channel = _channel_from_chat_id(chat_id)
         name = DEFAULT_TITLE if _is_home_channel(channel) else _label_for_channel(channel)
@@ -204,15 +248,19 @@ async def standalone_send(
     force_document=False,
 ) -> dict:
     channel = _channel_from_chat_id(chat_id)
+    try:
+        content = _content_with_media(message, media_files)
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}
     # Pre-resolve the delivery channel so chunked cron responses stay in the
     # same thread even when later chunks lack the "Cronjob Response..." header.
     resolved_channel = _delivery_channel(
         channel=channel,
-        content=str(message or ""),
+        content=content,
         thread_id=thread_id,
     )
     if not thread_id and _is_home_channel(channel):
-        if _cron_channel_from_content(str(message or "")):
+        if _cron_channel_from_content(content):
             # First chunk of a cron response: cache the resolved channel so
             # subsequent chunks (which lack the header) route to the same thread.
             _cron_channel_cache[channel] = (resolved_channel, _now())
@@ -229,16 +277,74 @@ async def standalone_send(
                     _cron_channel_cache.pop(channel, None)
     title = _default_title_for_delivery(
         channel=channel,
-        content=str(message or ""),
+        content=content,
         thread_id=thread_id,
     )
     delivery = deliver_to_inbox(
         channel=resolved_channel,
-        content=str(message or ""),
+        content=content,
         title=title,
         thread_id=thread_id,
     )
     return {"success": True, "message_id": str(delivery.message_id), "session_id": delivery.session_id}
+
+
+_MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024
+
+
+def _validated_media_path(path: str) -> str | None:
+    """Use Hermes' public validator, and fail closed on older runtimes."""
+    try:
+        from gateway.platforms.base import validate_media_delivery_path
+    except ImportError:
+        return None
+    try:
+        return validate_media_delivery_path(path)
+    except Exception:
+        logger.exception("Fetch media path validation failed")
+        return None
+
+
+def _content_with_media(message, media_files) -> str:
+    """Reattach validated media paths stripped by Hermes dispatch.
+
+    Fetch persists messages rather than uploading to a third-party platform, so
+    its native attachment representation is the same public ``MEDIA:`` marker
+    the iOS transcript understands. The upstream send/cron paths have already
+    validated these paths; revalidate when that API is available so direct
+    callers cannot use this helper to expose a denied host file.
+    """
+    parts = []
+    body = str(message or "").strip()
+    if body:
+        parts.append(body)
+
+    seen = set()
+    rejected_media = False
+    for item in media_files or []:
+        raw_path = item[0] if isinstance(item, (tuple, list)) else item
+        path = str(raw_path or "").strip()
+        if not path or "\n" in path or "\r" in path:
+            rejected_media = True
+            continue
+        safe_path = _validated_media_path(path)
+        if not safe_path:
+            rejected_media = True
+            continue
+        if safe_path in seen:
+            continue
+        try:
+            size = Path(safe_path).stat().st_size
+        except OSError:
+            rejected_media = True
+            continue
+        if size > _MAX_ATTACHMENT_BYTES:
+            raise ValueError("Fetch attachments must be 100 MB or smaller")
+        seen.add(safe_path)
+        parts.append(f"MEDIA:{safe_path}")
+    if rejected_media:
+        raise ValueError("Fetch could not deliver one or more attachments")
+    return "\n".join(parts)
 
 
 def deliver_to_inbox(

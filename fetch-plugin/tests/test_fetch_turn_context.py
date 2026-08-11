@@ -63,6 +63,9 @@ def test_pre_llm_call_injects_native_context_for_fetch_sources(plugin, monkeypat
     assert "```card" in context
     assert "ASCII/text bar charts" in context
     assert "SVG links" in context
+    assert "MEDIA:/absolute/path" in context
+    assert "100 MB" in context
+    assert "downloadable attachment" in context
 
 
 @pytest.mark.parametrize("source", ["", "tui", "cli", "telegram", "discord", "cron", None])

@@ -168,6 +168,25 @@ as its own DM target — `fetch:researcher` → "Researcher".
 - On a fresh install with no other platform configured, Fetch is the agent's
   default place to reach you — no Telegram bot or other API setup required.
 
+### File attachments
+
+Fetch turns can include any safe, regular host file up to 100 MB. The agent uses
+Hermes' standard attachment contract by placing the completed file on its own
+line in the response:
+
+```text
+Your report is ready.
+MEDIA:/absolute/path/to/report.pdf
+```
+
+The iOS app renders supported images and videos inline. PDFs, office documents,
+text/data files, archives, and unknown or extensionless files render as a file
+chip that opens Quick Look and offers the system Save/Share sheet. The first
+open needs the paired agent online and the source file still present; after a
+successful download, the app can reopen its cached copy offline. Fetch setup
+injects this contract automatically, and proactive/cron delivery preserves
+Hermes media paths instead of dropping them.
+
 The seed is idempotent and non-destructive: it adds a channel only when absent
 and never overwrites a name you've changed or other platforms' aliases.
 

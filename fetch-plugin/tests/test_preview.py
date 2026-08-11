@@ -53,6 +53,50 @@ def test_plain_text_strips_markdown_but_preserves_message():
     assert preview.notification_body("## Done\n- **Report** is `ready`", fallback="fallback") == "Done Report is ready"
 
 
+def test_media_paths_become_filename_only_attachment_labels():
+    preview = _load_preview()
+    raw = "The report is ready.\nMEDIA:/Users/agent/private/reports/Q3 report.pdf"
+
+    body = preview.notification_body(raw, fallback="fallback")
+
+    assert body == "The report is ready. Attachment: Q3 report.pdf"
+    assert "/Users/agent" not in body
+
+
+def test_quoted_bulleted_media_path_becomes_attachment_label():
+    preview = _load_preview()
+    raw = '- MEDIA:"C:\\Users\\agent\\private\\forecast.xlsx"'
+
+    assert preview.notification_body(raw, fallback="fallback") == "Attachment: forecast.xlsx"
+
+
+def test_markdown_prefixed_media_paths_never_reach_notification_body():
+    preview = _load_preview()
+    raw = """
+    > MEDIA:/Users/agent/private/quoted.pdf
+    - > ## **MEDIA:/Users/agent/private/heading.pdf**
+    """
+
+    body = preview.notification_body(raw, fallback="fallback")
+
+    assert body == "Attachment: quoted.pdf Attachment: heading.pdf"
+    assert "/Users/agent" not in body
+
+
+def test_plain_media_prose_is_not_misclassified_as_an_attachment():
+    preview = _load_preview()
+
+    assert preview.notification_body("Media: print and television", fallback="fallback") == (
+        "Media: print and television"
+    )
+
+
+def test_empty_media_marker_does_not_leak_transport_syntax():
+    preview = _load_preview()
+
+    assert preview.notification_body("MEDIA:   ", fallback="fallback") == "Attachment"
+
+
 def test_unsummarized_json_falls_back():
     preview = _load_preview()
 

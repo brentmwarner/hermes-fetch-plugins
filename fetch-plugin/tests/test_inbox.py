@@ -12,6 +12,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
 ALIASES = "channel_aliases.json"
 
@@ -123,6 +125,136 @@ def test_standalone_send_delivers_to_fetch_inbox(monkeypatch):
 
     assert calls == [{"channel": "default", "content": "hello", "title": "Fetch", "thread_id": None}]
     assert result == {"success": True, "message_id": "7", "session_id": "inbox_default"}
+
+
+def test_standalone_send_preserves_media_as_fetch_attachment(tmp_path, monkeypatch):
+    inbox = _load_inbox()
+    report = tmp_path / "Quarterly Report.pdf"
+    report.write_bytes(b"%PDF-1.7")
+    calls = []
+    monkeypatch.setattr(inbox, "_validated_media_path", lambda path: path)
+    monkeypatch.setattr(
+        inbox,
+        "deliver_to_inbox",
+        lambda **kw: calls.append(kw) or inbox.InboxDelivery(session_id="inbox_default", message_id=8),
+    )
+
+    result = asyncio.run(inbox.standalone_send(
+        None,
+        "default",
+        "The report is ready.",
+        media_files=[(str(report), False)],
+    ))
+
+    assert calls[0]["content"] == f"The report is ready.\nMEDIA:{report}"
+    assert result["success"] is True
+
+
+def test_standalone_send_accepts_media_only_delivery(tmp_path, monkeypatch):
+    inbox = _load_inbox()
+    archive = tmp_path / "results.zip"
+    archive.write_bytes(b"PK")
+    calls = []
+    monkeypatch.setattr(inbox, "_validated_media_path", lambda path: path)
+    monkeypatch.setattr(
+        inbox,
+        "deliver_to_inbox",
+        lambda **kw: calls.append(kw) or inbox.InboxDelivery(session_id="inbox_default", message_id=10),
+    )
+
+    result = asyncio.run(inbox.standalone_send(
+        None,
+        "default",
+        "",
+        media_files=[(str(archive), False)],
+    ))
+
+    assert calls[0]["content"] == f"MEDIA:{archive}"
+    assert result["message_id"] == "10"
+
+
+def test_standalone_send_reports_oversized_attachment(tmp_path, monkeypatch):
+    inbox = _load_inbox()
+    assert inbox._MAX_ATTACHMENT_BYTES == 100 * 1024 * 1024
+    archive = tmp_path / "oversized.zip"
+    with archive.open("wb") as handle:
+        handle.truncate(inbox._MAX_ATTACHMENT_BYTES + 1)
+    monkeypatch.setattr(inbox, "_validated_media_path", lambda path: path)
+
+    result = asyncio.run(inbox.standalone_send(
+        None,
+        "default",
+        "Ready.",
+        media_files=[(str(archive), False)],
+    ))
+
+    assert result == {
+        "success": False,
+        "error": "Fetch attachments must be 100 MB or smaller",
+    }
+
+
+def test_media_delivery_fails_closed_without_hermes_validator(tmp_path):
+    inbox = _load_inbox()
+    report = tmp_path / "report.pdf"
+    report.write_bytes(b"%PDF")
+
+    with pytest.raises(ValueError, match="could not deliver"):
+        inbox._content_with_media("Ready.", [(str(report), False)])
+
+
+def test_live_adapter_rejects_undeliverable_document_without_sending(tmp_path, monkeypatch):
+    inbox = _load_inbox()
+    report = tmp_path / "report.pdf"
+    report.write_bytes(b"%PDF")
+    monkeypatch.setattr(inbox, "_validated_media_path", lambda path: None)
+    monkeypatch.setattr(inbox, "SendResult", lambda **kwargs: kwargs)
+    adapter = object.__new__(inbox.FetchInboxAdapter)
+    calls = []
+
+    async def capture_send(**kwargs):
+        calls.append(kwargs)
+
+    adapter.send = capture_send
+    result = asyncio.run(adapter.send_document(
+        chat_id="default",
+        file_path=str(report),
+    ))
+
+    assert result == {
+        "success": False,
+        "error": "Fetch could not deliver one or more attachments",
+    }
+    assert calls == []
+
+
+def test_live_adapter_document_send_persists_media_marker(tmp_path, monkeypatch):
+    inbox = _load_inbox()
+    report = tmp_path / "report.pdf"
+    report.write_bytes(b"%PDF")
+    monkeypatch.setattr(inbox, "_validated_media_path", lambda path: path)
+    adapter = object.__new__(inbox.FetchInboxAdapter)
+    calls = []
+
+    async def capture_send(**kwargs):
+        calls.append(kwargs)
+        return {"success": True}
+
+    adapter.send = capture_send
+    result = asyncio.run(adapter.send_document(
+        chat_id="default",
+        file_path=str(report),
+        caption="Ready.",
+        metadata={"job_id": "weekly"},
+    ))
+
+    assert result == {"success": True}
+    assert calls == [{
+        "chat_id": "default",
+        "content": f"Ready.\nMEDIA:{report}",
+        "reply_to": None,
+        "metadata": {"job_id": "weekly"},
+    }]
 
 
 def test_standalone_send_routes_named_channel(monkeypatch):

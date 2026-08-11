@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 log = logging.getLogger("fetch_plugin.api")
@@ -94,6 +95,8 @@ def _load_inbox():
 
 
 router = APIRouter()
+_MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024
+_ATTACHMENT_ENDPOINT_HEADER = {"X-Fetch-Attachment-Endpoint": "1"}
 
 
 class RegisterBody(BaseModel):
@@ -114,6 +117,59 @@ class UnregisterBody(BaseModel):
 class BadgeBody(BaseModel):
     token: str = Field(min_length=1, max_length=512)
     count: int = Field(ge=0)
+
+
+def _safe_attachment_path(raw_path: str) -> Path | None:
+    try:
+        from gateway.platforms.base import validate_media_delivery_path
+    except ImportError:
+        log.warning("Fetch attachment validator is unavailable")
+        return None
+    try:
+        safe_path = validate_media_delivery_path(raw_path)
+    except Exception:
+        log.exception("Fetch attachment validation failed")
+        return None
+    return Path(safe_path) if safe_path else None
+
+
+@router.get("/attachments/download")
+def download_attachment(path: str = Query(min_length=1, max_length=4096)):
+    """Serve one Hermes-approved MEDIA file to the authenticated Fetch app."""
+    target = _safe_attachment_path(path)
+    if target is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Attachment path is not allowed",
+            headers=_ATTACHMENT_ENDPOINT_HEADER,
+        )
+    if not target.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="Attachment not found",
+            headers=_ATTACHMENT_ENDPOINT_HEADER,
+        )
+    try:
+        size = target.stat().st_size
+    except OSError:
+        raise HTTPException(
+            status_code=404,
+            detail="Attachment not found",
+            headers=_ATTACHMENT_ENDPOINT_HEADER,
+        )
+    if size > _MAX_ATTACHMENT_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="Attachment exceeds the 100 MB limit",
+            headers=_ATTACHMENT_ENDPOINT_HEADER,
+        )
+    return FileResponse(
+        path=str(target),
+        filename=target.name,
+        media_type="application/octet-stream",
+        content_disposition_type="attachment",
+        headers=_ATTACHMENT_ENDPOINT_HEADER,
+    )
 
 
 def _active_model_config() -> dict:

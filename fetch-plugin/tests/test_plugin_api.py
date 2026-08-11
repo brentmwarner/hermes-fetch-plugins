@@ -88,6 +88,78 @@ def test_badge_is_best_effort_when_relay_fails():
     assert res.json() == {"ok": True}
 
 
+def test_attachment_download_supports_byte_ranges(monkeypatch, tmp_path):
+    report = tmp_path / "report.pdf"
+    report.write_bytes(b"0123456789")
+    monkeypatch.setattr(api, "_safe_attachment_path", lambda path: report)
+
+    res = _client(_FakeClient()).get(
+        "/attachments/download",
+        params={"path": "/outside/managed/root/report.pdf"},
+        headers={"Range": "bytes=2-5"},
+    )
+
+    assert res.status_code == 206
+    assert res.content == b"2345"
+    assert res.headers["content-type"] == "application/octet-stream"
+    assert res.headers["content-range"] == "bytes 2-5/10"
+    assert res.headers["x-fetch-attachment-endpoint"] == "1"
+
+
+def test_attachment_download_rejects_unsafe_path(monkeypatch):
+    monkeypatch.setattr(api, "_safe_attachment_path", lambda path: None)
+
+    res = _client(_FakeClient()).get(
+        "/attachments/download",
+        params={"path": "/etc/passwd"},
+    )
+
+    assert res.status_code == 403
+    assert res.headers["x-fetch-attachment-endpoint"] == "1"
+
+
+def test_missing_attachment_identifies_available_download_endpoint(monkeypatch, tmp_path):
+    missing = tmp_path / "missing.pdf"
+    monkeypatch.setattr(api, "_safe_attachment_path", lambda path: missing)
+
+    res = _client(_FakeClient()).get(
+        "/attachments/download",
+        params={"path": str(missing)},
+    )
+
+    assert res.status_code == 404
+    assert res.headers["x-fetch-attachment-endpoint"] == "1"
+
+
+def test_attachment_download_enforces_100_mb_limit(monkeypatch, tmp_path):
+    assert api._MAX_ATTACHMENT_BYTES == 100 * 1024 * 1024
+    attachment = tmp_path / "large.bin"
+    with attachment.open("wb") as handle:
+        handle.truncate(api._MAX_ATTACHMENT_BYTES)
+    monkeypatch.setattr(api, "_safe_attachment_path", lambda path: attachment)
+    client = _client(_FakeClient())
+
+    accepted = client.get(
+        "/attachments/download",
+        params={"path": str(attachment)},
+        headers={"Range": "bytes=0-0"},
+    )
+
+    assert accepted.status_code == 206
+    assert accepted.content == b"\0"
+
+    with attachment.open("r+b") as handle:
+        handle.truncate(api._MAX_ATTACHMENT_BYTES + 1)
+    rejected = client.get(
+        "/attachments/download",
+        params={"path": str(attachment)},
+    )
+
+    assert rejected.status_code == 413
+    assert rejected.json() == {"detail": "Attachment exceeds the 100 MB limit"}
+    assert rejected.headers["x-fetch-attachment-endpoint"] == "1"
+
+
 def test_diagnostics_reports_tunnel_owner_and_provider(monkeypatch, tmp_path):
     runtime = api._load_sibling("fetch_plugin_runtime_diag_test", "_runtime.py")
     tunnel = api._load_sibling("fetch_plugin_tunnel_diag_test", "_tunnel.py")
