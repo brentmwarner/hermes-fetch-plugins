@@ -12,6 +12,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
 ALIASES = "channel_aliases.json"
 
@@ -196,7 +198,33 @@ def test_media_delivery_fails_closed_without_hermes_validator(tmp_path):
     report = tmp_path / "report.pdf"
     report.write_bytes(b"%PDF")
 
-    assert inbox._content_with_media("Ready.", [(str(report), False)]) == "Ready."
+    with pytest.raises(ValueError, match="could not deliver"):
+        inbox._content_with_media("Ready.", [(str(report), False)])
+
+
+def test_live_adapter_rejects_undeliverable_document_without_sending(tmp_path, monkeypatch):
+    inbox = _load_inbox()
+    report = tmp_path / "report.pdf"
+    report.write_bytes(b"%PDF")
+    monkeypatch.setattr(inbox, "_validated_media_path", lambda path: None)
+    monkeypatch.setattr(inbox, "SendResult", lambda **kwargs: kwargs)
+    adapter = object.__new__(inbox.FetchInboxAdapter)
+    calls = []
+
+    async def capture_send(**kwargs):
+        calls.append(kwargs)
+
+    adapter.send = capture_send
+    result = asyncio.run(adapter.send_document(
+        chat_id="default",
+        file_path=str(report),
+    ))
+
+    assert result == {
+        "success": False,
+        "error": "Fetch could not deliver one or more attachments",
+    }
+    assert calls == []
 
 
 def test_live_adapter_document_send_persists_media_marker(tmp_path, monkeypatch):

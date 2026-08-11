@@ -122,10 +122,14 @@ class BadgeBody(BaseModel):
 def _safe_attachment_path(raw_path: str) -> Path | None:
     try:
         from gateway.platforms.base import validate_media_delivery_path
-    except Exception:
-        log.exception("Fetch attachment validator is unavailable")
+    except ImportError:
+        log.warning("Fetch attachment validator is unavailable")
         return None
-    safe_path = validate_media_delivery_path(raw_path)
+    try:
+        safe_path = validate_media_delivery_path(raw_path)
+    except Exception:
+        log.exception("Fetch attachment validation failed")
+        return None
     return Path(safe_path) if safe_path else None
 
 

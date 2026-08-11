@@ -294,8 +294,15 @@ _MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 
 def _validated_media_path(path: str) -> str | None:
     """Use Hermes' public validator, and fail closed on older runtimes."""
-    validator = getattr(BasePlatformAdapter, "validate_media_delivery_path", None)
-    return validator(path) if callable(validator) else None
+    try:
+        from gateway.platforms.base import validate_media_delivery_path
+    except ImportError:
+        return None
+    try:
+        return validate_media_delivery_path(path)
+    except Exception:
+        logger.exception("Fetch media path validation failed")
+        return None
 
 
 def _content_with_media(message, media_files) -> str:
@@ -313,22 +320,30 @@ def _content_with_media(message, media_files) -> str:
         parts.append(body)
 
     seen = set()
+    rejected_media = False
     for item in media_files or []:
         raw_path = item[0] if isinstance(item, (tuple, list)) else item
         path = str(raw_path or "").strip()
         if not path or "\n" in path or "\r" in path:
+            rejected_media = True
             continue
         safe_path = _validated_media_path(path)
-        if not safe_path or safe_path in seen:
+        if not safe_path:
+            rejected_media = True
+            continue
+        if safe_path in seen:
             continue
         try:
             size = Path(safe_path).stat().st_size
         except OSError:
+            rejected_media = True
             continue
         if size > _MAX_ATTACHMENT_BYTES:
             raise ValueError("Fetch attachments must be 25 MB or smaller")
         seen.add(safe_path)
         parts.append(f"MEDIA:{safe_path}")
+    if rejected_media:
+        raise ValueError("Fetch could not deliver one or more attachments")
     return "\n".join(parts)
 
 

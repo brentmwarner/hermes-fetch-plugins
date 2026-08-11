@@ -15,7 +15,7 @@ INPUT_CAP = 600
 CARD_INPUT_CAP = 6_000
 CARD_LANGUAGES = frozenset({"card", "cards", "hermes-card", "ui"})
 MEDIA_LINE_PATTERN = re.compile(
-    r"^(?:[-*+]\s+|\d+[.)]\s+)?MEDIA:\s*(.+?)\s*$",
+    r"^(?:[-*+]\s+|\d+[.)]\s+)?MEDIA:\s*(.*?)\s*$",
     flags=re.IGNORECASE,
 )
 
@@ -363,10 +363,18 @@ def _attachment_label(text: str) -> str | None:
         return None
 
     raw_path = match.group(1).strip()
+    if not raw_path:
+        return "Attachment"
     if len(raw_path) >= 2 and raw_path[0] == raw_path[-1] and raw_path[0] in "'\"`":
         raw_path = raw_path[1:-1].strip()
+    if not _is_absolute_media_path(raw_path):
+        return None
     filename = raw_path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
     return f"Attachment: {filename}" if filename else "Attachment"
+
+
+def _is_absolute_media_path(path: str) -> bool:
+    return path.startswith(("/", "~/")) or bool(re.match(r"^[A-Za-z]:[\\/]", path))
 
 
 def _is_machine_preamble(text: str) -> bool:
