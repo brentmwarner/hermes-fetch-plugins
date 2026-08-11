@@ -96,6 +96,7 @@ def _load_inbox():
 
 router = APIRouter()
 _MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+_ATTACHMENT_ENDPOINT_HEADER = {"X-Fetch-Attachment-Endpoint": "1"}
 
 
 class RegisterBody(BaseModel):
@@ -133,20 +134,37 @@ def download_attachment(path: str = Query(min_length=1, max_length=4096)):
     """Serve one Hermes-approved MEDIA file to the authenticated Fetch app."""
     target = _safe_attachment_path(path)
     if target is None:
-        raise HTTPException(status_code=403, detail="Attachment path is not allowed")
+        raise HTTPException(
+            status_code=403,
+            detail="Attachment path is not allowed",
+            headers=_ATTACHMENT_ENDPOINT_HEADER,
+        )
     if not target.is_file():
-        raise HTTPException(status_code=404, detail="Attachment not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Attachment not found",
+            headers=_ATTACHMENT_ENDPOINT_HEADER,
+        )
     try:
         size = target.stat().st_size
     except OSError:
-        raise HTTPException(status_code=404, detail="Attachment not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Attachment not found",
+            headers=_ATTACHMENT_ENDPOINT_HEADER,
+        )
     if size > _MAX_ATTACHMENT_BYTES:
-        raise HTTPException(status_code=413, detail="Attachment exceeds the 25 MB limit")
+        raise HTTPException(
+            status_code=413,
+            detail="Attachment exceeds the 25 MB limit",
+            headers=_ATTACHMENT_ENDPOINT_HEADER,
+        )
     return FileResponse(
         path=str(target),
         filename=target.name,
         media_type="application/octet-stream",
         content_disposition_type="attachment",
+        headers=_ATTACHMENT_ENDPOINT_HEADER,
     )
 
 

@@ -171,6 +171,26 @@ def test_standalone_send_accepts_media_only_delivery(tmp_path, monkeypatch):
     assert result["message_id"] == "10"
 
 
+def test_standalone_send_reports_oversized_attachment(tmp_path, monkeypatch):
+    inbox = _load_inbox()
+    archive = tmp_path / "oversized.zip"
+    with archive.open("wb") as handle:
+        handle.truncate(inbox._MAX_ATTACHMENT_BYTES + 1)
+    monkeypatch.setattr(inbox, "_validated_media_path", lambda path: path)
+
+    result = asyncio.run(inbox.standalone_send(
+        None,
+        "default",
+        "Ready.",
+        media_files=[(str(archive), False)],
+    ))
+
+    assert result == {
+        "success": False,
+        "error": "Fetch attachments must be 25 MB or smaller",
+    }
+
+
 def test_media_delivery_fails_closed_without_hermes_validator(tmp_path):
     inbox = _load_inbox()
     report = tmp_path / "report.pdf"

@@ -103,6 +103,7 @@ def test_attachment_download_supports_byte_ranges(monkeypatch, tmp_path):
     assert res.content == b"2345"
     assert res.headers["content-type"] == "application/octet-stream"
     assert res.headers["content-range"] == "bytes 2-5/10"
+    assert res.headers["x-fetch-attachment-endpoint"] == "1"
 
 
 def test_attachment_download_rejects_unsafe_path(monkeypatch):
@@ -114,6 +115,20 @@ def test_attachment_download_rejects_unsafe_path(monkeypatch):
     )
 
     assert res.status_code == 403
+    assert res.headers["x-fetch-attachment-endpoint"] == "1"
+
+
+def test_missing_attachment_identifies_available_download_endpoint(monkeypatch, tmp_path):
+    missing = tmp_path / "missing.pdf"
+    monkeypatch.setattr(api, "_safe_attachment_path", lambda path: missing)
+
+    res = _client(_FakeClient()).get(
+        "/attachments/download",
+        params={"path": str(missing)},
+    )
+
+    assert res.status_code == 404
+    assert res.headers["x-fetch-attachment-endpoint"] == "1"
 
 
 def test_diagnostics_reports_tunnel_owner_and_provider(monkeypatch, tmp_path):

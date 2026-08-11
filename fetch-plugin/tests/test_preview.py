@@ -70,6 +70,19 @@ def test_quoted_bulleted_media_path_becomes_attachment_label():
     assert preview.notification_body(raw, fallback="fallback") == "Attachment: forecast.xlsx"
 
 
+def test_markdown_prefixed_media_paths_never_reach_notification_body():
+    preview = _load_preview()
+    raw = """
+    > MEDIA:/Users/agent/private/quoted.pdf
+    - > ## **MEDIA:/Users/agent/private/heading.pdf**
+    """
+
+    body = preview.notification_body(raw, fallback="fallback")
+
+    assert body == "Attachment: quoted.pdf Attachment: heading.pdf"
+    assert "/Users/agent" not in body
+
+
 def test_unsummarized_json_falls_back():
     preview = _load_preview()
 

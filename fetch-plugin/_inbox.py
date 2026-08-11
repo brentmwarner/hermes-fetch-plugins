@@ -248,7 +248,10 @@ async def standalone_send(
     force_document=False,
 ) -> dict:
     channel = _channel_from_chat_id(chat_id)
-    content = _content_with_media(message, media_files)
+    try:
+        content = _content_with_media(message, media_files)
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}
     # Pre-resolve the delivery channel so chunked cron responses stay in the
     # same thread even when later chunks lack the "Cronjob Response..." header.
     resolved_channel = _delivery_channel(

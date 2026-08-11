@@ -344,7 +344,21 @@ def _clean_line(line: str) -> str | None:
 
 
 def _attachment_label(text: str) -> str | None:
-    match = MEDIA_LINE_PATTERN.fullmatch(text)
+    # Notification safety is broader than transcript extraction: even a
+    # quoted or heading-formatted example must never put an absolute host path
+    # on the lock screen. Normalize common Markdown prefixes and wrappers
+    # before recognizing the line-owned transport marker.
+    candidate = text.strip()
+    while True:
+        previous = candidate
+        candidate = re.sub(r"^#{1,6}\s+", "", candidate)
+        candidate = re.sub(r"^(>\s?)+", "", candidate)
+        candidate = re.sub(r"^([-*+]|\d+[.)])\s+", "", candidate)
+        candidate = candidate.strip()
+        if candidate == previous:
+            break
+    candidate = _strip_inline(candidate).strip()
+    match = MEDIA_LINE_PATTERN.fullmatch(candidate)
     if match is None:
         return None
 
