@@ -60,28 +60,40 @@ COMPUTER_ENV_KEYS = (
 )
 PERSISTED_COMPUTER_ENV_KEYS = COMPUTER_ENV_KEYS + VIRTUAL_DESKTOP_ENV_KEYS
 _GATEWAY_RESTART_STATE_FILE = "fetch-computer-gateway-restart.json"
+_PROCESS_START_ENVIRONMENT = os.environ.copy()
+_VIRTUAL_DESKTOP_RECONCILIATION_REQUIRED = False
 
 
 class SetupError(RuntimeError):
     pass
 
 
+def _virtual_desktop_reconciliation_required(environment_path: Path) -> bool:
+    """Remember whether Fetch's virtual desktop overrode this process's env."""
+
+    global _VIRTUAL_DESKTOP_RECONCILIATION_REQUIRED
+    if _persisted_environment_value(environment_path, KIND_ENV) == "Virtual Linux desktop":
+        _VIRTUAL_DESKTOP_RECONCILIATION_REQUIRED = True
+    return _VIRTUAL_DESKTOP_RECONCILIATION_REQUIRED
+
+
 def _runtime_environment(
-    kind: str | None = None, *, stale_virtual_desktop: bool = False
+    kind: str | None = None, *, restore_physical_session: bool = False
 ) -> dict[str, str]:
     """Build the environment for a restarted Fetch runtime.
 
-    ``hermes setup`` may have loaded an earlier virtual-desktop configuration
-    into this process before a user switches back to their physical desktop.
-    That configuration is removed only when the persisted desktop kind proves
-    it came from Fetch's virtual desktop, so normal X11 session values remain
-    available to physical-desktop runtimes.
+    For a virtual-to-physical transition, restore only the matching keys from
+    the host session captured before Fetch's dotenv values were loaded. This
+    keeps the parent untouched and preserves real X11 variables such as
+    ``XDG_SESSION_TYPE=x11``.
     """
 
     environment = os.environ.copy()
-    if stale_virtual_desktop:
-        for key, virtual_value in VIRTUAL_DESKTOP_ENV_VALUES.items():
-            if environment.get(key) == virtual_value:
+    if restore_physical_session:
+        for key in VIRTUAL_DESKTOP_ENV_KEYS:
+            if key in _PROCESS_START_ENVIRONMENT:
+                environment[key] = _PROCESS_START_ENVIRONMENT[key]
+            else:
                 environment.pop(key, None)
     if kind == "Virtual Linux desktop":
         environment.update(VIRTUAL_DESKTOP_ENV_VALUES)
@@ -255,9 +267,7 @@ def disable_computer() -> None:
     if not computer_runtime.restart_computer_runtime():
         raise SetupError("Could not stop the Fetch computer bridge.")
     environment_path = hermes_home() / ".env"
-    stale_virtual_desktop = (
-        _persisted_environment_value(environment_path, KIND_ENV) == "Virtual Linux desktop"
-    )
+    restore_physical_session = _virtual_desktop_reconciliation_required(environment_path)
     remove_environment_keys(environment_path, PERSISTED_COMPUTER_ENV_KEYS)
     for key in COMPUTER_ENV_KEYS:
         os.environ.pop(key, None)
@@ -275,7 +285,7 @@ def disable_computer() -> None:
     else:
         _clear_gateway_restart_state()
         relay_runtime_status = relay_runtime.ensure_relay_runtime(
-            environment=_runtime_environment(stale_virtual_desktop=stale_virtual_desktop)
+            environment=_runtime_environment(restore_physical_session=restore_physical_session)
         )
         if relay_runtime_status not in {"started", "already-running", "self", "disabled"}:
             raise SetupError(
@@ -415,10 +425,9 @@ def configure(
     credentials = _credentials()
     if not check_only:
         environment_path = hermes_home() / ".env"
-        stale_virtual_desktop = (
+        restore_physical_session = (
             kind != "Virtual Linux desktop"
-            and _persisted_environment_value(environment_path, KIND_ENV)
-            == "Virtual Linux desktop"
+            and _virtual_desktop_reconciliation_required(environment_path)
         )
         values = {
             TARGET_ENV: target,
@@ -450,7 +459,7 @@ def configure(
         if not computer_runtime.restart_computer_runtime():
             raise SetupError("Could not restart the Fetch computer bridge.")
         runtime_environment = _runtime_environment(
-            kind, stale_virtual_desktop=stale_virtual_desktop
+            kind, restore_physical_session=restore_physical_session
         )
         runtime_status = computer_runtime.ensure_computer_runtime(
             environment=runtime_environment
