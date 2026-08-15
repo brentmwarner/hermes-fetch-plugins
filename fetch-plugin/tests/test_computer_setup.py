@@ -111,7 +111,7 @@ def test_disable_computer_stops_bridge_and_clears_persisted_target(tmp_path, mon
             calls.append("restart-relay")
             return {"stopped": [42], "left_running": []}
 
-        def ensure_relay_runtime(self):
+        def ensure_relay_runtime(self, **kwargs):
             calls.append("start-relay")
             return "started"
 
@@ -388,21 +388,24 @@ def test_non_virtual_setup_removes_saved_virtual_settings_without_mutating_sessi
     tmp_path, monkeypatch
 ) -> None:
     setup.persist_environment(tmp_path / ".env", setup.VIRTUAL_DESKTOP_ENV_VALUES)
-    monkeypatch.setenv(setup.WAYLAND_DISPLAY_ENV, "wayland-0")
-    monkeypatch.setenv(setup.DBUS_SESSION_BUS_ADDRESS_ENV, "unix:path=/run/user/1000/bus")
+    for key, value in setup.VIRTUAL_DESKTOP_ENV_VALUES.items():
+        monkeypatch.setenv(key, value)
+    runtime_environments = []
 
     class FakeComputerRuntime:
         def restart_computer_runtime(self):
             return True
 
         def ensure_computer_runtime(self, **kwargs):
+            runtime_environments.append(kwargs["environment"])
             return "started"
 
     class FakeRelayRuntime:
         def restart_relay_runtime_for_reconfigure(self):
             return {"stopped": [], "left_running": []}
 
-        def ensure_relay_runtime(self):
+        def ensure_relay_runtime(self, **kwargs):
+            runtime_environments.append(kwargs["environment"])
             return "started"
 
     monkeypatch.setattr(setup, "probe_desktop", lambda *args, **kwargs: None)
@@ -431,8 +434,11 @@ def test_non_virtual_setup_removes_saved_virtual_settings_without_mutating_sessi
     saved = (tmp_path / ".env").read_text(encoding="utf-8")
     for key in setup.VIRTUAL_DESKTOP_ENV_KEYS:
         assert key not in saved
-    assert setup.os.environ[setup.WAYLAND_DISPLAY_ENV] == "wayland-0"
-    assert setup.os.environ[setup.DBUS_SESSION_BUS_ADDRESS_ENV] == "unix:path=/run/user/1000/bus"
+        assert setup.os.environ[key] == setup.VIRTUAL_DESKTOP_ENV_VALUES[key]
+    assert len(runtime_environments) == 2
+    for environment in runtime_environments:
+        for key in setup.VIRTUAL_DESKTOP_ENV_KEYS:
+            assert key not in environment
 
 
 def test_configure_requires_a_managed_runtime_to_adopt_the_visible_display(

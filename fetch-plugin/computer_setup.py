@@ -66,6 +66,24 @@ class SetupError(RuntimeError):
     pass
 
 
+def _runtime_environment(kind: str | None = None) -> dict[str, str]:
+    """Build the environment for a restarted Fetch runtime.
+
+    ``hermes setup`` may have loaded an earlier virtual-desktop configuration
+    into this process before a user switches back to their physical desktop.
+    Remove only the exact values Fetch persists for a virtual desktop, while
+    leaving a real host session (such as a non-empty D-Bus address) intact.
+    """
+
+    environment = os.environ.copy()
+    for key, virtual_value in VIRTUAL_DESKTOP_ENV_VALUES.items():
+        if environment.get(key) == virtual_value:
+            environment.pop(key, None)
+    if kind == "Virtual Linux desktop":
+        environment.update(VIRTUAL_DESKTOP_ENV_VALUES)
+    return environment
+
+
 def _load_sibling(module_name: str, filename: str):
     path = Path(__file__).resolve().parent / filename
     spec = importlib.util.spec_from_file_location(module_name, path)
@@ -248,7 +266,9 @@ def disable_computer() -> None:
             )
     else:
         _clear_gateway_restart_state()
-        relay_runtime_status = relay_runtime.ensure_relay_runtime()
+        relay_runtime_status = relay_runtime.ensure_relay_runtime(
+            environment=_runtime_environment()
+        )
         if relay_runtime_status not in {"started", "already-running", "self", "disabled"}:
             raise SetupError(
                 f"Could not restart the Hermes runtime after cleanup: {relay_runtime_status}"
@@ -415,15 +435,10 @@ def configure(
         computer_runtime = _computer_runtime_module()
         if not computer_runtime.restart_computer_runtime():
             raise SetupError("Could not restart the Fetch computer bridge.")
-        runtime_environment = os.environ.copy()
-        if kind == "Virtual Linux desktop":
-            runtime_environment.update(VIRTUAL_DESKTOP_ENV_VALUES)
-        if kind == "Virtual Linux desktop":
-            runtime_status = computer_runtime.ensure_computer_runtime(
-                environment=runtime_environment
-            )
-        else:
-            runtime_status = computer_runtime.ensure_computer_runtime()
+        runtime_environment = _runtime_environment(kind)
+        runtime_status = computer_runtime.ensure_computer_runtime(
+            environment=runtime_environment
+        )
         if runtime_status not in {"started", "already-running", "self"}:
             raise SetupError(f"Could not start the Fetch computer bridge: {runtime_status}")
 
@@ -440,12 +455,9 @@ def configure(
                 )
         else:
             _clear_gateway_restart_state()
-            if kind == "Virtual Linux desktop":
-                relay_runtime_status = relay_runtime.ensure_relay_runtime(
-                    environment=runtime_environment
-                )
-            else:
-                relay_runtime_status = relay_runtime.ensure_relay_runtime()
+            relay_runtime_status = relay_runtime.ensure_relay_runtime(
+                environment=runtime_environment
+            )
             if relay_runtime_status not in {"started", "already-running", "self"}:
                 raise SetupError(
                     f"Could not restart the Hermes runtime on the visible desktop: "
