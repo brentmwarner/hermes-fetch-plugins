@@ -52,10 +52,21 @@ trap cleanup EXIT INT TERM
 
 lock_path="/tmp/.X${display_number}-lock"
 socket_path="/tmp/.X11-unix/X${display_number}"
+x11_socket_listening() {
+  local path="$1"
+  [[ -S "$path" ]] || return 1
+  awk -v p="$path" '
+    $4 == "00010000" && $NF == p { found = 1; exit }
+    END { exit !found }
+  ' /proc/net/unix 2>/dev/null
+}
 if [[ -e "$socket_path" ]]; then
-  printf 'Fetch virtual display %s already has a socket at %s.\n' \
-    "$display_name" "$socket_path" >&2
-  exit 1
+  if x11_socket_listening "$socket_path"; then
+    printf 'Fetch virtual display %s already has a live socket at %s.\n' \
+      "$display_name" "$socket_path" >&2
+    exit 1
+  fi
+  rm -f "$socket_path"
 fi
 if [[ -f "$lock_path" ]]; then
   read -r existing_pid < "$lock_path" || existing_pid=""

@@ -359,6 +359,38 @@ def x11_socket_present(display: str = DISPLAY_NAME) -> bool:
     return x11_socket_path(display).exists()
 
 
+def x11_socket_listening(path: Path | None = None, display: str = DISPLAY_NAME) -> bool:
+    """True when an X server is actually accepting connections on the socket."""
+
+    socket_path = x11_socket_path(display) if path is None else path
+    if not socket_path.exists():
+        return False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.4)
+            sock.connect(os.fspath(socket_path))
+        return True
+    except OSError:
+        return False
+
+
+def remove_stale_x11_socket(display: str = DISPLAY_NAME) -> None:
+    path = x11_socket_path(display)
+    if not path.exists():
+        return
+    if x11_socket_listening(path):
+        raise ComputerError(
+            f"Display {DISPLAY_NAME} already has a live socket at {path}. "
+            "Stop the other X server or linux-vps desktop, then rerun this setup."
+        )
+    try:
+        path.unlink()
+    except OSError as exc:
+        raise ComputerError(
+            f"Could not remove the stale Fetch display socket at {path}: {exc}"
+        ) from exc
+
+
 def _xauth_record(family: int, address: bytes, number: bytes, cookie: bytes) -> bytes:
     name = b"MIT-MAGIC-COOKIE-1"
 
@@ -403,6 +435,13 @@ def stop_container(*, name: str = CONTAINER_NAME) -> str:
             raise ComputerError(
                 f"Could not stop the Fetch computer container: {detail or engine}"
             )
+    if uses_host_network():
+        path = x11_socket_path()
+        if path.exists() and not x11_socket_listening(path):
+            try:
+                path.unlink()
+            except OSError:
+                pass
     return "stopped" if saw_container else "absent"
 
 
@@ -431,11 +470,8 @@ def run_container(engine: str) -> None:
             f"Fetch computer port {RFB_PORT} is already in use on {RFB_HOST}. "
             "Stop the other VNC or linux-vps desktop, then rerun this setup."
         )
-    if uses_host_network() and x11_socket_present():
-        raise ComputerError(
-            f"Display {DISPLAY_NAME} already has a socket at {x11_socket_path()}. "
-            "Stop the other X server or linux-vps desktop, then rerun this setup."
-        )
+    if uses_host_network():
+        remove_stale_x11_socket()
     ensure_xauthority(xauthority_path())
     uid, gid = host_user_ids()
     args = container_run_args(

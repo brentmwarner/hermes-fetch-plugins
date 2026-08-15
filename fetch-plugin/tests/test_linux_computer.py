@@ -1,4 +1,5 @@
 import importlib.util
+import socket
 import sys
 from pathlib import Path
 
@@ -130,6 +131,7 @@ def test_stop_container_removes_a_running_container(monkeypatch) -> None:
 
     monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
     monkeypatch.setattr(manage, "container_exists", lambda engine, name=manage.CONTAINER_NAME: True)
+    monkeypatch.setattr(manage, "uses_host_network", lambda: False)
     monkeypatch.setattr(manage.subprocess, "run", fake_run)
 
     assert manage.stop_container() == "stopped"
@@ -139,6 +141,7 @@ def test_stop_container_removes_a_running_container(monkeypatch) -> None:
 def test_stop_container_reports_absent_when_no_container(monkeypatch) -> None:
     monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
     monkeypatch.setattr(manage, "container_exists", lambda engine, name=manage.CONTAINER_NAME: False)
+    monkeypatch.setattr(manage, "uses_host_network", lambda: False)
 
     assert manage.stop_container() == "absent"
 
@@ -204,7 +207,9 @@ def test_image_keeps_branded_wallpaper_and_loopback_vnc() -> None:
     assert "1920x1080" not in entrypoint
     assert "-localhost" in entrypoint
     assert 'rm -f "$lock_path" "$socket_path"' not in entrypoint
-    assert "already has a socket" in entrypoint
+    assert "already has a live socket" in entrypoint
+    assert "x11_socket_listening" in entrypoint
+    assert 'rm -f "$socket_path"' in entrypoint
     assert "hsetroot -cover" in entrypoint
     assert "startxfce4" in entrypoint
     assert "network_mode: host" in compose
@@ -385,22 +390,70 @@ def test_run_container_does_not_rotate_cookie_when_port_is_taken(tmp_path, monke
     assert called == []
 
 
-def test_run_container_refuses_existing_x11_socket(tmp_path, monkeypatch) -> None:
+def test_run_container_refuses_live_x11_socket(tmp_path, monkeypatch) -> None:
     called: list[str] = []
+
+    def refuse(_display=manage.DISPLAY_NAME) -> None:
+        raise manage.ComputerError(
+            f"Display {manage.DISPLAY_NAME} already has a live socket at /tmp/.X11-unix/X1."
+        )
+
     monkeypatch.setattr(manage, "runtime_dir", lambda: tmp_path)
     monkeypatch.setattr(manage, "container_home_dir", lambda: tmp_path / "home")
     monkeypatch.setattr(manage, "container_exists", lambda _engine: False)
     monkeypatch.setattr(manage, "rfb_port_open", lambda *args, **kwargs: False)
     monkeypatch.setattr(manage, "uses_host_network", lambda: True)
-    monkeypatch.setattr(manage, "x11_socket_present", lambda display=manage.DISPLAY_NAME: True)
+    monkeypatch.setattr(manage, "remove_stale_x11_socket", refuse)
     monkeypatch.setattr(
         manage, "ensure_xauthority", lambda *args, **kwargs: called.append("xauth")
     )
 
-    with pytest.raises(manage.ComputerError, match="already has a socket"):
+    with pytest.raises(manage.ComputerError, match="live socket"):
         manage.run_container("docker")
 
     assert called == []
+
+
+def test_remove_stale_x11_socket_unlinks_orphans(tmp_path, monkeypatch) -> None:
+    socket_file = tmp_path / "X1"
+    socket_file.write_text("stale", encoding="utf-8")
+    monkeypatch.setattr(manage, "x11_socket_path", lambda display=manage.DISPLAY_NAME: socket_file)
+    monkeypatch.setattr(manage, "x11_socket_listening", lambda path=None, display=manage.DISPLAY_NAME: False)
+
+    manage.remove_stale_x11_socket()
+
+    assert not socket_file.exists()
+
+
+def test_remove_stale_x11_socket_keeps_live_sockets(tmp_path, monkeypatch) -> None:
+    socket_file = tmp_path / "X1"
+    socket_file.write_text("live", encoding="utf-8")
+    monkeypatch.setattr(manage, "x11_socket_path", lambda display=manage.DISPLAY_NAME: socket_file)
+    monkeypatch.setattr(manage, "x11_socket_listening", lambda path=None, display=manage.DISPLAY_NAME: True)
+
+    with pytest.raises(manage.ComputerError, match="live socket"):
+        manage.remove_stale_x11_socket()
+
+    assert socket_file.exists()
+
+
+def test_x11_socket_listening_detects_accepting_server(tmp_path) -> None:
+    socket_file = tmp_path / "X1"
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(socket_file))
+    server.listen(1)
+    try:
+        assert manage.x11_socket_listening(socket_file) is True
+    finally:
+        server.close()
+        socket_file.unlink(missing_ok=True)
+
+
+def test_x11_socket_listening_is_false_for_orphan_file(tmp_path) -> None:
+    socket_file = tmp_path / "X1"
+    socket_file.write_text("orphan", encoding="utf-8")
+
+    assert manage.x11_socket_listening(socket_file) is False
 
 
 def test_run_container_omits_user_when_ids_unavailable(tmp_path, monkeypatch) -> None:
