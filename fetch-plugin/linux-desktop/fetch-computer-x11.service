@@ -1,0 +1,13 @@
+[Unit]
+Description=Fetch shared Linux desktop (TigerVNC)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/fetch-computer/run-x0vncserver.sh
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

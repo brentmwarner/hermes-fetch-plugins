@@ -68,6 +68,20 @@ def _runtime_module():
     return module
 
 
+def _computer_runtime_module():
+    """Load the dedicated computer bridge runtime helper by file path."""
+    existing = sys.modules.get("fetch_plugin_computer_runtime")
+    if existing is not None:
+        return existing
+    path = Path(__file__).resolve().parent / "_computer_runtime.py"
+    spec = importlib.util.spec_from_file_location("fetch_plugin_computer_runtime", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _inbox_module():
     """Load the Fetch inbox helper by file path."""
     existing = sys.modules.get("fetch_plugin_inbox")
@@ -418,6 +432,23 @@ def interactive_setup() -> None:
         if handoff.get("stopped"):
             print_info("Restarted the Fetch relay runtime so it picks up this pairing.")
         runtime_status = runtime.ensure_relay_runtime()
+        computer_target = os.environ.get(
+            "HERMES_FETCH_COMPUTER_TARGET",
+            os.environ.get("HERMES_FETCH_COMPUTER_WS_URL", ""),
+        ).strip()
+        if computer_target:
+            computer_runtime = _computer_runtime_module()
+            if not computer_runtime.restart_computer_runtime():
+                print_warning(
+                    "Fetch could not stop the existing computer bridge, so it may still "
+                    "be using old pairing credentials. Run the platform computer setup again."
+                )
+            else:
+                computer_runtime_status = computer_runtime.ensure_computer_runtime()
+                if computer_runtime_status == "failed":
+                    print_warning(
+                        "Fetch could not restart the computer bridge. Run the platform computer setup again."
+                    )
         relay_link = str(relay_pairing["link"])
         tunnel_status = {"ok": False, "reason": "runtime_not_started"}
         if runtime_status in {"started", "already-running", "self"}:

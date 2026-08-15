@@ -62,6 +62,15 @@ def test_hint_documents_host_file_delivery(registered_platform):
     assert "previewable, downloadable attachment" in hint
 
 
+def test_hint_documents_computer_handoff(registered_platform):
+    hint = registered_platform["platform_hint"]
+    assert "browser or computer work" in hint
+    assert "`clarify`" in hint
+    assert '["I\'m done", "Skip"]' in hint
+    assert "current real desktop frame" in hint
+    assert "Do not ask the person to paste passwords" in hint
+
+
 def test_hint_documents_card_fence_syntax(registered_platform):
     hint = registered_platform["platform_hint"]
     assert "```card" in hint, "must show the ```card fence language"

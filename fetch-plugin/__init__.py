@@ -98,11 +98,22 @@ _FETCH_ATTACHMENT_HINT = (
     "binary content into the reply. "
 )
 
+_FETCH_COMPUTER_HANDOFF_HINT = (
+    "During browser or computer work, pause for the person whenever a step "
+    "requires private information, MFA, CAPTCHA, legal certification, payment "
+    "approval, or another decision they must make themselves. Use the `clarify` "
+    "tool with a specific instruction and the choices exactly [\"I'm done\", "
+    "\"Skip\"]. When a frame is available, Fetch renders that request with the "
+    "current real desktop frame and Take over controls. Do not ask the person "
+    "to paste passwords, payment "
+    "details, or verification codes into chat. "
+)
+
 _FETCH_IOS_TURN_CONTEXT = """[Fetch iOS client context - do not quote or mention this block.
 Client: Fetch iOS app.
 Output surface: native mobile chat, not a terminal, shell, TUI, browser, or file artifact.
 Fetch supports standard Markdown plus fenced `card` JSON blocks rendered as native UI.
-""" + _FETCH_ATTACHMENT_HINT + """
+""" + _FETCH_ATTACHMENT_HINT + _FETCH_COMPUTER_HANDOFF_HINT + """
 For charts, graphs, reports, dashboards, token usage, rankings, trends, metrics, tables, or other structured visual summaries, emit a fenced ```card JSON payload using Fetch native generative UI.
 Do not use ASCII/text bar charts, Unicode block charts, SVG links, inline SVG, HTML artifacts, Mermaid diagrams, image links, or external chart files unless the user explicitly asks for those formats.
 For token/usage reports, prefer a card with `stats` plus `chart` or `blocks` containing a native chart.
@@ -213,6 +224,7 @@ def _load_sibling(module_name: str, filename: str):
 _relay = _load_sibling("fetch_plugin_relay", "_relay.py")
 _pairing = _load_sibling("fetch_plugin_pairing", "_pairing.py")
 _runtime = _load_sibling("fetch_plugin_runtime", "_runtime.py")
+_computer_runtime = _load_sibling("fetch_plugin_computer_runtime", "_computer_runtime.py")
 _inbox = _load_sibling("fetch_plugin_inbox", "_inbox.py")
 _preview = _load_sibling("fetch_plugin_preview", "_preview.py")
 
@@ -584,6 +596,9 @@ def _spawn_tunnel() -> None:
     start_reason = _tunnel_start_reason()
     if start_reason is None:
         return
+    computer_runtime_status = _computer_runtime.ensure_computer_runtime()
+    if computer_runtime_status == "failed":
+        log.warning("Fetch computer runtime could not start; check fetch-computer-runtime.log")
     if _runtime.ensure_relay_runtime() in {"started", "already-running"}:
         return
 
@@ -668,6 +683,7 @@ def register(ctx) -> None:
                     "standard Markdown (bold, italic, headings, lists, code "
                     "blocks, tables). "
                     + _FETCH_ATTACHMENT_HINT
+                    + _FETCH_COMPUTER_HANDOFF_HINT
                     + "Fetch additionally supports generative-UI "
                     "cards: emit a fenced code block whose language is `card` "
                     "containing a JSON object, and the app renders a native "
