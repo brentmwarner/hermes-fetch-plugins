@@ -132,6 +132,58 @@ def test_disable_computer_stops_bridge_and_clears_persisted_target(tmp_path, mon
     assert setup.os.environ[setup.DBUS_SESSION_BUS_ADDRESS_ENV] == "unix:path=/run/user/1000/bus"
 
 
+def test_disable_computer_stops_container_before_clearing_env(tmp_path, monkeypatch) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text('HERMES_FETCH_COMPUTER_TARGET="tcp://127.0.0.1:5901"\n', encoding="utf-8")
+    monkeypatch.setattr(setup, "hermes_home", lambda: tmp_path)
+    calls = []
+
+    class FakeLinuxComputer:
+        class ComputerError(RuntimeError):
+            pass
+
+        def stop_container(self):
+            calls.append("stop-container")
+            return "stopped"
+
+    class FakeRuntime:
+        def restart_computer_runtime(self):
+            calls.append("stop-bridge")
+            return True
+
+    class FakeRelayRuntime:
+        def restart_relay_runtime_for_reconfigure(self):
+            return {"stopped": [1], "left_running": []}
+
+        def ensure_relay_runtime(self, **kwargs):
+            return "started"
+
+    monkeypatch.setattr(setup, "_linux_computer_module", lambda: FakeLinuxComputer())
+    monkeypatch.setattr(setup, "_computer_runtime_module", lambda: FakeRuntime())
+    monkeypatch.setattr(setup, "_relay_runtime_module", lambda: FakeRelayRuntime())
+
+    setup.disable_computer()
+
+    assert calls == ["stop-container", "stop-bridge"]
+    assert "HERMES_FETCH_COMPUTER_TARGET" not in env_path.read_text(encoding="utf-8")
+
+
+def test_disable_computer_fails_when_container_cannot_be_stopped(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(setup, "hermes_home", lambda: tmp_path)
+
+    class FakeLinuxComputer:
+        class ComputerError(RuntimeError):
+            pass
+
+        def stop_container(self):
+            raise FakeLinuxComputer.ComputerError("container still running")
+
+    monkeypatch.setattr(setup, "_linux_computer_module", lambda: FakeLinuxComputer())
+
+    with pytest.raises(setup.SetupError, match="container still running"):
+        setup.disable_computer()
+
+
 def test_disable_computer_fails_when_bridge_cannot_be_stopped(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(setup, "hermes_home", lambda: tmp_path)
 
@@ -143,6 +195,17 @@ def test_disable_computer_fails_when_bridge_cannot_be_stopped(tmp_path, monkeypa
 
     with pytest.raises(setup.SetupError, match="Could not stop"):
         setup.disable_computer()
+
+
+def test_native_mac_and_windows_helpers_keep_loopback_screen_sharing() -> None:
+    plugin_dir = Path(__file__).resolve().parent.parent
+    macos = (plugin_dir / "macos" / "check-computer.sh").read_text(encoding="utf-8")
+    windows = (plugin_dir / "windows" / "check-computer.ps1").read_text(encoding="utf-8")
+
+    assert "tcp://127.0.0.1:5900" in macos
+    assert '--kind "Mac desktop"' in macos
+    assert "tcp://127.0.0.1:5900" in windows
+    assert "Windows desktop" in windows
 
 
 def test_linux_service_scripts_use_xdg_config_home_and_disable_on_uninstall() -> None:

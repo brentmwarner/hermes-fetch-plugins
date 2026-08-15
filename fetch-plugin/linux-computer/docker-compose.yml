@@ -1,0 +1,21 @@
+# Linux convenience file. Prefer ./manage-computer.sh bootstrap so Docker vs
+# Podman detection, loopback-only VNC, and Fetch env persistence stay correct.
+# This file uses host networking so TigerVNC can bind 127.0.0.1:5901 with
+# -localhost. Do not add a ports: mapping — that would be easy to publish on
+# 0.0.0.0 by mistake.
+services:
+  fetch-computer:
+    build: .
+    image: fetch-computer:local
+    container_name: fetch-computer
+    network_mode: host
+    init: true
+    shm_size: "2gb"
+    restart: unless-stopped
+    environment:
+      FETCH_VNC_LOCALHOST: "1"
+      DISPLAY: ":1"
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - ${FETCH_COMPUTER_XAUTHORITY:-${HOME}/.local/share/fetch-computer/Xauthority}:/home/fetch/.Xauthority
+      - ${FETCH_COMPUTER_HOME:-${HOME}/.local/share/fetch-computer/home}:/home/fetch

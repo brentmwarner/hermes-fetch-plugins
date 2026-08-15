@@ -52,7 +52,7 @@ Optional environment variables:
 | `HERMES_FETCH_RELAY_REGISTRATION_TOKEN` | Operator/private relay registration token. Public Fetch users should not need this. |
 | `HERMES_FETCH_TUNNEL_ENABLED` | Enabled automatically by Fetch relay setup so the agent keeps a reverse tunnel to the hosted relay. |
 | `HERMES_FETCH_TUNNEL_DISABLE_DASHBOARD_AUTOSTART` | Opt out of Fetch's headless local dashboard/API autostart if you run that process yourself. |
-| `HERMES_FETCH_COMPUTER_TARGET` | Optional loopback-only VNC target for the Fetch computer viewer on Mac, Linux desktops, or Linux VPS hosts. See the plugin README. |
+| `HERMES_FETCH_COMPUTER_TARGET` | Optional loopback-only VNC target for the Fetch computer viewer. Linux defaults to the Ubuntu container at `tcp://127.0.0.1:5901`. See the plugin README. |
 | `HERMES_FETCH_COMPUTER_NAME` | Optional friendly computer name displayed in the Fetch viewer. |
 | `HERMES_FETCH_COMPUTER_KIND` | Optional display label such as `Mac desktop` or `Virtual Linux desktop`. |
 | `HERMES_FETCH_COMPUTER_VNC_PASSWORD` | Dedicated Mac/Windows VNC password consumed only by the host-side loopback bridge; computer setup saves it locally so the phone is never prompted. |

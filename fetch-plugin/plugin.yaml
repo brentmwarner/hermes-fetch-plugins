@@ -1,7 +1,7 @@
 name: fetch
 label: Fetch
 kind: platform
-version: 0.7.3
+version: 0.8.0
 description: "Fetch iOS app channel for Hermes. Pairs the app to this agent (link + QR), like linking WhatsApp Web — relay pairing reaches the agent through the hosted relay with no inbound port / no Tailscale. Also sends a push when a turn finishes or the agent needs attention, owns the Fetch inbox delivery target for cron/webhooks, and teaches the agent to deliver host files with standard MEDIA markers. Registers a platform_hint for generative-UI `card` fences the app renders natively (see the `fetch-cards` skill for patterns). No Apple Developer credentials live on this host."
 author: Fetch
 hooks:
