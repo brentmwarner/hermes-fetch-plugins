@@ -78,6 +78,8 @@ if [[ ! -S "$socket_path" ]]; then
   exit 1
 fi
 
+unset DBUS_SESSION_BUS_ADDRESS DESKTOP_SESSION GDK_BACKEND QT_QPA_PLATFORM \
+  SESSION_MANAGER WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE
 DISPLAY="$display_name" XAUTHORITY="$xauthority" dbus-run-session -- startxfce4 &
 desktop_pid=$!
 

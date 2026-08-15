@@ -27,6 +27,27 @@ DISPLAY_ENV = "DISPLAY"
 XAUTHORITY_ENV = "XAUTHORITY"
 BROWSER_HEADED_ENV = "AGENT_BROWSER_HEADED"
 VNC_PASSWORD_ENV = "HERMES_FETCH_COMPUTER_VNC_PASSWORD"
+WAYLAND_DISPLAY_ENV = "WAYLAND_DISPLAY"
+SESSION_MANAGER_ENV = "SESSION_MANAGER"
+XDG_SESSION_TYPE_ENV = "XDG_SESSION_TYPE"
+XDG_CURRENT_DESKTOP_ENV = "XDG_CURRENT_DESKTOP"
+XDG_SESSION_DESKTOP_ENV = "XDG_SESSION_DESKTOP"
+DESKTOP_SESSION_ENV = "DESKTOP_SESSION"
+DBUS_SESSION_BUS_ADDRESS_ENV = "DBUS_SESSION_BUS_ADDRESS"
+GDK_BACKEND_ENV = "GDK_BACKEND"
+QT_QPA_PLATFORM_ENV = "QT_QPA_PLATFORM"
+VIRTUAL_DESKTOP_ENV_VALUES = {
+    WAYLAND_DISPLAY_ENV: "",
+    SESSION_MANAGER_ENV: "",
+    XDG_SESSION_TYPE_ENV: "x11",
+    XDG_CURRENT_DESKTOP_ENV: "",
+    XDG_SESSION_DESKTOP_ENV: "",
+    DESKTOP_SESSION_ENV: "",
+    DBUS_SESSION_BUS_ADDRESS_ENV: "",
+    GDK_BACKEND_ENV: "x11",
+    QT_QPA_PLATFORM_ENV: "xcb",
+}
+VIRTUAL_DESKTOP_ENV_KEYS = tuple(VIRTUAL_DESKTOP_ENV_VALUES)
 COMPUTER_ENV_KEYS = (
     TARGET_ENV,
     NAME_ENV,
@@ -36,6 +57,7 @@ COMPUTER_ENV_KEYS = (
     XAUTHORITY_ENV,
     BROWSER_HEADED_ENV,
     VNC_PASSWORD_ENV,
+    *VIRTUAL_DESKTOP_ENV_KEYS,
 )
 _GATEWAY_RESTART_STATE_FILE = "fetch-computer-gateway-restart.json"
 
@@ -377,10 +399,16 @@ def configure(
             values[XAUTHORITY_ENV] = xauthority
         if headed_browser:
             values[BROWSER_HEADED_ENV] = "1"
+        if kind == "Virtual Linux desktop":
+            values.update(VIRTUAL_DESKTOP_ENV_VALUES)
         if vnc_password:
             values[VNC_PASSWORD_ENV] = vnc_password
         persist_environment(hermes_home() / ".env", values)
         os.environ.update(values)
+        if kind != "Virtual Linux desktop":
+            remove_environment_keys(hermes_home() / ".env", VIRTUAL_DESKTOP_ENV_KEYS)
+            for key in VIRTUAL_DESKTOP_ENV_KEYS:
+                os.environ.pop(key, None)
         if not vnc_password:
             remove_environment_keys(hermes_home() / ".env", (VNC_PASSWORD_ENV,))
             os.environ.pop(VNC_PASSWORD_ENV, None)

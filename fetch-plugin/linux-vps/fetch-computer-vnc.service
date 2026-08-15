@@ -6,6 +6,7 @@ After=network.target
 Type=simple
 Environment=DISPLAY=:1
 Environment=XAUTHORITY=%h/.local/share/fetch-computer/Xauthority
+UnsetEnvironment=DBUS_SESSION_BUS_ADDRESS SESSION_MANAGER WAYLAND_DISPLAY XDG_SESSION_TYPE
 ExecStart=%h/.local/share/fetch-computer/run-virtual-desktop.sh
 Restart=always
 RestartSec=3

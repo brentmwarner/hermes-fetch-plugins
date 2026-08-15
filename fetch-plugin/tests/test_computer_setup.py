@@ -80,6 +80,8 @@ def test_remove_environment_keys_drops_computer_settings_and_keeps_other_lines(t
     assert "DISPLAY=" not in text
     assert "XAUTHORITY=" not in text
     assert "AGENT_BROWSER_HEADED" not in text
+    for key in setup.VIRTUAL_DESKTOP_ENV_KEYS:
+        assert key not in text
 
 
 def test_disable_computer_stops_bridge_and_clears_persisted_target(tmp_path, monkeypatch) -> None:
@@ -176,7 +178,9 @@ def test_virtual_linux_setup_supports_fedora_and_a_fixed_headed_desktop() -> Non
     assert "-localhost" in launcher
     assert "-SecurityTypes None" in launcher
     assert "MIT-MAGIC-COOKIE-1" in launcher
+    assert "unset DBUS_SESSION_BUS_ADDRESS DESKTOP_SESSION GDK_BACKEND QT_QPA_PLATFORM" in launcher
     assert "dbus-run-session -- startxfce4" in launcher
+    assert "UnsetEnvironment=DBUS_SESSION_BUS_ADDRESS SESSION_MANAGER WAYLAND_DISPLAY XDG_SESSION_TYPE" in service
 
 
 def test_probe_desktop_requires_an_actual_rfb_server() -> None:
@@ -352,6 +356,15 @@ def test_configure_starts_dedicated_bridge_before_reporting_ready(tmp_path, monk
     assert 'DISPLAY=":1"' in saved
     assert 'XAUTHORITY="/tmp/fetch.Xauthority"' in saved
     assert 'AGENT_BROWSER_HEADED="1"' in saved
+    assert 'WAYLAND_DISPLAY=""' in saved
+    assert 'SESSION_MANAGER=""' in saved
+    assert 'XDG_SESSION_TYPE="x11"' in saved
+    assert 'XDG_CURRENT_DESKTOP=""' in saved
+    assert 'XDG_SESSION_DESKTOP=""' in saved
+    assert 'DESKTOP_SESSION=""' in saved
+    assert 'DBUS_SESSION_BUS_ADDRESS=""' in saved
+    assert 'GDK_BACKEND="x11"' in saved
+    assert 'QT_QPA_PLATFORM="xcb"' in saved
     assert 'HERMES_FETCH_COMPUTER_NAME="Hermes VPS"' in saved
     assert 'HERMES_FETCH_COMPUTER_VNC_PASSWORD="dedicated-password"' in saved
     assert (tmp_path / ".env").stat().st_mode & 0o777 == 0o600
