@@ -13,6 +13,7 @@ from pathlib import Path
 
 CONTAINER_NAME = "fetch-computer"
 IMAGE_NAME = "fetch-computer:local"
+ENGINE = "docker"
 RFB_HOST = "127.0.0.1"
 RFB_PORT = 5901
 DISPLAY_NAME = ":1"
@@ -59,7 +60,7 @@ def selinux_enforcing() -> bool:
 
 
 def engine_binaries() -> list[str]:
-    return [name for name in ("docker", "podman") if shutil.which(name)]
+    return [ENGINE] if shutil.which(ENGINE) else []
 
 
 def engine_daemon_ready(engine: str, *, timeout: float = 8.0) -> bool:
@@ -81,15 +82,15 @@ def bootstrap_command() -> str:
 
 def engine_missing_instructions() -> str:
     return (
-        "Fetch computer setup requires Docker or Podman. "
-        "Install an engine, start it, then bootstrap once.\n"
+        "Fetch computer setup requires Docker. "
+        "Install Docker, start it, then bootstrap once.\n"
         "\n"
         "  Ubuntu/Debian:\n"
         "    sudo apt-get update && sudo apt-get install -y docker.io\n"
         "    sudo systemctl enable --now docker\n"
         "  Fedora:\n"
-        "    sudo dnf install -y podman\n"
-        "    # or: sudo dnf install -y docker && sudo systemctl enable --now docker\n"
+        "    sudo dnf install -y docker\n"
+        "    sudo systemctl enable --now docker\n"
         "\n"
         f"  Then run:\n    {bootstrap_command()}"
     )
@@ -97,10 +98,9 @@ def engine_missing_instructions() -> str:
 
 def engine_not_running_instructions() -> str:
     return (
-        "Docker or Podman is installed, but the container engine is not running.\n"
+        "Docker is installed, but the daemon is not running.\n"
         "\n"
-        "  Docker:  sudo systemctl start docker\n"
-        "  Podman:  run `podman info`, then start the user session if needed\n"
+        "  sudo systemctl start docker\n"
         "\n"
         f"  Then run:\n    {bootstrap_command()}"
     )
@@ -116,13 +116,11 @@ def container_missing_instructions() -> str:
 
 
 def detect_engine() -> str:
-    binaries = engine_binaries()
-    if not binaries:
+    if not engine_binaries():
         raise ComputerError(engine_missing_instructions())
-    for engine in binaries:
-        if engine_daemon_ready(engine):
-            return engine
-    raise ComputerError(engine_not_running_instructions())
+    if not engine_daemon_ready(ENGINE):
+        raise ComputerError(engine_not_running_instructions())
+    return ENGINE
 
 
 def reject_non_loopback_publish(args: list[str]) -> list[str]:
@@ -162,10 +160,7 @@ def container_run_args(
         args.extend(["--restart", restart])
     if selinux:
         args.extend(["--security-opt", "label=disable"])
-    engine_name = Path(engine).name
-    if engine_name == "podman":
-        args.append("--userns=keep-id")
-    elif uid is not None and gid is not None:
+    if uid is not None and gid is not None:
         args.extend(["--user", f"{uid}:{gid}"])
     if host_network:
         args.extend(["--network", "host", "-e", "FETCH_VNC_LOCALHOST=1"])
@@ -222,21 +217,19 @@ def container_running(engine: str, name: str = CONTAINER_NAME) -> bool:
 def computer_readiness(*, platform: str | None = None) -> dict[str, str]:
     if not uses_host_network(platform):
         return {"state": "not-linux", "message": ""}
-    binaries = engine_binaries()
-    if not binaries:
+    if not engine_binaries():
         return {"state": "engine-missing", "message": engine_missing_instructions()}
-    ready_engine = next((engine for engine in binaries if engine_daemon_ready(engine)), None)
-    if ready_engine is None:
+    if not engine_daemon_ready(ENGINE):
         return {"state": "engine-not-running", "message": engine_not_running_instructions()}
-    if container_running(ready_engine):
+    if container_running(ENGINE):
         return {
             "state": "ready",
-            "engine": ready_engine,
+            "engine": ENGINE,
             "message": "Fetch computer is running. Fetch Watch can use this desktop.",
         }
     return {
         "state": "container-absent",
-        "engine": ready_engine,
+        "engine": ENGINE,
         "message": container_missing_instructions(),
     }
 
@@ -335,42 +328,6 @@ def build_image(engine: str) -> None:
         raise ComputerError("Could not build the Fetch computer image.")
 
 
-def _linger_enabled() -> bool:
-    user = os.environ.get("USER") or Path.home().name
-    result = subprocess.run(
-        ["loginctl", "show-user", user, "--property=Linger", "--value"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return result.returncode == 0 and result.stdout.strip() == "yes"
-
-
-def _require_podman_linger() -> None:
-    if shutil.which("loginctl") is None:
-        return
-    if _linger_enabled():
-        return
-    user = os.environ.get("USER") or Path.home().name
-    raise ComputerError(
-        "Podman needs the computer container to stay up after logout. Enable it first:\n"
-        f"  sudo loginctl enable-linger {user}"
-    )
-
-
-def _prepare_podman_persistence(engine: str) -> None:
-    if Path(engine).name != "podman":
-        return
-    _require_podman_linger()
-    if shutil.which("systemctl") is None:
-        return
-    subprocess.run(
-        ["systemctl", "--user", "enable", "--now", "podman-restart.service"],
-        check=False,
-        capture_output=True,
-    )
-
-
 def run_container(engine: str) -> None:
     runtime_dir().mkdir(parents=True, exist_ok=True)
     container_home_dir().mkdir(parents=True, exist_ok=True)
@@ -396,7 +353,6 @@ def run_container(engine: str) -> None:
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
         raise ComputerError(f"Could not start the Fetch computer container: {detail}")
-    _prepare_podman_persistence(engine)
 
 
 def _computer_setup_command(*, check_only: bool, wait_seconds: float) -> list[str]:

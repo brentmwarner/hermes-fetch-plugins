@@ -114,7 +114,7 @@ def test_register_announces_linux_computer_when_not_ready(monkeypatch, capsys):
             computer_readiness=lambda: {
                 "state": "engine-missing",
                 "message": (
-                    "requires Docker or Podman\n"
+                    "requires Docker\n"
                     "  sudo apt-get install -y docker.io\n"
                     "  ~/.hermes/plugins/fetch/linux-computer/manage-computer.sh bootstrap"
                 ),
@@ -129,7 +129,8 @@ def test_register_announces_linux_computer_when_not_ready(monkeypatch, capsys):
     fetch.register(ctx)
 
     err = capsys.readouterr().err
-    assert "requires Docker or Podman" in err
+    assert "requires Docker" in err
+    assert "Podman" not in err
     assert "manage-computer.sh bootstrap" in err
 
 
@@ -160,7 +161,7 @@ def test_register_stays_quiet_when_linux_computer_is_ready(monkeypatch, capsys):
 
     err = capsys.readouterr().err
     assert "manage-computer.sh bootstrap" not in err
-    assert "requires Docker or Podman" not in err
+    assert "requires Docker" not in err
 
 
 def test_fetch_cards_skill_never_overwrites_custom_skill(tmp_path, monkeypatch):

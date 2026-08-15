@@ -12,24 +12,26 @@ sys.modules[_spec.name] = manage
 _spec.loader.exec_module(manage)
 
 
-def test_detect_engine_prefers_ready_docker(monkeypatch) -> None:
-    monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker", "podman"])
+def test_detect_engine_uses_ready_docker(monkeypatch) -> None:
+    monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
     monkeypatch.setattr(manage, "engine_daemon_ready", lambda engine: engine == "docker")
 
     assert manage.detect_engine() == "docker"
 
 
-def test_detect_engine_uses_podman_when_docker_daemon_is_down(monkeypatch) -> None:
-    monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker", "podman"])
-    monkeypatch.setattr(manage, "engine_daemon_ready", lambda engine: engine == "podman")
+def test_engine_binaries_never_includes_podman(monkeypatch) -> None:
+    def fake_which(name: str):
+        return f"/usr/bin/{name}" if name in {"docker", "podman"} else None
 
-    assert manage.detect_engine() == "podman"
+    monkeypatch.setattr(manage.shutil, "which", fake_which)
+
+    assert manage.engine_binaries() == ["docker"]
 
 
-def test_detect_engine_fails_when_docker_and_podman_are_missing(monkeypatch) -> None:
+def test_detect_engine_fails_when_docker_is_missing(monkeypatch) -> None:
     monkeypatch.setattr(manage, "engine_binaries", lambda: [])
 
-    with pytest.raises(manage.ComputerError, match="requires Docker or Podman"):
+    with pytest.raises(manage.ComputerError, match="requires Docker"):
         manage.detect_engine()
 
 
@@ -61,6 +63,7 @@ def test_linux_run_args_use_host_network_and_never_publish_vnc() -> None:
     assert "0.0.0.0" not in " ".join(args)
     assert "/tmp/.X11-unix:/tmp/.X11-unix" in args
     assert "--user" in args
+    assert "--userns=keep-id" not in args
 
 
 def test_desktop_run_args_publish_only_loopback() -> None:
@@ -114,7 +117,7 @@ def test_stop_container_removes_a_running_container(monkeypatch) -> None:
 
 
 def test_stop_container_reports_absent_when_no_container(monkeypatch) -> None:
-    monkeypatch.setattr(manage, "engine_binaries", lambda: ["podman"])
+    monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
     monkeypatch.setattr(manage, "container_exists", lambda engine, name=manage.CONTAINER_NAME: False)
 
     assert manage.stop_container() == "absent"
@@ -153,9 +156,9 @@ def test_computer_setup_command_uses_fetch_loopback_contract() -> None:
 def test_manager_does_not_install_host_xfce() -> None:
     text = _path.read_text(encoding="utf-8")
     assert "xfce" not in text.lower()
-    assert "requires Docker or Podman" in text
+    assert "requires Docker" in text
     assert "apt-get install -y docker.io" in text
-    assert "dnf install -y podman" in text
+    assert "dnf install -y docker" in text
     assert "subprocess.run([\"apt" not in text
     assert "subprocess.run([\"dnf" not in text
 
@@ -192,7 +195,7 @@ def test_readme_makes_the_container_the_default_linux_computer() -> None:
     readme = (PLUGIN_DIR / "README.md").read_text(encoding="utf-8")
 
     assert "linux-computer" in readme
-    assert "Docker or Podman" in readme
+    assert "install Docker if needed" in readme
     assert "Fedora Wayland" in readme
     assert "scrape the physical login session" in readme
     assert "Xorg" in readme
@@ -228,7 +231,7 @@ def test_computer_readiness_reports_engine_missing(monkeypatch) -> None:
 
     assert report["state"] == "engine-missing"
     assert "sudo apt-get install -y docker.io" in report["message"]
-    assert "sudo dnf install -y podman" in report["message"]
+    assert "sudo dnf install -y docker" in report["message"]
     assert "manage-computer.sh bootstrap" in report["message"]
 
 
@@ -246,14 +249,14 @@ def test_computer_readiness_reports_engine_not_running(monkeypatch) -> None:
 
 def test_computer_readiness_reports_container_absent(monkeypatch) -> None:
     monkeypatch.setattr(manage, "uses_host_network", lambda platform=None: True)
-    monkeypatch.setattr(manage, "engine_binaries", lambda: ["podman"])
-    monkeypatch.setattr(manage, "engine_daemon_ready", lambda engine: engine == "podman")
+    monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
+    monkeypatch.setattr(manage, "engine_daemon_ready", lambda engine: engine == "docker")
     monkeypatch.setattr(manage, "container_running", lambda engine, name=manage.CONTAINER_NAME: False)
 
     report = manage.computer_readiness()
 
     assert report["state"] == "container-absent"
-    assert report["engine"] == "podman"
+    assert report["engine"] == "docker"
     assert "unless-stopped" in report["message"]
     assert "manage-computer.sh bootstrap" in report["message"]
 
@@ -311,3 +314,17 @@ def test_compose_sets_grok_bot_geometry() -> None:
 
     assert "FETCH_GEOMETRY: \"1280x800\"" in compose
     assert "1920x1080" not in compose
+
+
+def test_fetch_computer_path_never_mentions_podman() -> None:
+    paths = (
+        PLUGIN_DIR / "linux-computer" / "manage.py",
+        PLUGIN_DIR / "linux-computer" / "docker-compose.yml",
+        PLUGIN_DIR / "linux-computer" / "entrypoint.sh",
+        PLUGIN_DIR / "linux-computer" / "Dockerfile",
+        PLUGIN_DIR / "README.md",
+        PLUGIN_DIR / "linux-vps" / "manage-user-services.sh",
+    )
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        assert "podman" not in text.lower(), f"{path} still mentions Podman"

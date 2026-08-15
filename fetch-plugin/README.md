@@ -59,8 +59,8 @@ hermes gateway restart      # (and restart `hermes dashboard` if running separat
 hermes setup                # choose Fetch, paste the Fetch setup code, then scan/paste the setup link
 ```
 
-On Linux, after a plugin install or `hermes plugins update`: install Docker or
-Podman if needed, then bootstrap the computer once. `hermes setup` (Fetch)
+On Linux, after a plugin install or `hermes plugins update`: install Docker if
+needed, then bootstrap the computer once. `hermes setup` (Fetch)
 prints the exact next steps and can start the container after one confirmation.
 After that, `unless-stopped` brings the computer back with the engine, and
 Fetch Watch just works.
@@ -110,7 +110,7 @@ continue; no private input needs to be pasted into chat.
 
 Fetch can watch the computer Hermes is using and, after confirmation, hand
 control to the iPhone. On Linux the default screen is a portable Ubuntu
-container (Docker or Podman) that Hermes drives from the host. Mac and Windows
+container (Docker) that Hermes drives from the host. Mac and Windows
 keep their native desktops; the same Ubuntu image is an optional extra there,
 not a replacement for Xcode, Simulator, or real Windows apps. The plugin
 connects only to a loopback VNC port, then carries the pixels and input over
@@ -202,9 +202,10 @@ XFCE inside the container, maps RFB only to `127.0.0.1:5901`, and reuses the
 existing Fetch loopback bridge. Fedora Wayland is a first-class case: do not
 scrape the physical login session.
 
-Update the plugin, then (Linux) install Docker or Podman if needed, bootstrap
-once, and Fetch Watch just works. Setup fails closed if neither engine is
-available; it does not silently `apt`/`dnf` XFCE onto the host. `hermes setup`
+Update the plugin, then (Linux) install Docker if needed, bootstrap
+once, and Fetch Watch just works. Setup fails closed if Docker is missing
+or the daemon is not running; it does not silently `apt`/`dnf` XFCE onto
+the host. `hermes setup`
 (Fetch) and plugin load print copy-pasteable next steps when the computer is
 not running:
 
@@ -281,7 +282,7 @@ target so later plugin starts do not re-advertise this desktop.
 
 `linux-vps/` still installs TigerVNC + XFCE on the host via `apt` or `dnf`.
 That is no longer the default Linux path. Use it only when you cannot run
-Docker or Podman. The container setup above is what Fedora Wayland and VPS
+Docker. The container setup above is what Fedora Wayland and VPS
 hosts should run.
 
 ## Reconfigure or reset

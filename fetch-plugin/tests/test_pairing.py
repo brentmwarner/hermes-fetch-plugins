@@ -480,12 +480,12 @@ def test_guide_linux_computer_prints_engine_missing_steps(monkeypatch, capsys) -
         def computer_readiness():
             return {
                 "state": "engine-missing",
-                "message": "requires Docker or Podman\n  sudo apt-get install -y docker.io",
+                "message": "requires Docker\n  sudo apt-get install -y docker.io",
             }
 
         @staticmethod
         def guide_linux_computer(*, offer_bootstrap=True, printer=print):
-            printer("requires Docker or Podman")
+            printer("requires Docker")
             printer("  sudo apt-get install -y docker.io")
             printer("  ~/.hermes/plugins/fetch/linux-computer/manage-computer.sh bootstrap")
             return "engine-missing"
@@ -495,6 +495,7 @@ def test_guide_linux_computer_prints_engine_missing_steps(monkeypatch, capsys) -
 
     assert pairing._guide_linux_computer() == "engine-missing"
     out = capsys.readouterr().out
-    assert "requires Docker or Podman" in out
+    assert "requires Docker" in out
+    assert "Podman" not in out
     assert "sudo apt-get install -y docker.io" in out
     assert "manage-computer.sh bootstrap" in out
