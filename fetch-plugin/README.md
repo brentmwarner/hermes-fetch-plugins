@@ -103,6 +103,17 @@ do not run a Linux container. The plugin connects only to a loopback VNC port,
 then carries the pixels and input over the existing authenticated outbound
 Fetch relay.
 
+On Hermes versions that advertise foreground delivery in the public
+`computer_use` schema, input requested from a Fetch conversation is delivered
+to the visible foreground window so the streamed desktop and the agent's target
+cannot drift apart. Older Hermes versions keep their original input behavior
+instead of receiving unsupported arguments. Window moves and resizes use
+cua-driver's verified frame operation
+(`fetch_window_control`) instead of assuming a posted title-bar drag worked;
+the operation succeeds only after an independent geometry readback and a
+post-move visibility check. Other Hermes surfaces keep the upstream
+background-computer behavior.
+
 Every session starts in **Watch** mode. Choosing **Control** asks for
 confirmation and stops the current Hermes turn started from Fetch before the
 phone can send input. The MVP cannot pause a separate Hermes process or turn
