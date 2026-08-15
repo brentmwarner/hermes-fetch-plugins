@@ -204,33 +204,34 @@ Lifecycle commands are `./manage-user-service.sh status` and
 terminates the Fetch computer bridge, and removes the persisted computer
 target so later plugin starts do not re-advertise this desktop.
 
-#### Linux VPS or monitorless Linux
+#### Private virtual Linux desktop (recommended for VPS and Wayland PCs)
 
 Fetch can show a dedicated 1920×1080 XFCE desktop even when Linux has no
 monitor. The screen is a virtual TigerVNC display, so Hermes and the phone see
 the same desktop while no physical display exists. Its framebuffer stays
 1920×1080 even when the machine running Fetch has a larger physical display.
+This is also the recommended mode on a Fedora or Ubuntu workstation using
+Wayland: it gives Hermes a private, predictable desktop without changing the
+person's physical login session.
 
-The included user service targets Ubuntu 24.04 and keeps the desktop available
-after disconnecting SSH. Run Hermes and the service as a dedicated,
-unprivileged Linux user on the VPS; do not reuse a personal desktop account.
-That user's home directory is the boundary for the agent environment:
+The included user service supports Ubuntu/Debian and Fedora and keeps the
+desktop available after disconnecting SSH or turning off the physical monitor.
+Run Hermes and the service as a dedicated, unprivileged Linux user when
+possible. That user's home directory is the boundary for the agent environment.
+After pairing Fetch, run the one-command bootstrap from the installed plugin:
 
 ```bash
-sudo apt update
-sudo apt install xfce4 dbus-x11 tigervnc-standalone-server
-sudo loginctl enable-linger "$(id -un)"
-
-cd <plugin-checkout>/fetch-plugin/linux-vps
-./manage-user-services.sh install
+cd ~/.hermes/plugins/fetch/linux-vps
+./manage-user-services.sh bootstrap
 ```
 
-`DISPLAY=:1` makes GUI programs launched by Hermes use the same virtual desktop
-that Fetch streams. The installer persists it with the loopback target, starts
-the dedicated Fetch computer bridge, and exits successfully only after the
-1920×1080 desktop and relay uplink both answer readiness checks. It also refuses
-to install unless login persistence is enabled, so a passing setup cannot stop
-merely because the SSH session closes.
+The bootstrap uses `apt` or `dnf` to install XFCE, D-Bus, and TigerVNC, enables
+login persistence, and installs the user services. `DISPLAY=:1` makes GUI
+programs launched by Hermes use the same virtual desktop that Fetch streams.
+It also enables Hermes' headed local-browser mode and restarts the Fetch-owned
+Hermes runtime so `browser_*` and `computer_use` actions appear on that display
+instead of in a headless session. Setup exits successfully only after the
+1920×1080 desktop and authenticated relay uplink both answer readiness checks.
 
 The VNC port is deliberately private: TigerVNC listens on `127.0.0.1:5901`.
 The VNC service uses no VNC password because it is unreachable off-host and the
@@ -245,8 +246,8 @@ Useful lifecycle commands:
 ```
 
 Uninstall stops and removes the user service, terminates the Fetch computer
-bridge, and removes the persisted computer target so later plugin starts do
-not re-advertise this host. It leaves the Ubuntu packages installed so it
+bridge, and removes the persisted computer/display settings so later plugin
+starts do not re-advertise this host. It leaves OS packages installed so it
 does not disturb other desktop workloads.
 
 ## Reconfigure or reset

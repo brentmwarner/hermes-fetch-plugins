@@ -4,8 +4,10 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/tigervncserver :1 -fg -localhost yes -SecurityTypes None -geometry 1920x1080 -depth 24 -xstartup /usr/bin/startxfce4
-Restart=on-failure
+Environment=DISPLAY=:1
+Environment=XAUTHORITY=%h/.local/share/fetch-computer/Xauthority
+ExecStart=%h/.local/share/fetch-computer/run-virtual-desktop.sh
+Restart=always
 RestartSec=3
 
 [Install]

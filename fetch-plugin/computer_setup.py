@@ -23,12 +23,17 @@ KIND_ENV = "HERMES_FETCH_COMPUTER_KIND"
 LEGACY_TARGET_ENV = "HERMES_FETCH_COMPUTER_WS_URL"
 TUNNEL_ENV = "HERMES_FETCH_TUNNEL_ENABLED"
 DISPLAY_ENV = "DISPLAY"
+XAUTHORITY_ENV = "XAUTHORITY"
+BROWSER_HEADED_ENV = "AGENT_BROWSER_HEADED"
 VNC_PASSWORD_ENV = "HERMES_FETCH_COMPUTER_VNC_PASSWORD"
 COMPUTER_ENV_KEYS = (
     TARGET_ENV,
     NAME_ENV,
     KIND_ENV,
     LEGACY_TARGET_ENV,
+    DISPLAY_ENV,
+    XAUTHORITY_ENV,
+    BROWSER_HEADED_ENV,
     VNC_PASSWORD_ENV,
 )
 
@@ -131,6 +136,10 @@ def remove_environment_keys(path: Path, keys: tuple[str, ...] | list[str] | set[
 
 def _computer_runtime_module():
     return _load_sibling("fetch_plugin_computer_runtime_setup", "_computer_runtime.py")
+
+
+def _relay_runtime_module():
+    return _load_sibling("fetch_plugin_runtime_setup", "_runtime.py")
 
 
 def disable_computer() -> None:
@@ -264,6 +273,8 @@ def configure(
     kind: str,
     name: str,
     display: str,
+    xauthority: str,
+    headed_browser: bool,
     vnc_password: str,
     wait_seconds: float,
     check_only: bool,
@@ -280,6 +291,10 @@ def configure(
             values[NAME_ENV] = name
         if display:
             values[DISPLAY_ENV] = display
+        if xauthority:
+            values[XAUTHORITY_ENV] = xauthority
+        if headed_browser:
+            values[BROWSER_HEADED_ENV] = "1"
         if vnc_password:
             values[VNC_PASSWORD_ENV] = vnc_password
         persist_environment(hermes_home() / ".env", values)
@@ -293,6 +308,19 @@ def configure(
         runtime_status = computer_runtime.ensure_computer_runtime()
         if runtime_status not in {"started", "already-running", "self"}:
             raise SetupError(f"Could not start the Fetch computer bridge: {runtime_status}")
+
+        relay_runtime = _relay_runtime_module()
+        relay_handoff = relay_runtime.restart_relay_runtime_for_reconfigure()
+        if relay_handoff.get("left_running"):
+            raise SetupError(
+                "The desktop is configured, but a manually managed Hermes gateway is still running "
+                "with the old display environment. Restart that gateway, then rerun this check."
+            )
+        relay_runtime_status = relay_runtime.ensure_relay_runtime()
+        if relay_runtime_status not in {"started", "already-running", "self"}:
+            raise SetupError(
+                f"Could not restart the Hermes runtime on the visible desktop: {relay_runtime_status}"
+            )
     return wait_for_relay(credentials, wait_seconds=wait_seconds)
 
 
@@ -307,6 +335,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--kind")
     parser.add_argument("--name", default="")
     parser.add_argument("--display", default="")
+    parser.add_argument("--xauthority", default="")
+    parser.add_argument(
+        "--headed-browser",
+        action="store_true",
+        help="Run Hermes' local browser visibly on the streamed desktop.",
+    )
     parser.add_argument(
         "--ask-vnc-password",
         action="store_true",
@@ -337,6 +371,8 @@ def main(argv: list[str] | None = None) -> int:
             kind=args.kind,
             name=args.name,
             display=args.display,
+            xauthority=args.xauthority,
+            headed_browser=args.headed_browser,
             vnc_password=vnc_password,
             wait_seconds=args.wait_seconds,
             check_only=args.check_only,

@@ -43,6 +43,8 @@ case "$action" in
       --target tcp://127.0.0.1:5900 \
       --kind "Linux desktop" \
       --display "${DISPLAY}" \
+      --xauthority "${XAUTHORITY:-${HOME}/.Xauthority}" \
+      --headed-browser \
       --wait-seconds 60
     ;;
   uninstall)
@@ -58,6 +60,8 @@ case "$action" in
       --target tcp://127.0.0.1:5900 \
       --kind "Linux desktop" \
       --display "${DISPLAY:-:0}" \
+      --xauthority "${XAUTHORITY:-${HOME}/.Xauthority}" \
+      --headed-browser \
       --wait-seconds 5 \
       --check-only
     ;;
