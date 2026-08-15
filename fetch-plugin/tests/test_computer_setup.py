@@ -298,14 +298,16 @@ def test_wait_for_relay_rejects_incompatible_relay(monkeypatch) -> None:
 
 def test_configure_starts_dedicated_bridge_before_reporting_ready(tmp_path, monkeypatch) -> None:
     calls = []
+    runtime_environments = []
 
     class FakeRuntime:
         def restart_computer_runtime(self):
             calls.append("restart")
             return True
 
-        def ensure_computer_runtime(self):
+        def ensure_computer_runtime(self, **kwargs):
             calls.append("start")
+            runtime_environments.append(kwargs["environment"])
             return "started"
 
     class FakeRelayRuntime:
@@ -313,8 +315,9 @@ def test_configure_starts_dedicated_bridge_before_reporting_ready(tmp_path, monk
             calls.append("restart-relay")
             return {"stopped": [42], "left_running": []}
 
-        def ensure_relay_runtime(self):
+        def ensure_relay_runtime(self, **kwargs):
             calls.append("start-relay")
+            runtime_environments.append(kwargs["environment"])
             return "started"
 
     monkeypatch.setattr(
@@ -328,6 +331,7 @@ def test_configure_starts_dedicated_bridge_before_reporting_ready(tmp_path, monk
         lambda: {"relay_url": "https://relay", "agent_id": "agent", "agent_secret": "secret"},
     )
     monkeypatch.setattr(setup, "hermes_home", lambda: tmp_path)
+    monkeypatch.setenv(setup.WAYLAND_DISPLAY_ENV, "wayland-0")
     monkeypatch.setattr(setup, "_computer_runtime_module", lambda: FakeRuntime())
     monkeypatch.setattr(setup, "_relay_runtime_module", lambda: FakeRelayRuntime())
     monkeypatch.setattr(
@@ -373,6 +377,11 @@ def test_configure_starts_dedicated_bridge_before_reporting_ready(tmp_path, monk
     assert 'HERMES_FETCH_COMPUTER_NAME="Hermes VPS"' in saved
     assert 'HERMES_FETCH_COMPUTER_VNC_PASSWORD="dedicated-password"' in saved
     assert (tmp_path / ".env").stat().st_mode & 0o777 == 0o600
+    assert setup.os.environ[setup.WAYLAND_DISPLAY_ENV] == "wayland-0"
+    assert len(runtime_environments) == 2
+    for environment in runtime_environments:
+        assert environment[setup.WAYLAND_DISPLAY_ENV] == ""
+        assert environment[setup.XDG_SESSION_TYPE_ENV] == "x11"
 
 
 def test_non_virtual_setup_removes_saved_virtual_settings_without_mutating_session(
@@ -386,7 +395,7 @@ def test_non_virtual_setup_removes_saved_virtual_settings_without_mutating_sessi
         def restart_computer_runtime(self):
             return True
 
-        def ensure_computer_runtime(self):
+        def ensure_computer_runtime(self, **kwargs):
             return "started"
 
     class FakeRelayRuntime:
@@ -433,7 +442,7 @@ def test_configure_requires_a_managed_runtime_to_adopt_the_visible_display(
         def restart_computer_runtime(self):
             return True
 
-        def ensure_computer_runtime(self):
+        def ensure_computer_runtime(self, **kwargs):
             return "started"
 
     class FakeRelayRuntime:
@@ -472,7 +481,7 @@ def test_configure_accepts_a_restarted_manual_gateway(tmp_path, monkeypatch) -> 
         def restart_computer_runtime(self):
             return True
 
-        def ensure_computer_runtime(self):
+        def ensure_computer_runtime(self, **kwargs):
             return "started"
 
     class FakeRelayRuntime:

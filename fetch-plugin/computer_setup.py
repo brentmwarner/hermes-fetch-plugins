@@ -404,7 +404,9 @@ def configure(
         if vnc_password:
             values[VNC_PASSWORD_ENV] = vnc_password
         persist_environment(hermes_home() / ".env", values)
-        os.environ.update(values)
+        os.environ.update(
+            {key: value for key, value in values.items() if key not in VIRTUAL_DESKTOP_ENV_KEYS}
+        )
         if kind != "Virtual Linux desktop":
             remove_environment_keys(hermes_home() / ".env", VIRTUAL_DESKTOP_ENV_KEYS)
         if not vnc_password:
@@ -413,7 +415,15 @@ def configure(
         computer_runtime = _computer_runtime_module()
         if not computer_runtime.restart_computer_runtime():
             raise SetupError("Could not restart the Fetch computer bridge.")
-        runtime_status = computer_runtime.ensure_computer_runtime()
+        runtime_environment = os.environ.copy()
+        if kind == "Virtual Linux desktop":
+            runtime_environment.update(VIRTUAL_DESKTOP_ENV_VALUES)
+        if kind == "Virtual Linux desktop":
+            runtime_status = computer_runtime.ensure_computer_runtime(
+                environment=runtime_environment
+            )
+        else:
+            runtime_status = computer_runtime.ensure_computer_runtime()
         if runtime_status not in {"started", "already-running", "self"}:
             raise SetupError(f"Could not start the Fetch computer bridge: {runtime_status}")
 
@@ -430,7 +440,12 @@ def configure(
                 )
         else:
             _clear_gateway_restart_state()
-            relay_runtime_status = relay_runtime.ensure_relay_runtime()
+            if kind == "Virtual Linux desktop":
+                relay_runtime_status = relay_runtime.ensure_relay_runtime(
+                    environment=runtime_environment
+                )
+            else:
+                relay_runtime_status = relay_runtime.ensure_relay_runtime()
             if relay_runtime_status not in {"started", "already-running", "self"}:
                 raise SetupError(
                     f"Could not restart the Hermes runtime on the visible desktop: "

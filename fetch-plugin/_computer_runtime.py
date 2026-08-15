@@ -185,7 +185,7 @@ asyncio.run(main())
 """
 
 
-def ensure_computer_runtime() -> str:
+def ensure_computer_runtime(*, environment: dict[str, str] | None = None) -> str:
     if os.environ.get(AUTOSTART_ENV, "").strip() == "1":
         return "self"
     if not _target():
@@ -201,7 +201,7 @@ def ensure_computer_runtime() -> str:
     try:
         runtime_dir.mkdir(parents=True, exist_ok=True)
         log_dir.mkdir(parents=True, exist_ok=True)
-        env = os.environ.copy()
+        env = dict(environment) if environment is not None else os.environ.copy()
         env[AUTOSTART_ENV] = "1"
         env["PYTHONPATH"] = runtime._child_pythonpath()
         with open(log_dir / _LOG_FILE, "ab") as log_file:

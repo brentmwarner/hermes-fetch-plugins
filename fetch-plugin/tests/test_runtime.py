@@ -51,6 +51,25 @@ def test_ensure_relay_runtime_starts_child_with_tunnel_env(tmp_path, monkeypatch
     assert kwargs["stderr"] == runtime.subprocess.STDOUT
 
 
+def test_ensure_relay_runtime_uses_explicit_child_environment(tmp_path, monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(runtime, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(runtime, "_active_runtime_pid", lambda **kwargs: None)
+    monkeypatch.setattr(runtime, "_child_pythonpath", lambda: "/tmp/hermes-agent")
+    monkeypatch.setattr(runtime, "_child_python_executable", lambda: "/tmp/hermes-venv/bin/python")
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "Popen",
+        lambda args, **kwargs: calls.append((args, kwargs)) or FakeProcess(),
+    )
+    monkeypatch.delenv(runtime.DISABLE_AUTOSTART_ENV, raising=False)
+    monkeypatch.delenv(runtime.AUTOSTART_RUNTIME_ENV, raising=False)
+
+    assert runtime.ensure_relay_runtime(environment={"DISPLAY": ":1"}) == "started"
+    assert calls[0][1]["env"]["DISPLAY"] == ":1"
+    assert runtime.TUNNEL_ENABLED_ENV in calls[0][1]["env"]
+
+
 def test_child_python_executable_prefers_hermes_venv(tmp_path, monkeypatch) -> None:
     python_path = tmp_path / "venv" / "bin" / "python"
     python_path.parent.mkdir(parents=True)

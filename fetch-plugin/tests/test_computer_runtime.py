@@ -85,6 +85,27 @@ def test_ensure_starts_dedicated_computer_process(tmp_path, monkeypatch) -> None
     assert calls[0][1]["env"][computer_runtime.AUTOSTART_ENV] == "1"
 
 
+def test_ensure_computer_runtime_uses_explicit_child_environment(tmp_path, monkeypatch) -> None:
+    credentials = tmp_path / "push" / "fetch-relay.json"
+    credentials.parent.mkdir()
+    credentials.write_text("{}", encoding="utf-8")
+    calls = []
+    monkeypatch.setenv(computer_runtime.TARGET_ENV, "tcp://127.0.0.1:5901")
+    monkeypatch.delenv(computer_runtime.AUTOSTART_ENV, raising=False)
+    monkeypatch.setattr(computer_runtime, "_load_runtime_module", lambda: _fake_runtime(tmp_path))
+    monkeypatch.setattr(computer_runtime, "_credentials_path", lambda: credentials)
+    monkeypatch.setattr(computer_runtime, "_active_pid", lambda **kwargs: None)
+    monkeypatch.setattr(
+        computer_runtime.subprocess,
+        "Popen",
+        lambda args, **kwargs: calls.append((args, kwargs)) or FakeProcess(),
+    )
+
+    assert computer_runtime.ensure_computer_runtime(environment={"DISPLAY": ":1"}) == "started"
+    assert calls[0][1]["env"]["DISPLAY"] == ":1"
+    assert computer_runtime.TARGET_ENV not in calls[0][1]["env"]
+
+
 def test_ensure_does_not_start_before_pairing(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv(computer_runtime.TARGET_ENV, "tcp://127.0.0.1:5901")
     monkeypatch.delenv(computer_runtime.AUTOSTART_ENV, raising=False)
