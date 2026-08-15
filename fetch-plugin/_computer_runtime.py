@@ -39,6 +39,23 @@ _CONFIG_ENVS = (
 )
 
 
+def _child_environment(environment: dict[str, str] | None) -> dict[str, str]:
+    """Return an explicit child environment with Fetch configuration retained.
+
+    Desktop setup supplies a scrubbed environment to keep stale virtual-display
+    state out of a physical runtime. Retain the Fetch settings the child bridge
+    reads when a caller provides a narrower environment for direct use.
+    """
+
+    if environment is None:
+        return os.environ.copy()
+    child_environment = dict(environment)
+    for key in _CONFIG_ENVS:
+        if key not in child_environment and key in os.environ:
+            child_environment[key] = os.environ[key]
+    return child_environment
+
+
 def _load_runtime_module():
     existing = sys.modules.get("fetch_plugin_runtime")
     if existing is not None:
@@ -201,7 +218,7 @@ def ensure_computer_runtime(*, environment: dict[str, str] | None = None) -> str
     try:
         runtime_dir.mkdir(parents=True, exist_ok=True)
         log_dir.mkdir(parents=True, exist_ok=True)
-        env = dict(environment) if environment is not None else os.environ.copy()
+        env = _child_environment(environment)
         env[AUTOSTART_ENV] = "1"
         env["PYTHONPATH"] = runtime._child_pythonpath()
         with open(log_dir / _LOG_FILE, "ab") as log_file:
