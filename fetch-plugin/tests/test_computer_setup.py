@@ -387,7 +387,10 @@ def test_configure_starts_dedicated_bridge_before_reporting_ready(tmp_path, monk
 def test_non_virtual_setup_removes_saved_virtual_settings_without_mutating_session(
     tmp_path, monkeypatch
 ) -> None:
-    setup.persist_environment(tmp_path / ".env", setup.VIRTUAL_DESKTOP_ENV_VALUES)
+    setup.persist_environment(
+        tmp_path / ".env",
+        {setup.KIND_ENV: "Virtual Linux desktop", **setup.VIRTUAL_DESKTOP_ENV_VALUES},
+    )
     for key, value in setup.VIRTUAL_DESKTOP_ENV_VALUES.items():
         monkeypatch.setenv(key, value)
     runtime_environments = []
@@ -439,6 +442,22 @@ def test_non_virtual_setup_removes_saved_virtual_settings_without_mutating_sessi
     for environment in runtime_environments:
         for key in setup.VIRTUAL_DESKTOP_ENV_KEYS:
             assert key not in environment
+
+
+def test_runtime_environment_keeps_physical_x11_values_without_virtual_configuration(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(setup.XDG_SESSION_TYPE_ENV, "x11")
+    monkeypatch.setenv(setup.GDK_BACKEND_ENV, "x11")
+    monkeypatch.setenv(setup.QT_QPA_PLATFORM_ENV, "xcb")
+    monkeypatch.setenv(setup.DBUS_SESSION_BUS_ADDRESS_ENV, "unix:path=/run/user/1000/bus")
+
+    environment = setup._runtime_environment("Linux desktop")
+
+    assert environment[setup.XDG_SESSION_TYPE_ENV] == "x11"
+    assert environment[setup.GDK_BACKEND_ENV] == "x11"
+    assert environment[setup.QT_QPA_PLATFORM_ENV] == "xcb"
+    assert environment[setup.DBUS_SESSION_BUS_ADDRESS_ENV] == "unix:path=/run/user/1000/bus"
 
 
 def test_configure_requires_a_managed_runtime_to_adopt_the_visible_display(
