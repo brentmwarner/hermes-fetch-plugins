@@ -384,15 +384,23 @@ def test_configure_starts_dedicated_bridge_before_reporting_ready(tmp_path, monk
         assert environment[setup.XDG_SESSION_TYPE_ENV] == "x11"
 
 
-def test_non_virtual_setup_clears_stale_virtual_settings_from_the_process(
+def test_non_virtual_setup_restores_physical_session_for_all_later_runtimes(
     tmp_path, monkeypatch
 ) -> None:
+    startup_session = {
+        setup.XDG_SESSION_TYPE_ENV: "x11",
+        setup.GDK_BACKEND_ENV: "x11",
+        setup.QT_QPA_PLATFORM_ENV: "xcb",
+        setup.DBUS_SESSION_BUS_ADDRESS_ENV: "unix:path=/run/user/1000/bus",
+    }
     setup.persist_environment(
         tmp_path / ".env",
         {setup.KIND_ENV: "Virtual Linux desktop", **setup.VIRTUAL_DESKTOP_ENV_VALUES},
     )
     for key, value in setup.VIRTUAL_DESKTOP_ENV_VALUES.items():
         monkeypatch.setenv(key, value)
+    monkeypatch.setattr(setup, "_PROCESS_START_ENVIRONMENT", startup_session)
+    monkeypatch.setattr(setup, "_VIRTUAL_DESKTOP_RECONCILIATION_REQUIRED", False)
     runtime_environments = []
 
     class FakeComputerRuntime:
@@ -434,17 +442,28 @@ def test_non_virtual_setup_clears_stale_virtual_settings_from_the_process(
         check_only=False,
     )
 
+    setup.configure(
+        target="tcp://127.0.0.1:5900",
+        kind="Linux desktop",
+        name="",
+        display=":0",
+        xauthority="/tmp/Xauthority",
+        headed_browser=True,
+        vnc_password="",
+        wait_seconds=5,
+        check_only=False,
+    )
+
     saved = (tmp_path / ".env").read_text(encoding="utf-8")
     for key in setup.VIRTUAL_DESKTOP_ENV_KEYS:
         assert key not in saved
-        assert key not in setup.os.environ
-    assert len(runtime_environments) == 2
+        assert setup.os.environ[key] == setup.VIRTUAL_DESKTOP_ENV_VALUES[key]
+    assert len(runtime_environments) == 4
     for environment in runtime_environments:
-        for key in setup.VIRTUAL_DESKTOP_ENV_KEYS:
+        for key, value in startup_session.items():
+            assert environment[key] == value
+        for key in set(setup.VIRTUAL_DESKTOP_ENV_KEYS) - set(startup_session):
             assert key not in environment
-    later_environment = setup._runtime_environment("Linux desktop")
-    for key in setup.VIRTUAL_DESKTOP_ENV_KEYS:
-        assert key not in later_environment
 
 
 def test_runtime_environment_keeps_physical_x11_values_without_virtual_configuration(
