@@ -384,7 +384,7 @@ def test_configure_starts_dedicated_bridge_before_reporting_ready(tmp_path, monk
         assert environment[setup.XDG_SESSION_TYPE_ENV] == "x11"
 
 
-def test_non_virtual_setup_removes_saved_virtual_settings_without_mutating_session(
+def test_non_virtual_setup_clears_stale_virtual_settings_from_the_process(
     tmp_path, monkeypatch
 ) -> None:
     setup.persist_environment(
@@ -437,11 +437,14 @@ def test_non_virtual_setup_removes_saved_virtual_settings_without_mutating_sessi
     saved = (tmp_path / ".env").read_text(encoding="utf-8")
     for key in setup.VIRTUAL_DESKTOP_ENV_KEYS:
         assert key not in saved
-        assert setup.os.environ[key] == setup.VIRTUAL_DESKTOP_ENV_VALUES[key]
+        assert key not in setup.os.environ
     assert len(runtime_environments) == 2
     for environment in runtime_environments:
         for key in setup.VIRTUAL_DESKTOP_ENV_KEYS:
             assert key not in environment
+    later_environment = setup._runtime_environment("Linux desktop")
+    for key in setup.VIRTUAL_DESKTOP_ENV_KEYS:
+        assert key not in later_environment
 
 
 def test_runtime_environment_keeps_physical_x11_values_without_virtual_configuration(
