@@ -59,6 +59,17 @@ hermes gateway restart      # (and restart `hermes dashboard` if running separat
 hermes setup                # choose Fetch, paste the Fetch setup code, then scan/paste the setup link
 ```
 
+On Linux, after a plugin install or `hermes plugins update`: install Docker or
+Podman if needed, then bootstrap the computer once. `hermes setup` (Fetch)
+prints the exact next steps and can start the container after one confirmation.
+After that, `unless-stopped` brings the computer back with the engine, and
+Fetch Watch just works.
+
+```bash
+# Linux, once per host:
+~/.hermes/plugins/fetch/linux-computer/manage-computer.sh bootstrap
+```
+
 Before `hermes setup`, open Fetch on the phone, sign in, and create a setup
 code. That code enrolls the agent into your Fetch account; the relay link shown
 afterward pairs this phone to the enrolled agent. No Apple account, no `.p8`, no
@@ -191,13 +202,14 @@ XFCE inside the container, maps RFB only to `127.0.0.1:5901`, and reuses the
 existing Fetch loopback bridge. Fedora Wayland is a first-class case: do not
 scrape the physical login session.
 
-Install Docker or Podman first. Setup fails closed if neither engine is
-available; it does not silently `apt`/`dnf` XFCE onto the host. After pairing
-Fetch, update the plugin and run:
+Update the plugin, then (Linux) install Docker or Podman if needed, bootstrap
+once, and Fetch Watch just works. Setup fails closed if neither engine is
+available; it does not silently `apt`/`dnf` XFCE onto the host. `hermes setup`
+(Fetch) and plugin load print copy-pasteable next steps when the computer is
+not running:
 
 ```bash
-cd ~/.hermes/plugins/fetch/linux-computer
-./manage-computer.sh bootstrap
+~/.hermes/plugins/fetch/linux-computer/manage-computer.sh bootstrap
 ```
 
 The bootstrap builds the image if needed, starts the `fetch-computer`
@@ -211,10 +223,12 @@ bridge and fail-closes on `GET /v1/agents/computer/status` the same way
 on the virtual desktop. One Hermes install uses one computer container
 (display `:1`). Extra virtual displays can come later.
 
-The default backdrop is the Fetch brand landscape shipped at
-`linux-computer/branding/wallpaper.png` — a soft-focus view of rolling green
-hills, warm golden-hour light, and a pale sky. Replace that file and rebuild
-the image to change the desktop background without a redesign.
+TigerVNC runs at **1280×800** (Grok Bot’s desktop). The default backdrop is
+the Fetch brand landscape shipped at `linux-computer/branding/wallpaper.png`
+— a soft-focus view of rolling green hills, warm golden-hour light, and a
+pale sky. `hsetroot -cover` paints that image onto the framebuffer. Replace
+the PNG and rebuild the image to change the desktop background without a
+redesign.
 
 The VNC port is deliberately private. On Linux the container uses host
 networking so TigerVNC can bind `127.0.0.1:5901` with `-localhost`. On Docker

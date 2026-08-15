@@ -782,6 +782,29 @@ def _spawn_tunnel() -> None:
     log.info("Fetch reverse-tunnel client starting (%s)", start_reason)
 
 
+def _announce_linux_computer_if_needed() -> None:
+    """After a plugin update, tell Linux hosts how to start the computer."""
+
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        linux_computer = _pairing._linux_computer_module()
+        if linux_computer is None:
+            return
+        report = linux_computer.computer_readiness()
+    except Exception:
+        log.debug("Fetch could not check the Linux computer container", exc_info=True)
+        return
+    if report.get("state") in {"ready", "not-linux", ""}:
+        return
+    message = str(report.get("message") or "").strip()
+    if not message:
+        return
+    log.warning("Fetch computer is not ready.\n%s", message)
+    if sys.stderr.isatty() or sys.stdout.isatty():
+        print(message, file=sys.stderr)
+
+
 def register(ctx) -> None:
     _ensure_fetch_cards_skill()
 
@@ -893,5 +916,6 @@ def register(ctx) -> None:
 
     # Reverse tunnel: hold an outbound channel to the relay (gated, default off).
     _spawn_tunnel()
+    _announce_linux_computer_if_needed()
 
     log.info("Fetch plugin registered (push hooks + pairing + reverse tunnel)")

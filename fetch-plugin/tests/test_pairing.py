@@ -393,3 +393,108 @@ def test_interactive_setup_warns_when_computer_bridge_cannot_be_stopped(
     out = capsys.readouterr().out
     assert "could not stop the existing computer bridge" in out
     assert link in out
+
+
+def test_interactive_setup_guides_linux_computer_after_pairing(
+    monkeypatch, tmp_path
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(pairing, "is_pairing_configured", lambda: False)
+    monkeypatch.setattr(pairing, "_inbox_module", lambda: _FakeInbox())
+    monkeypatch.setattr(pairing, "_ensure_dashboard_session_token", lambda: "session-tok")
+    monkeypatch.setattr(pairing, "_runtime_module", lambda: _FakeRuntime())
+    monkeypatch.setattr(pairing, "render_qr", lambda data: None)
+    monkeypatch.setattr(
+        pairing,
+        "_try_build_relay_pairing",
+        lambda: _online_pairing("https://tryfetchapp.com/setup?agent=a1&pairing=p1"),
+    )
+    monkeypatch.setattr(
+        pairing, "_guide_linux_computer", lambda: calls.append("guide") or "ready"
+    )
+
+    pairing.interactive_setup()
+
+    assert calls == ["guide"]
+
+
+def test_interactive_setup_guides_linux_computer_when_reconfigure_is_declined(
+    monkeypatch, tmp_path
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(pairing, "is_pairing_configured", lambda: True)
+    monkeypatch.setattr(pairing, "_inbox_module", lambda: _FakeInbox())
+    monkeypatch.setattr(
+        pairing, "_guide_linux_computer", lambda: calls.append("guide") or "engine-missing"
+    )
+
+    import hermes_cli.cli_output as cli_output
+
+    monkeypatch.setattr(cli_output, "prompt_yes_no", lambda *_args, **_kwargs: False)
+
+    pairing.interactive_setup()
+
+    assert calls == ["guide"]
+
+
+def test_interactive_setup_skips_linux_guide_when_tunnel_is_not_ready(
+    monkeypatch, tmp_path
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(pairing, "is_pairing_configured", lambda: False)
+    monkeypatch.setattr(pairing, "_inbox_module", lambda: _FakeInbox())
+    monkeypatch.setattr(pairing, "_ensure_dashboard_session_token", lambda: "session-tok")
+    monkeypatch.setattr(pairing, "_runtime_module", lambda: _FakeRuntime())
+    monkeypatch.setattr(
+        pairing,
+        "_try_build_relay_pairing",
+        lambda: {
+            "client": _FakeRelayClient(
+                {"ok": False, "agent_online": False, "reason": "agent_offline"}
+            ),
+            "agent_id": "a1",
+            "link": "https://tryfetchapp.com/setup?agent=a1&pairing=p1",
+        },
+    )
+    monkeypatch.setattr(
+        pairing, "_guide_linux_computer", lambda: calls.append("guide") or "ready"
+    )
+
+    pairing.interactive_setup()
+
+    assert calls == []
+
+
+def test_guide_linux_computer_is_silent_off_linux(monkeypatch) -> None:
+    monkeypatch.setattr(pairing.sys, "platform", "darwin")
+
+    assert pairing._guide_linux_computer() == "not-linux"
+
+
+def test_guide_linux_computer_prints_engine_missing_steps(monkeypatch, capsys) -> None:
+    class FakeLinuxComputer:
+        @staticmethod
+        def computer_readiness():
+            return {
+                "state": "engine-missing",
+                "message": "requires Docker or Podman\n  sudo apt-get install -y docker.io",
+            }
+
+        @staticmethod
+        def guide_linux_computer(*, offer_bootstrap=True, printer=print):
+            printer("requires Docker or Podman")
+            printer("  sudo apt-get install -y docker.io")
+            printer("  ~/.hermes/plugins/fetch/linux-computer/manage-computer.sh bootstrap")
+            return "engine-missing"
+
+    monkeypatch.setattr(pairing.sys, "platform", "linux")
+    monkeypatch.setattr(pairing, "_linux_computer_module", lambda: FakeLinuxComputer())
+
+    assert pairing._guide_linux_computer() == "engine-missing"
+    out = capsys.readouterr().out
+    assert "requires Docker or Podman" in out
+    assert "sudo apt-get install -y docker.io" in out
+    assert "manage-computer.sh bootstrap" in out

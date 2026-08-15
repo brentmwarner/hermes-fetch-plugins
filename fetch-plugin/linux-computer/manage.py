@@ -16,17 +16,10 @@ IMAGE_NAME = "fetch-computer:local"
 RFB_HOST = "127.0.0.1"
 RFB_PORT = 5901
 DISPLAY_NAME = ":1"
+GEOMETRY = "1280x800"
 TARGET = f"tcp://{RFB_HOST}:{RFB_PORT}"
 KIND = "Virtual Linux desktop"
 NAME = "Fetch computer"
-ENGINE_MISSING_MESSAGE = (
-    "Fetch computer setup requires Docker or Podman. "
-    "Install Docker or Podman, then rerun this setup."
-)
-ENGINE_NOT_RUNNING_MESSAGE = (
-    "Docker or Podman is installed, but the container engine is not running. "
-    "Start Docker or Podman, then rerun this setup."
-)
 
 
 class ComputerError(RuntimeError):
@@ -82,14 +75,54 @@ def engine_daemon_ready(engine: str, *, timeout: float = 8.0) -> bool:
     return result.returncode == 0
 
 
+def bootstrap_command() -> str:
+    return f"{image_dir() / 'manage-computer.sh'} bootstrap"
+
+
+def engine_missing_instructions() -> str:
+    return (
+        "Fetch computer setup requires Docker or Podman. "
+        "Install an engine, start it, then bootstrap once.\n"
+        "\n"
+        "  Ubuntu/Debian:\n"
+        "    sudo apt-get update && sudo apt-get install -y docker.io\n"
+        "    sudo systemctl enable --now docker\n"
+        "  Fedora:\n"
+        "    sudo dnf install -y podman\n"
+        "    # or: sudo dnf install -y docker && sudo systemctl enable --now docker\n"
+        "\n"
+        f"  Then run:\n    {bootstrap_command()}"
+    )
+
+
+def engine_not_running_instructions() -> str:
+    return (
+        "Docker or Podman is installed, but the container engine is not running.\n"
+        "\n"
+        "  Docker:  sudo systemctl start docker\n"
+        "  Podman:  run `podman info`, then start the user session if needed\n"
+        "\n"
+        f"  Then run:\n    {bootstrap_command()}"
+    )
+
+
+def container_missing_instructions() -> str:
+    return (
+        "The Fetch computer container is not running. Start it once; after that "
+        "the engine restart policy (`unless-stopped`) brings it back automatically.\n"
+        "\n"
+        f"  {bootstrap_command()}"
+    )
+
+
 def detect_engine() -> str:
     binaries = engine_binaries()
     if not binaries:
-        raise ComputerError(ENGINE_MISSING_MESSAGE)
+        raise ComputerError(engine_missing_instructions())
     for engine in binaries:
         if engine_daemon_ready(engine):
             return engine
-    raise ComputerError(ENGINE_NOT_RUNNING_MESSAGE)
+    raise ComputerError(engine_not_running_instructions())
 
 
 def reject_non_loopback_publish(args: list[str]) -> list[str]:
@@ -152,6 +185,8 @@ def container_run_args(
             "-e",
             f"FETCH_RFB_PORT={str(RFB_PORT)}",
             "-e",
+            f"FETCH_GEOMETRY={GEOMETRY}",
+            "-e",
             "HOME=/home/fetch",
             "-v",
             f"{home_dir}:/home/fetch",
@@ -172,6 +207,65 @@ def container_exists(engine: str, name: str = CONTAINER_NAME) -> bool:
         check=False,
     )
     return result.returncode == 0
+
+
+def container_running(engine: str, name: str = CONTAINER_NAME) -> bool:
+    result = subprocess.run(
+        [engine, "inspect", "-f", "{{.State.Running}}", name],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0 and result.stdout.strip().lower() == "true"
+
+
+def computer_readiness(*, platform: str | None = None) -> dict[str, str]:
+    if not uses_host_network(platform):
+        return {"state": "not-linux", "message": ""}
+    binaries = engine_binaries()
+    if not binaries:
+        return {"state": "engine-missing", "message": engine_missing_instructions()}
+    ready_engine = next((engine for engine in binaries if engine_daemon_ready(engine)), None)
+    if ready_engine is None:
+        return {"state": "engine-not-running", "message": engine_not_running_instructions()}
+    if container_running(ready_engine):
+        return {
+            "state": "ready",
+            "engine": ready_engine,
+            "message": "Fetch computer is running. Fetch Watch can use this desktop.",
+        }
+    return {
+        "state": "container-absent",
+        "engine": ready_engine,
+        "message": container_missing_instructions(),
+    }
+
+
+def guide_linux_computer(*, offer_bootstrap: bool = True, printer=print) -> str:
+    """Print copy-pasteable next steps and optionally start the container."""
+
+    report = computer_readiness()
+    if report["state"] == "not-linux":
+        return "not-linux"
+    printer(report["message"])
+    if report["state"] != "container-absent" or not offer_bootstrap:
+        return report["state"]
+    if not sys.stdin.isatty():
+        return report["state"]
+    try:
+        from hermes_cli.cli_output import prompt_yes_no
+    except Exception:
+        return report["state"]
+    if not prompt_yes_no("Start the Fetch computer container now?", True):
+        return report["state"]
+    try:
+        install()
+    except ComputerError as exc:
+        printer(f"Fetch computer setup failed: {exc}")
+        printer(f"Retry with:\n  {bootstrap_command()}")
+        return "failed"
+    printer("Fetch computer is ready. Fetch Watch can use this desktop.")
+    return "started"
 
 
 def rfb_port_open(host: str = RFB_HOST, port: int = RFB_PORT) -> bool:
@@ -368,7 +462,7 @@ def _parser() -> argparse.ArgumentParser:
         "action",
         nargs="?",
         default="install",
-        choices=("bootstrap", "install", "uninstall", "status", "stop"),
+        choices=("bootstrap", "install", "uninstall", "status", "stop", "guide"),
         help="bootstrap and install are the same: build/run the container, then wire Fetch.",
     )
     parser.add_argument("--wait-seconds", type=float, default=90.0)
@@ -388,6 +482,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.action == "stop":
             result = stop_container()
             print(f"Fetch computer container: {result}")
+        elif args.action == "guide":
+            state = guide_linux_computer(offer_bootstrap=False)
+            return 0 if state in {"ready", "not-linux"} else 1
     except ComputerError as exc:
         print(f"Fetch computer setup failed: {exc}", file=sys.stderr)
         return 1

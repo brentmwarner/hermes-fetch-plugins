@@ -29,7 +29,7 @@ def test_detect_engine_uses_podman_when_docker_daemon_is_down(monkeypatch) -> No
 def test_detect_engine_fails_when_docker_and_podman_are_missing(monkeypatch) -> None:
     monkeypatch.setattr(manage, "engine_binaries", lambda: [])
 
-    with pytest.raises(manage.ComputerError, match="Install Docker or Podman"):
+    with pytest.raises(manage.ComputerError, match="requires Docker or Podman"):
         manage.detect_engine()
 
 
@@ -55,6 +55,7 @@ def test_linux_run_args_use_host_network_and_never_publish_vnc() -> None:
     assert manage.CONTAINER_NAME in args
     assert "--network" in args and "host" in args
     assert "FETCH_VNC_LOCALHOST=1" in args
+    assert "FETCH_GEOMETRY=1280x800" in args
     assert "-p" not in args
     assert "--publish" not in args
     assert "0.0.0.0" not in " ".join(args)
@@ -151,9 +152,12 @@ def test_computer_setup_command_uses_fetch_loopback_contract() -> None:
 
 def test_manager_does_not_install_host_xfce() -> None:
     text = _path.read_text(encoding="utf-8")
-    assert "apt-get" not in text
-    assert "dnf install" not in text
-    assert "Install Docker or Podman" in text
+    assert "xfce" not in text.lower()
+    assert "requires Docker or Podman" in text
+    assert "apt-get install -y docker.io" in text
+    assert "dnf install -y podman" in text
+    assert "subprocess.run([\"apt" not in text
+    assert "subprocess.run([\"dnf" not in text
 
 
 def test_image_keeps_branded_wallpaper_and_loopback_vnc() -> None:
@@ -167,10 +171,12 @@ def test_image_keeps_branded_wallpaper_and_loopback_vnc() -> None:
     assert wallpaper.stat().st_size > 10_000
     assert "branding/wallpaper.png" in dockerfile
     assert "FROM ubuntu:24.04" in dockerfile
+    assert "FETCH_GEOMETRY=1280x800" in dockerfile
     assert "tigervnc-standalone-server" in dockerfile
     assert "xfce4" in dockerfile
     assert "EXPOSE" not in dockerfile
-    assert "1920x1080" in entrypoint
+    assert "1280x800" in entrypoint
+    assert "1920x1080" not in entrypoint
     assert "-localhost" in entrypoint
     assert "hsetroot -cover" in entrypoint
     assert "startxfce4" in entrypoint
@@ -194,3 +200,114 @@ def test_readme_makes_the_container_the_default_linux_computer() -> None:
     assert "Xcode and Simulator cannot run in Ubuntu" in readme
     assert "optional extra" in readme
     assert "branding/wallpaper.png" in readme
+    assert "1280×800" in readme or "1280x800" in readme
+    assert "hermes plugins update" in readme
+    assert "bootstrap" in readme
+    assert "Fetch Watch just works" in readme
+
+
+def test_bootstrap_command_points_at_the_installed_manager() -> None:
+    command = manage.bootstrap_command()
+
+    assert command.endswith("linux-computer/manage-computer.sh bootstrap")
+    assert str(PLUGIN_DIR / "linux-computer" / "manage-computer.sh") in command
+
+
+def test_computer_readiness_is_not_linux_on_macos() -> None:
+    report = manage.computer_readiness(platform="darwin")
+
+    assert report["state"] == "not-linux"
+    assert report["message"] == ""
+
+
+def test_computer_readiness_reports_engine_missing(monkeypatch) -> None:
+    monkeypatch.setattr(manage, "uses_host_network", lambda platform=None: True)
+    monkeypatch.setattr(manage, "engine_binaries", lambda: [])
+
+    report = manage.computer_readiness()
+
+    assert report["state"] == "engine-missing"
+    assert "sudo apt-get install -y docker.io" in report["message"]
+    assert "sudo dnf install -y podman" in report["message"]
+    assert "manage-computer.sh bootstrap" in report["message"]
+
+
+def test_computer_readiness_reports_engine_not_running(monkeypatch) -> None:
+    monkeypatch.setattr(manage, "uses_host_network", lambda platform=None: True)
+    monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
+    monkeypatch.setattr(manage, "engine_daemon_ready", lambda _engine: False)
+
+    report = manage.computer_readiness()
+
+    assert report["state"] == "engine-not-running"
+    assert "sudo systemctl start docker" in report["message"]
+    assert "manage-computer.sh bootstrap" in report["message"]
+
+
+def test_computer_readiness_reports_container_absent(monkeypatch) -> None:
+    monkeypatch.setattr(manage, "uses_host_network", lambda platform=None: True)
+    monkeypatch.setattr(manage, "engine_binaries", lambda: ["podman"])
+    monkeypatch.setattr(manage, "engine_daemon_ready", lambda engine: engine == "podman")
+    monkeypatch.setattr(manage, "container_running", lambda engine, name=manage.CONTAINER_NAME: False)
+
+    report = manage.computer_readiness()
+
+    assert report["state"] == "container-absent"
+    assert report["engine"] == "podman"
+    assert "unless-stopped" in report["message"]
+    assert "manage-computer.sh bootstrap" in report["message"]
+
+
+def test_computer_readiness_reports_ready(monkeypatch) -> None:
+    monkeypatch.setattr(manage, "uses_host_network", lambda platform=None: True)
+    monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
+    monkeypatch.setattr(manage, "engine_daemon_ready", lambda engine: engine == "docker")
+    monkeypatch.setattr(manage, "container_running", lambda engine, name=manage.CONTAINER_NAME: True)
+
+    report = manage.computer_readiness()
+
+    assert report["state"] == "ready"
+    assert "running" in report["message"]
+
+
+def test_guide_prints_copy_pasteable_bootstrap_and_does_not_auto_start(monkeypatch) -> None:
+    printed: list[str] = []
+    monkeypatch.setattr(
+        manage,
+        "computer_readiness",
+        lambda: {
+            "state": "container-absent",
+            "engine": "docker",
+            "message": manage.container_missing_instructions(),
+        },
+    )
+    monkeypatch.setattr(manage.sys.stdin, "isatty", lambda: False)
+
+    def fail_install() -> None:
+        raise AssertionError("guide must not bootstrap without a confirmed TTY")
+
+    monkeypatch.setattr(manage, "install", fail_install)
+
+    state = manage.guide_linux_computer(offer_bootstrap=True, printer=printed.append)
+
+    assert state == "container-absent"
+    assert any("manage-computer.sh bootstrap" in line for line in printed)
+
+
+def test_guide_is_silent_when_not_linux(monkeypatch) -> None:
+    printed: list[str] = []
+    monkeypatch.setattr(
+        manage, "computer_readiness", lambda: {"state": "not-linux", "message": ""}
+    )
+
+    assert manage.guide_linux_computer(printer=printed.append) == "not-linux"
+    assert printed == []
+
+
+def test_compose_sets_grok_bot_geometry() -> None:
+    compose = (PLUGIN_DIR / "linux-computer" / "docker-compose.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "FETCH_GEOMETRY: \"1280x800\"" in compose
+    assert "1920x1080" not in compose

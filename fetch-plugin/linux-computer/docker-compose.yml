@@ -15,6 +15,7 @@ services:
     environment:
       FETCH_VNC_LOCALHOST: "1"
       DISPLAY: ":1"
+      FETCH_GEOMETRY: "1280x800"
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix
       - ${FETCH_COMPUTER_XAUTHORITY:-${HOME}/.local/share/fetch-computer/Xauthority}:/home/fetch/.Xauthority

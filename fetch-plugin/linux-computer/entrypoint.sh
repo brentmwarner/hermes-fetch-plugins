@@ -4,6 +4,7 @@ set -euo pipefail
 display_number="${FETCH_DISPLAY_NUMBER:-1}"
 display_name=":${display_number}"
 rfb_port="${FETCH_RFB_PORT:-5901}"
+geometry="${FETCH_GEOMETRY:-1280x800}"
 localhost_flag="${FETCH_VNC_LOCALHOST:-1}"
 xauthority="${XAUTHORITY:-${HOME:-/home/fetch}/.Xauthority}"
 wallpaper="${FETCH_WALLPAPER:-/usr/share/fetch/wallpaper.png}"
@@ -77,7 +78,7 @@ fi
 
 vnc_args=(
   "$display_name"
-  -geometry 1920x1080
+  -geometry "$geometry"
   -depth 24
   -rfbport "$rfb_port"
   -SecurityTypes None

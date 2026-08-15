@@ -4,6 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     DISPLAY=:1 \
+    FETCH_GEOMETRY=1280x800 \
     FETCH_WALLPAPER=/usr/share/fetch/wallpaper.png
 
 RUN apt-get update \
