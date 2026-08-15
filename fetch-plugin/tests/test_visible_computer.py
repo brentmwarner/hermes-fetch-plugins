@@ -79,6 +79,7 @@ def test_window_move_preserves_size_and_requires_confirmed_readback(
             "session": "fetch-session",
         },
     )
+    assert calls[2] == ("list_windows", {})
 
 
 def test_window_move_rejects_stale_or_hidden_target(visible_computer, monkeypatch):
@@ -105,7 +106,11 @@ def test_window_move_rejects_stale_or_hidden_target(visible_computer, monkeypatc
 @pytest.mark.parametrize(
     "args, message",
     [
-        ({"window_id": 2, "x": 0, "y": 0}, "pid must be a number"),
+        ({"window_id": 2, "x": 0, "y": 0}, "pid must be an integer"),
+        (
+            {"pid": 1.9, "window_id": 2, "x": 0, "y": 0},
+            "pid must be an integer",
+        ),
         ({"pid": 1, "window_id": 2, "x": True, "y": 0}, "x must be a number"),
         (
             {"pid": 1, "window_id": 2, "x": 0, "y": 0, "width": 0},
@@ -131,3 +136,84 @@ def test_window_move_validates_geometry(visible_computer, monkeypatch, args, mes
     result = json.loads(visible_computer.handle_window_control(args))
 
     assert result["error"] == message
+
+
+def test_window_move_restores_frame_if_destination_is_not_visible(
+    visible_computer, monkeypatch
+):
+    calls = []
+    list_count = 0
+
+    def fake_driver_call(tool_name, args):
+        nonlocal list_count
+        calls.append((tool_name, args))
+        if tool_name == "list_windows":
+            list_count += 1
+            return {
+                "windows": [{
+                    "app_name": "TextEdit",
+                    "title": "Test",
+                    "pid": 123,
+                    "window_id": 456,
+                    "is_on_screen": list_count == 1,
+                    "on_current_space": True,
+                    "bounds": {"x": 20, "y": 30, "width": 900, "height": 700},
+                }]
+            }
+        return {"effect": "confirmed", "route": "accessibility"}
+
+    monkeypatch.setattr(visible_computer, "_driver_call", fake_driver_call)
+
+    result = json.loads(visible_computer.handle_window_control(
+        {"pid": 123, "window_id": 456, "x": 100000, "y": 100000},
+        session_id="fetch-session",
+    ))
+
+    assert result["ok"] is False
+    assert "restored" in result["error"]
+    assert calls[-1] == (
+        "set_window_frame",
+        {
+            "pid": 123,
+            "window_id": 456,
+            "x": 20,
+            "y": 30,
+            "width": 900,
+            "height": 700,
+            "session": "fetch-session",
+        },
+    )
+
+
+def test_unconfirmed_move_restores_previous_frame(visible_computer, monkeypatch):
+    calls = []
+
+    def fake_driver_call(tool_name, args):
+        calls.append((tool_name, args))
+        if tool_name == "list_windows":
+            return {
+                "windows": [{
+                    "pid": 123,
+                    "window_id": 456,
+                    "is_on_screen": True,
+                    "on_current_space": True,
+                    "bounds": {"x": 20, "y": 30, "width": 900, "height": 700},
+                }]
+            }
+        if len([call for call in calls if call[0] == "set_window_frame"]) == 1:
+            return {"effect": "unverifiable", "route": "accessibility"}
+        return {"effect": "confirmed", "route": "accessibility"}
+
+    monkeypatch.setattr(visible_computer, "_driver_call", fake_driver_call)
+
+    result = json.loads(visible_computer.handle_window_control(
+        {"pid": 123, "window_id": 456, "x": 100000, "y": 100000},
+        session_id="fetch-session",
+    ))
+
+    assert result["ok"] is False
+    assert result["effect"] == "unverifiable"
+    assert result["restore_effect"] == "confirmed"
+    assert "restored the previous frame" in result["error"]
+    assert calls[-1][1]["x"] == 20
+    assert calls[-1][1]["y"] == 30

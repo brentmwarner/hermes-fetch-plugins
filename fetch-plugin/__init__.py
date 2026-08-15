@@ -506,6 +506,26 @@ _FETCH_VISIBLE_COMPUTER_INPUT_ACTIONS = frozenset({
 })
 
 
+def _computer_use_supports_visible_delivery() -> bool:
+    """Read the installed Hermes schema before injecting foreground args.
+
+    Current Hermes exposes these as a supported public computer_use contract.
+    Older hosts do not; returning False preserves their original request rather
+    than injecting arguments their dispatcher cannot consume.
+    """
+    try:
+        schema_module = importlib.import_module("tools.computer_use.schema")
+        schema = getattr(schema_module, "COMPUTER_USE_SCHEMA", {})
+        parameters = schema.get("parameters", {})
+        properties = parameters.get("properties", {})
+    except (AttributeError, ImportError, TypeError):
+        return False
+    return all(
+        property_name in properties
+        for property_name in ("delivery_mode", "bring_to_front", "raise_window")
+    )
+
+
 def _on_tool_request(
     *,
     tool_name: str = "",
@@ -529,9 +549,13 @@ def _on_tool_request(
     action = str(args.get("action") or "").strip().lower()
     rewritten = dict(args)
     if action in _FETCH_VISIBLE_COMPUTER_INPUT_ACTIONS:
+        if not _computer_use_supports_visible_delivery():
+            return None
         rewritten["delivery_mode"] = "foreground"
         rewritten["bring_to_front"] = True
     elif action == "focus_app":
+        if not _computer_use_supports_visible_delivery():
+            return None
         rewritten["raise_window"] = True
     else:
         return None

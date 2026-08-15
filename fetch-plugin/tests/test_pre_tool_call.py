@@ -97,6 +97,9 @@ def test_fetch_computer_input_is_rewritten_to_visible_foreground(
     plugin, monkeypatch, action
 ):
     monkeypatch.setattr(plugin, "_session_source", lambda session_id: "fetch")
+    monkeypatch.setattr(
+        plugin, "_computer_use_supports_visible_delivery", lambda: True
+    )
 
     result = plugin._on_tool_request(
         tool_name="computer_use",
@@ -116,6 +119,9 @@ def test_fetch_computer_input_is_rewritten_to_visible_foreground(
 
 def test_fetch_focus_app_is_rewritten_to_raise_visible_window(plugin, monkeypatch):
     monkeypatch.setattr(plugin, "_session_source", lambda session_id: "fetch-ios")
+    monkeypatch.setattr(
+        plugin, "_computer_use_supports_visible_delivery", lambda: True
+    )
 
     result = plugin._on_tool_request(
         tool_name="computer_use",
@@ -125,6 +131,19 @@ def test_fetch_focus_app_is_rewritten_to_raise_visible_window(plugin, monkeypatc
 
     assert result is not None
     assert result["args"]["raise_window"] is True
+
+
+def test_older_hermes_keeps_original_computer_request(plugin, monkeypatch):
+    monkeypatch.setattr(plugin, "_session_source", lambda session_id: "fetch")
+    monkeypatch.setattr(
+        plugin, "_computer_use_supports_visible_delivery", lambda: False
+    )
+
+    assert plugin._on_tool_request(
+        tool_name="computer_use",
+        args={"action": "click", "coordinate": [10, 20]},
+        session_id="s1",
+    ) is None
 
 
 @pytest.mark.parametrize("action", ["capture", "list_apps", "list_windows", "wait"])

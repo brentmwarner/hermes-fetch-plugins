@@ -109,6 +109,14 @@ def _number(value: Any, field: str, *, positive: bool = False) -> float:
     return number
 
 
+def _positive_integer(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field} must be an integer")
+    if value <= 0:
+        raise ValueError(f"{field} must be greater than zero")
+    return value
+
+
 def _visible_window(
     windows_payload: dict[str, Any], pid: int, window_id: int
 ) -> dict[str, Any] | None:
@@ -128,15 +136,31 @@ def _visible_window(
     return None
 
 
+def _restore_frame(
+    *,
+    pid: int,
+    window_id: int,
+    bounds: dict[str, Any],
+    session_id: str,
+) -> dict[str, Any]:
+    return _driver_call("set_window_frame", {
+        "pid": pid,
+        "window_id": window_id,
+        "x": bounds.get("x"),
+        "y": bounds.get("y"),
+        "width": bounds.get("width"),
+        "height": bounds.get("height"),
+        "session": session_id or "fetch-window-control",
+    })
+
+
 def handle_window_control(
     args: dict[str, Any], *, session_id: str = ""
 ) -> str:
     """Move one exact current-space window through verified frame mutation."""
     try:
-        pid = int(_number(args.get("pid"), "pid", positive=True))
-        window_id = int(
-            _number(args.get("window_id"), "window_id", positive=True)
-        )
+        pid = _positive_integer(args.get("pid"), "pid")
+        window_id = _positive_integer(args.get("window_id"), "window_id")
         x = _number(args.get("x"), "x")
         y = _number(args.get("y"), "y")
     except (TypeError, ValueError) as exc:
@@ -184,8 +208,67 @@ def handle_window_control(
     if result.get("error"):
         return json.dumps(result)
 
+    if result.get("effect") != "confirmed":
+        # An unconfirmed write can still have moved or OS-clamped the window.
+        # Restore before returning so a false/ambiguous result never strands it
+        # at the edge of (or outside) the desktop Fetch is streaming.
+        restore_result = _restore_frame(
+            pid=pid,
+            window_id=window_id,
+            bounds=bounds,
+            session_id=session_id,
+        )
+        restore_confirmed = restore_result.get("effect") == "confirmed"
+        return json.dumps({
+            "ok": False,
+            "error": (
+                "cua-driver did not confirm the requested window frame; "
+                + (
+                    "Fetch restored the previous frame."
+                    if restore_confirmed
+                    else "the automatic restore could not be confirmed."
+                )
+            ),
+            "effect": result.get("effect"),
+            "route": result.get("route"),
+            "evidence": result.get("evidence", []),
+            "pid": pid,
+            "window_id": window_id,
+            "previous_frame": bounds,
+            "requested_frame": requested_frame,
+            "restore_effect": restore_result.get("effect"),
+            "restore_error": restore_result.get("error"),
+        })
+
+    # A geometry readback proves the mutation happened, but it does not prove
+    # the new frame is still part of the desktop Fetch streams. Re-read the
+    # public window inventory and fail closed. If the window left the visible
+    # current desktop, restore the exact prior frame before returning.
+    post_move_windows = _driver_call("list_windows", {})
+    post_move_window = _visible_window(post_move_windows, pid, window_id)
+    if post_move_windows.get("error") or post_move_window is None:
+        restore_result = _restore_frame(
+            pid=pid,
+            window_id=window_id,
+            bounds=bounds,
+            session_id=session_id,
+        )
+        return json.dumps({
+            "ok": False,
+            "error": (
+                "The requested frame left the visible current desktop, so "
+                "Fetch restored the window's previous frame."
+            ),
+            "pid": pid,
+            "window_id": window_id,
+            "previous_frame": bounds,
+            "requested_frame": requested_frame,
+            "restore_effect": restore_result.get("effect"),
+            "restore_error": restore_result.get("error"),
+        })
+
     return json.dumps({
-        "ok": result.get("effect") == "confirmed",
+        "ok": True,
         "effect": result.get("effect"),
         "route": result.get("route"),
         "evidence": result.get("evidence", []),
