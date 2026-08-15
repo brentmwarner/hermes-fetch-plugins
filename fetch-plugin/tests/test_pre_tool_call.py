@@ -9,6 +9,7 @@ hook (``hermes_cli.plugins.get_pre_tool_call_block_message``).
 
 import importlib.util
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -37,7 +38,6 @@ def test_register_wires_pre_tool_call(monkeypatch):
     plugin = _load_plugin()
     monkeypatch.setattr(plugin._inbox, "is_delivery_enabled", lambda: False)
     hooks = {}
-    import types
     ctx = types.SimpleNamespace(
         register_hook=lambda name, cb: hooks.setdefault(name, cb),
         register_platform=lambda **kw: None,
@@ -51,7 +51,6 @@ def test_register_wires_visible_computer_request_middleware(monkeypatch):
     plugin = _load_plugin()
     monkeypatch.setattr(plugin._inbox, "is_delivery_enabled", lambda: False)
     middleware = {}
-    import types
     ctx = types.SimpleNamespace(
         register_hook=lambda name, cb: None,
         register_middleware=lambda name, cb: middleware.setdefault(name, cb),
@@ -68,7 +67,6 @@ def test_register_wires_verified_window_control_tool(monkeypatch):
     plugin = _load_plugin()
     monkeypatch.setattr(plugin._inbox, "is_delivery_enabled", lambda: False)
     tools = []
-    import types
     ctx = types.SimpleNamespace(
         register_hook=lambda name, cb: None,
         register_tool=lambda **kwargs: tools.append(kwargs),
@@ -79,6 +77,7 @@ def test_register_wires_verified_window_control_tool(monkeypatch):
 
     assert [entry["name"] for entry in tools] == ["fetch_window_control"]
     assert tools[0]["handler"] is plugin._handle_fetch_window_control
+    assert tools[0]["toolset"] == "computer_use"
 
 
 @pytest.mark.parametrize(

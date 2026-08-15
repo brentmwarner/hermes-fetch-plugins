@@ -107,8 +107,10 @@ _FETCH_COMPUTER_HANDOFF_HINT = (
     "capture the exact app/window before acting, and verify state-changing "
     "actions with capture_after=true. To move or resize a window, first use "
     "computer_use action=list_windows, then call fetch_window_control with the "
-    "exact pid and window_id; do not simulate a title-bar drag. Fetch makes "
-    "other native input foreground-visible automatically. "
+    "exact pid and window_id; do not simulate a title-bar drag. After a "
+    "successful window move, capture the visible desktop so the Fetch chat "
+    "card shows the resulting frame. Fetch makes other native input "
+    "foreground-visible automatically. "
     "During browser or computer work, pause for the person whenever a step "
     "requires private information, MFA, CAPTCHA, legal certification, payment "
     "approval, or another decision they must make themselves. Use the `clarify` "
@@ -763,7 +765,9 @@ def register(ctx) -> None:
     if callable(register_tool):
         register_tool(
             name="fetch_window_control",
-            toolset="fetch_computer",
+            # Extend the existing Computer Use surface. A new plugin-only
+            # toolset would remain disabled after an in-place plugin update.
+            toolset="computer_use",
             schema=_visible_computer.FETCH_WINDOW_CONTROL_SCHEMA,
             handler=_handle_fetch_window_control,
             check_fn=_visible_computer.check_requirements,

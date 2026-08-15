@@ -68,6 +68,7 @@ def test_pre_llm_call_injects_native_context_for_fetch_sources(plugin, monkeypat
     assert "downloadable attachment" in context
     assert "same desktop the person is watching" in context
     assert "foreground-visible automatically" in context
+    assert "chat card shows the resulting frame" in context
 
 
 @pytest.mark.parametrize("source", ["", "tui", "cli", "telegram", "discord", "cron", None])
