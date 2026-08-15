@@ -27,6 +27,8 @@ ENGINE_NOT_RUNNING_MESSAGE = (
     "Docker or Podman is installed, but the container engine is not running. "
     "Start Docker or Podman, then rerun this setup."
 )
+
+
 class ComputerError(RuntimeError):
     pass
 

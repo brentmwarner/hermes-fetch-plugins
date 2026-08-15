@@ -175,8 +175,11 @@ def test_image_keeps_branded_wallpaper_and_loopback_vnc() -> None:
     assert "hsetroot -cover" in entrypoint
     assert "startxfce4" in entrypoint
     assert "network_mode: host" in compose
-    assert "ports:" not in compose
-    assert "0.0.0.0" not in compose
+    compose_code = "\n".join(
+        line for line in compose.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "ports:" not in compose_code
+    assert "0.0.0.0" not in compose_code
 
 
 def test_readme_makes_the_container_the_default_linux_computer() -> None:
