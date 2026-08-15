@@ -65,11 +65,12 @@ def test_remove_environment_keys_drops_computer_settings_and_keeps_other_lines(t
     env_path.write_text(
         "# keep\nOTHER=value\nHERMES_FETCH_COMPUTER_TARGET=tcp://127.0.0.1:5901\n"
         "export HERMES_FETCH_COMPUTER_KIND=Old\nHERMES_FETCH_TUNNEL_ENABLED=1\n"
-        "DISPLAY=:1\nXAUTHORITY=/tmp/fetch.Xauthority\nAGENT_BROWSER_HEADED=1\n",
+        "DISPLAY=:1\nXAUTHORITY=/tmp/fetch.Xauthority\nAGENT_BROWSER_HEADED=1\n"
+        "WAYLAND_DISPLAY=\nDBUS_SESSION_BUS_ADDRESS=\n",
         encoding="utf-8",
     )
 
-    setup.remove_environment_keys(env_path, setup.COMPUTER_ENV_KEYS)
+    setup.remove_environment_keys(env_path, setup.PERSISTED_COMPUTER_ENV_KEYS)
 
     text = env_path.read_text(encoding="utf-8")
     assert "# keep" in text
@@ -95,6 +96,8 @@ def test_disable_computer_stops_bridge_and_clears_persisted_target(tmp_path, mon
     monkeypatch.setenv("HERMES_FETCH_COMPUTER_TARGET", "tcp://127.0.0.1:5901")
     monkeypatch.setenv("HERMES_FETCH_COMPUTER_KIND", "Virtual Linux desktop")
     monkeypatch.setenv(setup.VNC_PASSWORD_ENV, "dedicated-password")
+    monkeypatch.setenv(setup.WAYLAND_DISPLAY_ENV, "wayland-0")
+    monkeypatch.setenv(setup.DBUS_SESSION_BUS_ADDRESS_ENV, "unix:path=/run/user/1000/bus")
     monkeypatch.setattr(setup, "hermes_home", lambda: tmp_path)
     calls = []
 
@@ -125,6 +128,8 @@ def test_disable_computer_stops_bridge_and_clears_persisted_target(tmp_path, mon
     assert "HERMES_FETCH_COMPUTER_TARGET" not in setup.os.environ
     assert "HERMES_FETCH_COMPUTER_KIND" not in setup.os.environ
     assert setup.VNC_PASSWORD_ENV not in setup.os.environ
+    assert setup.os.environ[setup.WAYLAND_DISPLAY_ENV] == "wayland-0"
+    assert setup.os.environ[setup.DBUS_SESSION_BUS_ADDRESS_ENV] == "unix:path=/run/user/1000/bus"
 
 
 def test_disable_computer_fails_when_bridge_cannot_be_stopped(tmp_path, monkeypatch) -> None:
@@ -368,6 +373,57 @@ def test_configure_starts_dedicated_bridge_before_reporting_ready(tmp_path, monk
     assert 'HERMES_FETCH_COMPUTER_NAME="Hermes VPS"' in saved
     assert 'HERMES_FETCH_COMPUTER_VNC_PASSWORD="dedicated-password"' in saved
     assert (tmp_path / ".env").stat().st_mode & 0o777 == 0o600
+
+
+def test_non_virtual_setup_removes_saved_virtual_settings_without_mutating_session(
+    tmp_path, monkeypatch
+) -> None:
+    setup.persist_environment(tmp_path / ".env", setup.VIRTUAL_DESKTOP_ENV_VALUES)
+    monkeypatch.setenv(setup.WAYLAND_DISPLAY_ENV, "wayland-0")
+    monkeypatch.setenv(setup.DBUS_SESSION_BUS_ADDRESS_ENV, "unix:path=/run/user/1000/bus")
+
+    class FakeComputerRuntime:
+        def restart_computer_runtime(self):
+            return True
+
+        def ensure_computer_runtime(self):
+            return "started"
+
+    class FakeRelayRuntime:
+        def restart_relay_runtime_for_reconfigure(self):
+            return {"stopped": [], "left_running": []}
+
+        def ensure_relay_runtime(self):
+            return "started"
+
+    monkeypatch.setattr(setup, "probe_desktop", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        setup,
+        "_credentials",
+        lambda: {"relay_url": "https://relay", "agent_id": "agent", "agent_secret": "secret"},
+    )
+    monkeypatch.setattr(setup, "hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(setup, "_computer_runtime_module", lambda: FakeComputerRuntime())
+    monkeypatch.setattr(setup, "_relay_runtime_module", lambda: FakeRelayRuntime())
+    monkeypatch.setattr(setup, "wait_for_relay", lambda *args, **kwargs: {"ok": True})
+
+    setup.configure(
+        target="tcp://127.0.0.1:5900",
+        kind="Linux desktop",
+        name="",
+        display=":0",
+        xauthority="/tmp/Xauthority",
+        headed_browser=True,
+        vnc_password="",
+        wait_seconds=5,
+        check_only=False,
+    )
+
+    saved = (tmp_path / ".env").read_text(encoding="utf-8")
+    for key in setup.VIRTUAL_DESKTOP_ENV_KEYS:
+        assert key not in saved
+    assert setup.os.environ[setup.WAYLAND_DISPLAY_ENV] == "wayland-0"
+    assert setup.os.environ[setup.DBUS_SESSION_BUS_ADDRESS_ENV] == "unix:path=/run/user/1000/bus"
 
 
 def test_configure_requires_a_managed_runtime_to_adopt_the_visible_display(

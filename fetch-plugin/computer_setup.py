@@ -57,8 +57,8 @@ COMPUTER_ENV_KEYS = (
     XAUTHORITY_ENV,
     BROWSER_HEADED_ENV,
     VNC_PASSWORD_ENV,
-    *VIRTUAL_DESKTOP_ENV_KEYS,
 )
+PERSISTED_COMPUTER_ENV_KEYS = COMPUTER_ENV_KEYS + VIRTUAL_DESKTOP_ENV_KEYS
 _GATEWAY_RESTART_STATE_FILE = "fetch-computer-gateway-restart.json"
 
 
@@ -232,7 +232,7 @@ def disable_computer() -> None:
     computer_runtime = _computer_runtime_module()
     if not computer_runtime.restart_computer_runtime():
         raise SetupError("Could not stop the Fetch computer bridge.")
-    remove_environment_keys(hermes_home() / ".env", COMPUTER_ENV_KEYS)
+    remove_environment_keys(hermes_home() / ".env", PERSISTED_COMPUTER_ENV_KEYS)
     for key in COMPUTER_ENV_KEYS:
         os.environ.pop(key, None)
 
@@ -407,8 +407,6 @@ def configure(
         os.environ.update(values)
         if kind != "Virtual Linux desktop":
             remove_environment_keys(hermes_home() / ".env", VIRTUAL_DESKTOP_ENV_KEYS)
-            for key in VIRTUAL_DESKTOP_ENV_KEYS:
-                os.environ.pop(key, None)
         if not vnc_password:
             remove_environment_keys(hermes_home() / ".env", (VNC_PASSWORD_ENV,))
             os.environ.pop(VNC_PASSWORD_ENV, None)
