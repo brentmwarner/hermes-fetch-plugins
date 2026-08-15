@@ -46,6 +46,147 @@ def test_register_wires_pre_tool_call(monkeypatch):
     assert hooks["pre_tool_call"] is plugin._on_pre_tool_call
 
 
+def test_register_wires_visible_computer_request_middleware(monkeypatch):
+    monkeypatch.delenv("HERMES_FETCH_TUNNEL_ENABLED", raising=False)
+    plugin = _load_plugin()
+    monkeypatch.setattr(plugin._inbox, "is_delivery_enabled", lambda: False)
+    middleware = {}
+    import types
+    ctx = types.SimpleNamespace(
+        register_hook=lambda name, cb: None,
+        register_middleware=lambda name, cb: middleware.setdefault(name, cb),
+        register_platform=lambda **kw: None,
+    )
+
+    plugin.register(ctx)
+
+    assert middleware["tool_request"] is plugin._on_tool_request
+
+
+def test_register_wires_verified_window_control_tool(monkeypatch):
+    monkeypatch.delenv("HERMES_FETCH_TUNNEL_ENABLED", raising=False)
+    plugin = _load_plugin()
+    monkeypatch.setattr(plugin._inbox, "is_delivery_enabled", lambda: False)
+    tools = []
+    import types
+    ctx = types.SimpleNamespace(
+        register_hook=lambda name, cb: None,
+        register_tool=lambda **kwargs: tools.append(kwargs),
+        register_platform=lambda **kw: None,
+    )
+
+    plugin.register(ctx)
+
+    assert [entry["name"] for entry in tools] == ["fetch_window_control"]
+    assert tools[0]["handler"] is plugin._handle_fetch_window_control
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        "click",
+        "double_click",
+        "right_click",
+        "middle_click",
+        "drag",
+        "scroll",
+        "type",
+        "key",
+    ],
+)
+def test_fetch_computer_input_is_rewritten_to_visible_foreground(
+    plugin, monkeypatch, action
+):
+    monkeypatch.setattr(plugin, "_session_source", lambda session_id: "fetch")
+
+    result = plugin._on_tool_request(
+        tool_name="computer_use",
+        args={
+            "action": action,
+            "delivery_mode": "background",
+            "bring_to_front": False,
+        },
+        session_id="s1",
+    )
+
+    assert result is not None
+    assert result["args"]["delivery_mode"] == "foreground"
+    assert result["args"]["bring_to_front"] is True
+    assert result["source"] == "fetch.visible-computer"
+
+
+def test_fetch_focus_app_is_rewritten_to_raise_visible_window(plugin, monkeypatch):
+    monkeypatch.setattr(plugin, "_session_source", lambda session_id: "fetch-ios")
+
+    result = plugin._on_tool_request(
+        tool_name="computer_use",
+        args={"action": "focus_app", "app": "Terminal", "raise_window": False},
+        session_id="s1",
+    )
+
+    assert result is not None
+    assert result["args"]["raise_window"] is True
+
+
+@pytest.mark.parametrize("action", ["capture", "list_apps", "list_windows", "wait"])
+def test_fetch_read_only_computer_actions_are_not_rewritten(plugin, monkeypatch, action):
+    monkeypatch.setattr(plugin, "_session_source", lambda session_id: "fetch")
+
+    assert plugin._on_tool_request(
+        tool_name="computer_use",
+        args={"action": action},
+        session_id="s1",
+    ) is None
+
+
+@pytest.mark.parametrize("source", ["telegram", "cli", "cron", None, ""])
+def test_non_fetch_computer_input_keeps_background_behavior(plugin, monkeypatch, source):
+    monkeypatch.setattr(plugin, "_session_source", lambda session_id: source)
+
+    assert plugin._on_tool_request(
+        tool_name="computer_use",
+        args={"action": "drag"},
+        session_id="s1",
+    ) is None
+
+
+def test_visible_computer_middleware_ignores_other_tools(plugin, monkeypatch):
+    monkeypatch.setattr(plugin, "_session_source", lambda session_id: "fetch")
+
+    assert plugin._on_tool_request(
+        tool_name="browser_click",
+        args={"action": "click"},
+        session_id="s1",
+    ) is None
+
+
+def test_fetch_window_control_requires_human_approval(plugin, monkeypatch):
+    monkeypatch.setattr(plugin, "_session_source", lambda session_id: "fetch")
+
+    result = plugin._on_pre_tool_call(
+        tool_name="fetch_window_control",
+        args={"pid": 1, "window_id": 2, "x": 100, "y": 100},
+        session_id="s1",
+    )
+
+    assert result is not None
+    assert result["action"] == "approve"
+    assert result["rule_key"] == "fetch-visible-window-frame"
+
+
+def test_fetch_window_control_is_blocked_outside_fetch(plugin, monkeypatch):
+    monkeypatch.setattr(plugin, "_session_source", lambda session_id: "cli")
+
+    result = plugin._on_pre_tool_call(
+        tool_name="fetch_window_control",
+        args={"pid": 1, "window_id": 2, "x": 100, "y": 100},
+        session_id="s1",
+    )
+
+    assert result is not None
+    assert result["action"] == "block"
+
+
 def test_blocks_kanban_create_with_no_body(plugin):
     result = plugin._on_pre_tool_call(
         tool_name="kanban_create",

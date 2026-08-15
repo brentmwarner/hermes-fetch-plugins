@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib.util
+import json
 import logging
 import os
 import shutil
@@ -99,6 +100,15 @@ _FETCH_ATTACHMENT_HINT = (
 )
 
 _FETCH_COMPUTER_HANDOFF_HINT = (
+    "Fetch shows the same desktop the person is watching. Keep browser and "
+    "computer work on that visible desktop: do not intentionally target a "
+    "hidden or minimized window or another virtual desktop/Space. Use native "
+    "computer_use capture and input actions for work the person should watch, "
+    "capture the exact app/window before acting, and verify state-changing "
+    "actions with capture_after=true. To move or resize a window, first use "
+    "computer_use action=list_windows, then call fetch_window_control with the "
+    "exact pid and window_id; do not simulate a title-bar drag. Fetch makes "
+    "other native input foreground-visible automatically. "
     "During browser or computer work, pause for the person whenever a step "
     "requires private information, MFA, CAPTCHA, legal certification, payment "
     "approval, or another decision they must make themselves. Use the `clarify` "
@@ -227,6 +237,9 @@ _runtime = _load_sibling("fetch_plugin_runtime", "_runtime.py")
 _computer_runtime = _load_sibling("fetch_plugin_computer_runtime", "_computer_runtime.py")
 _inbox = _load_sibling("fetch_plugin_inbox", "_inbox.py")
 _preview = _load_sibling("fetch_plugin_preview", "_preview.py")
+_visible_computer = _load_sibling(
+    "fetch_plugin_visible_computer", "_visible_computer.py"
+)
 
 
 # Sentinels a directory the plugin installed itself (vs. a user/custom skill it
@@ -473,6 +486,81 @@ def _on_pre_llm_call(*, session_id: str = "", **_kwargs):
 # `triage` arrives as a JSON bool, but be tolerant of stringified forms).
 _TRUTHY_ARG = frozenset({True, 1, "1", "true", "True", "yes", "on"})
 
+# Native computer_use actions whose visible side effect must land on the same
+# foreground desktop Fetch is streaming. The plugin's request middleware runs
+# before hooks, approvals, activity events, and dispatch, so the user sees one
+# real foreground action rather than a failed background attempt followed by a
+# model-authored retry. Capture remains read-only; bring_to_front uses the exact
+# target selected by the preceding capture/focus call.
+_FETCH_VISIBLE_COMPUTER_INPUT_ACTIONS = frozenset({
+    "click",
+    "double_click",
+    "right_click",
+    "middle_click",
+    "drag",
+    "scroll",
+    "type",
+    "key",
+})
+
+
+def _on_tool_request(
+    *,
+    tool_name: str = "",
+    args: dict | None = None,
+    session_id: str = "",
+    **_kwargs,
+):
+    """Make computer input visible on the desktop streamed to Fetch iOS.
+
+    Hermes computer_use deliberately defaults to background input so a local
+    person can keep working. A Fetch phone session has the opposite contract:
+    the person opened a live viewer to watch the agent. Rewrite only Fetch-owned
+    sessions, leaving CLI, cron, Telegram, and every other Hermes surface on the
+    upstream background-first behavior.
+    """
+    if tool_name != "computer_use" or not isinstance(args, dict):
+        return None
+    if not _is_fetch_app_session(session_id or None):
+        return None
+
+    action = str(args.get("action") or "").strip().lower()
+    rewritten = dict(args)
+    if action in _FETCH_VISIBLE_COMPUTER_INPUT_ACTIONS:
+        rewritten["delivery_mode"] = "foreground"
+        rewritten["bring_to_front"] = True
+    elif action == "focus_app":
+        rewritten["raise_window"] = True
+    else:
+        return None
+
+    if rewritten == args:
+        return None
+    return {
+        "args": rewritten,
+        "source": "fetch.visible-computer",
+        "reason": "Keep Hermes input on the desktop streamed to Fetch iOS",
+    }
+
+
+def _handle_fetch_window_control(
+    args: dict | None = None,
+    *,
+    session_id: str = "",
+    **_kwargs,
+) -> str:
+    """Dispatch verified window movement only for Fetch-owned sessions."""
+    if not _is_fetch_app_session(session_id or None):
+        return json.dumps({
+            "error": (
+                "fetch_window_control is available only inside a Fetch app "
+                "conversation."
+            )
+        })
+    if not isinstance(args, dict):
+        return json.dumps({"error": "fetch_window_control needs an argument object."})
+    return _visible_computer.handle_window_control(args, session_id=session_id)
+
 
 def _send_message_target_platform(args: dict) -> str:
     action = str(args.get("action") or "send").strip().lower()
@@ -500,7 +588,7 @@ def _block_fetch_self_delivery(args: dict, session_id: str) -> dict | None:
 
 
 def _on_pre_tool_call(*, tool_name: str = "", args: dict | None = None, **_kwargs):
-    """Enforce that agent-created kanban tasks carry a real spec (FET-16).
+    """Apply Fetch's approval, delivery, and kanban quality gates.
 
     A title-only card strands the worker: the assignee sees only the task's
     title and body, so a card with an empty body gives it nothing to act on
@@ -517,6 +605,26 @@ def _on_pre_tool_call(*, tool_name: str = "", args: dict | None = None, **_kwarg
     exempt because a specifier profile fleshes those out later.
     """
     args = args if isinstance(args, dict) else {}
+    if tool_name == "fetch_window_control":
+        session_id = str(
+            _kwargs.get("session_id") or _kwargs.get("task_id") or ""
+        )
+        if not _is_fetch_app_session(session_id or None):
+            return {
+                "action": "block",
+                "message": (
+                    "fetch_window_control can only move a window for the "
+                    "person's active Fetch app conversation."
+                ),
+            }
+        return {
+            "action": "approve",
+            "message": (
+                "Hermes wants to move or resize a visible desktop window "
+                "while you watch in Fetch."
+            ),
+            "rule_key": "fetch-visible-window-frame",
+        }
     if tool_name == "send_message":
         session_id = str(
             _kwargs.get("session_id") or _kwargs.get("task_id") or ""
@@ -650,6 +758,25 @@ def _spawn_tunnel() -> None:
 
 def register(ctx) -> None:
     _ensure_fetch_cards_skill()
+
+    register_tool = getattr(ctx, "register_tool", None)
+    if callable(register_tool):
+        register_tool(
+            name="fetch_window_control",
+            toolset="fetch_computer",
+            schema=_visible_computer.FETCH_WINDOW_CONTROL_SCHEMA,
+            handler=_handle_fetch_window_control,
+            check_fn=_visible_computer.check_requirements,
+            description=_visible_computer.FETCH_WINDOW_CONTROL_SCHEMA["description"],
+            emoji="🖥️",
+        )
+
+    # Behavior-changing request middleware is a supported Hermes extension
+    # surface. Guard for older hosts so a plugin update never prevents Fetch's
+    # existing delivery/tunnel features from loading there.
+    register_middleware = getattr(ctx, "register_middleware", None)
+    if callable(register_middleware):
+        register_middleware("tool_request", _on_tool_request)
 
     # Push hooks: notify the app on turn completion / attention-needed.
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
