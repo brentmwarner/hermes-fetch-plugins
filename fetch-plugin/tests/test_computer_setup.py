@@ -197,6 +197,15 @@ def test_disable_computer_fails_when_bridge_cannot_be_stopped(tmp_path, monkeypa
         setup.disable_computer()
 
 
+def test_linux_computer_module_raises_setup_error_when_unloadable(monkeypatch) -> None:
+    monkeypatch.setattr(
+        setup.importlib.util, "spec_from_file_location", lambda *_args, **_kwargs: None
+    )
+
+    with pytest.raises(setup.SetupError, match="Could not load the Fetch computer manager"):
+        setup._linux_computer_module()
+
+
 def test_native_mac_and_windows_helpers_keep_loopback_screen_sharing() -> None:
     plugin_dir = Path(__file__).resolve().parent.parent
     macos = (plugin_dir / "macos" / "check-computer.sh").read_text(encoding="utf-8")

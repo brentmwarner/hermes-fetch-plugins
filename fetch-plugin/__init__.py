@@ -795,7 +795,7 @@ def _announce_linux_computer_if_needed() -> None:
     except Exception:
         log.debug("Fetch could not check the Linux computer container", exc_info=True)
         return
-    if report.get("state") in {"ready", "not-linux", ""}:
+    if report.get("state") in {"ready", "configured", "not-linux", ""}:
         return
     message = str(report.get("message") or "").strip()
     if not message:

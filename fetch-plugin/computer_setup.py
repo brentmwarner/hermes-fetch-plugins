@@ -201,7 +201,8 @@ def _linux_computer_module():
     spec = importlib.util.spec_from_file_location(
         "fetch_plugin_linux_computer_setup", path
     )
-    assert spec is not None and spec.loader is not None
+    if spec is None or spec.loader is None:
+        raise SetupError(f"Could not load the Fetch computer manager from {path}.")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)

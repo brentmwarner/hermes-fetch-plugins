@@ -60,10 +60,17 @@ COPY entrypoint.sh /usr/local/bin/fetch-computer-entrypoint
 RUN chmod 0755 /usr/local/bin/fetch-computer-entrypoint \
     && chmod 0644 /usr/share/fetch/wallpaper.png \
     && chown -R fetch:fetch /home/fetch /usr/share/fetch \
-    && printf '%s\n' \
-        '#!/bin/sh' \
-        'exec /usr/bin/google-chrome --no-sandbox --disable-dev-shm-usage "$@"' \
-        > /usr/local/bin/fetch-chrome \
+    && if [ -x /usr/bin/google-chrome ]; then \
+         printf '%s\n' \
+           '#!/bin/sh' \
+           'exec /usr/bin/google-chrome --no-sandbox --disable-dev-shm-usage "$@"' \
+           > /usr/local/bin/fetch-chrome; \
+       else \
+         printf '%s\n' \
+           '#!/bin/sh' \
+           'exec /usr/bin/epiphany "$@"' \
+           > /usr/local/bin/fetch-chrome; \
+       fi \
     && chmod 0755 /usr/local/bin/fetch-chrome
 
 USER fetch

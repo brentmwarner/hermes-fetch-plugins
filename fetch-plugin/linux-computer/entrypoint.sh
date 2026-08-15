@@ -52,6 +52,11 @@ trap cleanup EXIT INT TERM
 
 lock_path="/tmp/.X${display_number}-lock"
 socket_path="/tmp/.X11-unix/X${display_number}"
+if [[ -e "$socket_path" ]]; then
+  printf 'Fetch virtual display %s already has a socket at %s.\n' \
+    "$display_name" "$socket_path" >&2
+  exit 1
+fi
 if [[ -f "$lock_path" ]]; then
   read -r existing_pid < "$lock_path" || existing_pid=""
   if [[ "$existing_pid" =~ ^[0-9]+$ ]] && kill -0 "$existing_pid" 2>/dev/null; then
@@ -64,7 +69,7 @@ if (exec 3<>"/dev/tcp/127.0.0.1/${rfb_port}") 2>/dev/null; then
   printf 'Fetch virtual desktop port %s is already in use.\n' "$rfb_port" >&2
   exit 1
 fi
-rm -f "$lock_path" "$socket_path"
+rm -f "$lock_path"
 mkdir -p /tmp/.X11-unix
 chmod 1777 /tmp/.X11-unix || true
 
@@ -73,7 +78,7 @@ chmod 0600 "$xauthority" || true
 if ! xauth -f "$xauthority" nlist "$display_name" 2>/dev/null | grep -q .; then
   xauth -f "$xauthority" remove "$display_name" 2>/dev/null || true
   cookie="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
-  xauth -f "$xauthority" add "$display_name" MIT-MAGIC-COOKIE-1 "$cookie"
+  xauth -f "$xauthority" add "$display_name" MIT-MAGIC-COOKIE-1 "$cookie" || true
 fi
 
 vnc_args=(

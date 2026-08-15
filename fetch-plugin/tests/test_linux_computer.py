@@ -43,6 +43,26 @@ def test_detect_engine_fails_when_installed_engine_is_not_running(monkeypatch) -
         manage.detect_engine()
 
 
+def test_linux_run_args_omit_user_when_ids_are_missing() -> None:
+    args = manage.container_run_args(
+        engine="docker",
+        xauthority="/tmp/fetch.Xauthority",
+        home_dir="/tmp/fetch-home",
+        host_network=False,
+        uid=None,
+        gid=None,
+    )
+
+    assert "--user" not in args
+
+
+def test_host_user_ids_return_none_without_getuid(monkeypatch) -> None:
+    monkeypatch.setattr(manage.os, "getuid", None, raising=False)
+    monkeypatch.setattr(manage.os, "getgid", None, raising=False)
+
+    assert manage.host_user_ids() == (None, None)
+
+
 def test_linux_run_args_use_host_network_and_never_publish_vnc() -> None:
     args = manage.container_run_args(
         engine="docker",
@@ -158,7 +178,7 @@ def test_manager_does_not_install_host_xfce() -> None:
     assert "xfce" not in text.lower()
     assert "requires Docker" in text
     assert "apt-get install -y docker.io" in text
-    assert "dnf install -y docker" in text
+    assert "dnf install -y moby-engine" in text
     assert "subprocess.run([\"apt" not in text
     assert "subprocess.run([\"dnf" not in text
 
@@ -178,9 +198,13 @@ def test_image_keeps_branded_wallpaper_and_loopback_vnc() -> None:
     assert "tigervnc-standalone-server" in dockerfile
     assert "xfce4" in dockerfile
     assert "EXPOSE" not in dockerfile
+    assert "if [ -x /usr/bin/google-chrome ]" in dockerfile
+    assert 'exec /usr/bin/epiphany "$@"' in dockerfile
     assert "1280x800" in entrypoint
     assert "1920x1080" not in entrypoint
     assert "-localhost" in entrypoint
+    assert 'rm -f "$lock_path" "$socket_path"' not in entrypoint
+    assert "already has a socket" in entrypoint
     assert "hsetroot -cover" in entrypoint
     assert "startxfce4" in entrypoint
     assert "network_mode: host" in compose
@@ -226,12 +250,13 @@ def test_computer_readiness_is_not_linux_on_macos() -> None:
 def test_computer_readiness_reports_engine_missing(monkeypatch) -> None:
     monkeypatch.setattr(manage, "uses_host_network", lambda platform=None: True)
     monkeypatch.setattr(manage, "engine_binaries", lambda: [])
+    monkeypatch.setattr(manage, "existing_loopback_desktop_ready", lambda: False)
 
     report = manage.computer_readiness()
 
     assert report["state"] == "engine-missing"
     assert "sudo apt-get install -y docker.io" in report["message"]
-    assert "sudo dnf install -y docker" in report["message"]
+    assert "sudo dnf install -y moby-engine" in report["message"]
     assert "manage-computer.sh bootstrap" in report["message"]
 
 
@@ -239,6 +264,7 @@ def test_computer_readiness_reports_engine_not_running(monkeypatch) -> None:
     monkeypatch.setattr(manage, "uses_host_network", lambda platform=None: True)
     monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
     monkeypatch.setattr(manage, "engine_daemon_ready", lambda _engine: False)
+    monkeypatch.setattr(manage, "existing_loopback_desktop_ready", lambda: False)
 
     report = manage.computer_readiness()
 
@@ -252,6 +278,7 @@ def test_computer_readiness_reports_container_absent(monkeypatch) -> None:
     monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
     monkeypatch.setattr(manage, "engine_daemon_ready", lambda engine: engine == "docker")
     monkeypatch.setattr(manage, "container_running", lambda engine, name=manage.CONTAINER_NAME: False)
+    monkeypatch.setattr(manage, "existing_loopback_desktop_ready", lambda: False)
 
     report = manage.computer_readiness()
 
@@ -328,3 +355,103 @@ def test_fetch_computer_path_never_mentions_podman() -> None:
     for path in paths:
         text = path.read_text(encoding="utf-8")
         assert "podman" not in text.lower(), f"{path} still mentions Podman"
+
+
+def test_ensure_xauthority_writes_cookie_without_host_xauth(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(manage.shutil, "which", lambda _name: None)
+    path = tmp_path / "Xauthority"
+
+    manage.ensure_xauthority(path, display=":1")
+
+    data = path.read_bytes()
+    assert b"MIT-MAGIC-COOKIE-1" in data
+    assert len(data) > 32
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_run_container_does_not_rotate_cookie_when_port_is_taken(tmp_path, monkeypatch) -> None:
+    called: list[str] = []
+    monkeypatch.setattr(manage, "runtime_dir", lambda: tmp_path)
+    monkeypatch.setattr(manage, "container_home_dir", lambda: tmp_path / "home")
+    monkeypatch.setattr(manage, "container_exists", lambda _engine: False)
+    monkeypatch.setattr(manage, "rfb_port_open", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        manage, "ensure_xauthority", lambda *args, **kwargs: called.append("xauth")
+    )
+
+    with pytest.raises(manage.ComputerError, match="already in use"):
+        manage.run_container("docker")
+
+    assert called == []
+
+
+def test_run_container_refuses_existing_x11_socket(tmp_path, monkeypatch) -> None:
+    called: list[str] = []
+    monkeypatch.setattr(manage, "runtime_dir", lambda: tmp_path)
+    monkeypatch.setattr(manage, "container_home_dir", lambda: tmp_path / "home")
+    monkeypatch.setattr(manage, "container_exists", lambda _engine: False)
+    monkeypatch.setattr(manage, "rfb_port_open", lambda *args, **kwargs: False)
+    monkeypatch.setattr(manage, "uses_host_network", lambda: True)
+    monkeypatch.setattr(manage, "x11_socket_present", lambda display=manage.DISPLAY_NAME: True)
+    monkeypatch.setattr(
+        manage, "ensure_xauthority", lambda *args, **kwargs: called.append("xauth")
+    )
+
+    with pytest.raises(manage.ComputerError, match="already has a socket"):
+        manage.run_container("docker")
+
+    assert called == []
+
+
+def test_run_container_omits_user_when_ids_unavailable(tmp_path, monkeypatch) -> None:
+    captured: dict[str, list[str]] = {}
+    monkeypatch.setattr(manage, "runtime_dir", lambda: tmp_path)
+    monkeypatch.setattr(manage, "container_home_dir", lambda: tmp_path / "home")
+    monkeypatch.setattr(manage, "xauthority_path", lambda: tmp_path / "Xauthority")
+    monkeypatch.setattr(manage, "container_exists", lambda _engine: False)
+    monkeypatch.setattr(manage, "rfb_port_open", lambda *args, **kwargs: False)
+    monkeypatch.setattr(manage, "uses_host_network", lambda: False)
+    monkeypatch.setattr(manage, "selinux_enforcing", lambda: False)
+    monkeypatch.setattr(manage, "host_user_ids", lambda: (None, None))
+    monkeypatch.setattr(manage, "ensure_xauthority", lambda *args, **kwargs: None)
+
+    def fake_run(args, **_kwargs):
+        captured["args"] = list(args)
+        return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(manage.subprocess, "run", fake_run)
+
+    manage.run_container("docker")
+
+    assert "--user" not in captured["args"]
+
+
+def test_computer_readiness_treats_working_opt_in_desktop_as_ready(monkeypatch) -> None:
+    monkeypatch.setattr(manage, "uses_host_network", lambda platform=None: True)
+    monkeypatch.setattr(manage, "engine_binaries", lambda: [])
+    monkeypatch.setattr(manage, "container_running", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        manage, "configured_computer_target", lambda: "tcp://127.0.0.1:5900"
+    )
+    monkeypatch.setattr(
+        manage,
+        "rfb_port_open",
+        lambda host=manage.RFB_HOST, port=manage.RFB_PORT: host == "127.0.0.1" and port == 5900,
+    )
+
+    report = manage.computer_readiness()
+
+    assert report["state"] == "ready"
+    assert "already configured" in report["message"]
+    assert "requires Docker" not in report["message"]
+
+
+def test_configured_computer_target_reads_persisted_env(tmp_path, monkeypatch) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        'HERMES_FETCH_COMPUTER_TARGET="tcp://127.0.0.1:5900"\n', encoding="utf-8"
+    )
+    monkeypatch.delenv("HERMES_FETCH_COMPUTER_TARGET", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    assert manage.configured_computer_target() == "tcp://127.0.0.1:5900"

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import socket
@@ -21,6 +22,7 @@ GEOMETRY = "1280x800"
 TARGET = f"tcp://{RFB_HOST}:{RFB_PORT}"
 KIND = "Virtual Linux desktop"
 NAME = "Fetch computer"
+TARGET_ENV = "HERMES_FETCH_COMPUTER_TARGET"
 
 
 class ComputerError(RuntimeError):
@@ -89,7 +91,7 @@ def engine_missing_instructions() -> str:
         "    sudo apt-get update && sudo apt-get install -y docker.io\n"
         "    sudo systemctl enable --now docker\n"
         "  Fedora:\n"
-        "    sudo dnf install -y docker\n"
+        "    sudo dnf install -y moby-engine\n"
         "    sudo systemctl enable --now docker\n"
         "\n"
         f"  Then run:\n    {bootstrap_command()}"
@@ -214,19 +216,88 @@ def container_running(engine: str, name: str = CONTAINER_NAME) -> bool:
     return result.returncode == 0 and result.stdout.strip().lower() == "true"
 
 
+def hermes_env_path() -> Path:
+    store_home = os.environ.get("HERMES_FETCH_STORE_HOME", "").strip()
+    if store_home:
+        return Path(os.path.expanduser(store_home)) / ".env"
+    hermes_home = os.environ.get("HERMES_HOME", "").strip()
+    if hermes_home:
+        return Path(os.path.expanduser(hermes_home)) / ".env"
+    return Path.home() / ".hermes" / ".env"
+
+
+def _env_file_value(path: Path, key: str) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    found = ""
+    for line in lines:
+        raw = line.strip()
+        if raw.startswith("export "):
+            raw = raw[7:].lstrip()
+        if not raw or raw.startswith("#") or "=" not in raw:
+            continue
+        name, _separator, value = raw.partition("=")
+        if name.strip() != key:
+            continue
+        try:
+            decoded = json.loads(value)
+            found = decoded if isinstance(decoded, str) else ""
+        except (TypeError, ValueError):
+            found = value.strip().strip("'\"")
+    return found
+
+
+def configured_computer_target() -> str:
+    return (os.environ.get(TARGET_ENV, "").strip() or _env_file_value(hermes_env_path(), TARGET_ENV))
+
+
+def parse_tcp_target(target: str) -> tuple[str, int] | None:
+    if not target.startswith("tcp://"):
+        return None
+    rest = target[len("tcp://") :]
+    host, separator, port_text = rest.rpartition(":")
+    if not separator or not host:
+        return None
+    try:
+        return host, int(port_text)
+    except ValueError:
+        return None
+
+
+def existing_loopback_desktop_ready() -> bool:
+    """True when linux-vps / linux-desktop (or any persisted target) already answers."""
+
+    target = configured_computer_target()
+    if not target:
+        return False
+    parsed = parse_tcp_target(target)
+    if parsed is None:
+        return True
+    host, port = parsed
+    return rfb_port_open(host, port)
+
+
 def computer_readiness(*, platform: str | None = None) -> dict[str, str]:
     if not uses_host_network(platform):
         return {"state": "not-linux", "message": ""}
-    if not engine_binaries():
-        return {"state": "engine-missing", "message": engine_missing_instructions()}
-    if not engine_daemon_ready(ENGINE):
-        return {"state": "engine-not-running", "message": engine_not_running_instructions()}
-    if container_running(ENGINE):
+    binaries = engine_binaries()
+    if binaries and engine_daemon_ready(ENGINE) and container_running(ENGINE):
         return {
             "state": "ready",
             "engine": ENGINE,
             "message": "Fetch computer is running. Fetch Watch can use this desktop.",
         }
+    if existing_loopback_desktop_ready():
+        return {
+            "state": "ready",
+            "message": "Fetch computer is already configured on this host.",
+        }
+    if not binaries:
+        return {"state": "engine-missing", "message": engine_missing_instructions()}
+    if not engine_daemon_ready(ENGINE):
+        return {"state": "engine-not-running", "message": engine_not_running_instructions()}
     return {
         "state": "container-absent",
         "engine": ENGINE,
@@ -238,8 +309,8 @@ def guide_linux_computer(*, offer_bootstrap: bool = True, printer=print) -> str:
     """Print copy-pasteable next steps and optionally start the container."""
 
     report = computer_readiness()
-    if report["state"] == "not-linux":
-        return "not-linux"
+    if report["state"] in {"not-linux", "configured"}:
+        return report["state"]
     printer(report["message"])
     if report["state"] != "container-absent" or not offer_bootstrap:
         return report["state"]
@@ -269,6 +340,49 @@ def rfb_port_open(host: str = RFB_HOST, port: int = RFB_PORT) -> bool:
         return False
 
 
+def host_user_ids() -> tuple[int | None, int | None]:
+    getuid = getattr(os, "getuid", None)
+    getgid = getattr(os, "getgid", None)
+    if not callable(getuid) or not callable(getgid):
+        return None, None
+    try:
+        return int(getuid()), int(getgid())
+    except (OSError, TypeError, ValueError):
+        return None, None
+
+
+def x11_socket_path(display: str = DISPLAY_NAME) -> Path:
+    return Path("/tmp/.X11-unix") / f"X{str(display).lstrip(':')}"
+
+
+def x11_socket_present(display: str = DISPLAY_NAME) -> bool:
+    return x11_socket_path(display).exists()
+
+
+def _xauth_record(family: int, address: bytes, number: bytes, cookie: bytes) -> bytes:
+    name = b"MIT-MAGIC-COOKIE-1"
+
+    def field(data: bytes) -> bytes:
+        return len(data).to_bytes(2, "big") + data
+
+    return family.to_bytes(2, "big") + field(address) + field(number) + field(name) + field(cookie)
+
+
+def write_xauthority_cookie(path: Path, display: str = DISPLAY_NAME, cookie: bytes | None = None) -> None:
+    payload_cookie = cookie if cookie is not None else os.urandom(16)
+    number = str(display).lstrip(":").encode("ascii")
+    records = [_xauth_record(0xFFFF, b"", number, payload_cookie)]
+    host = socket.gethostname().encode("ascii", "replace")
+    if host:
+        records.append(_xauth_record(256, host, number, payload_cookie))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"".join(records))
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
 def stop_container(*, name: str = CONTAINER_NAME) -> str:
     binaries = engine_binaries()
     if not binaries:
@@ -293,30 +407,9 @@ def stop_container(*, name: str = CONTAINER_NAME) -> str:
 
 
 def ensure_xauthority(path: Path, display: str = DISPLAY_NAME) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.exists():
-        path.touch()
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
-    xauth = shutil.which("xauth")
-    if xauth is None:
-        return
-    subprocess.run(
-        [xauth, "-f", str(path), "remove", display],
-        check=False,
-        capture_output=True,
-    )
-    cookie = os.urandom(16).hex()
-    added = subprocess.run(
-        [xauth, "-f", str(path), "add", display, "MIT-MAGIC-COOKIE-1", cookie],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if added.returncode != 0:
-        raise ComputerError("Could not write the Fetch computer Xauthority cookie.")
+    """Write a cookie without host `xauth` so a bind-mount is never an empty file."""
+
+    write_xauthority_cookie(path, display=display)
 
 
 def build_image(engine: str) -> None:
@@ -331,7 +424,6 @@ def build_image(engine: str) -> None:
 def run_container(engine: str) -> None:
     runtime_dir().mkdir(parents=True, exist_ok=True)
     container_home_dir().mkdir(parents=True, exist_ok=True)
-    ensure_xauthority(xauthority_path())
     if container_exists(engine):
         stop_container()
     if rfb_port_open():
@@ -339,6 +431,13 @@ def run_container(engine: str) -> None:
             f"Fetch computer port {RFB_PORT} is already in use on {RFB_HOST}. "
             "Stop the other VNC or linux-vps desktop, then rerun this setup."
         )
+    if uses_host_network() and x11_socket_present():
+        raise ComputerError(
+            f"Display {DISPLAY_NAME} already has a socket at {x11_socket_path()}. "
+            "Stop the other X server or linux-vps desktop, then rerun this setup."
+        )
+    ensure_xauthority(xauthority_path())
+    uid, gid = host_user_ids()
     args = container_run_args(
         engine=engine,
         xauthority=str(xauthority_path()),
@@ -346,8 +445,8 @@ def run_container(engine: str) -> None:
         host_network=uses_host_network(),
         restart="unless-stopped",
         selinux=selinux_enforcing(),
-        uid=os.getuid(),
-        gid=os.getgid(),
+        uid=uid,
+        gid=gid,
     )
     result = subprocess.run(args, check=False, capture_output=True, text=True)
     if result.returncode != 0:

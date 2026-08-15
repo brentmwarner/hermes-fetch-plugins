@@ -117,9 +117,10 @@ def _guide_linux_computer() -> str:
                 print()
 
     report = linux_computer.computer_readiness()
-    if report["state"] == "ready":
-        print_info(report["message"])
-        return "ready"
+    if report["state"] in {"ready", "configured"}:
+        if report.get("message"):
+            print_info(report["message"])
+        return report["state"]
     print_warning("Fetch computer is not ready on this Linux host.")
     print()
     return linux_computer.guide_linux_computer(offer_bootstrap=True, printer=_print)

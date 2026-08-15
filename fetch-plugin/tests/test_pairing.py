@@ -499,3 +499,26 @@ def test_guide_linux_computer_prints_engine_missing_steps(monkeypatch, capsys) -
     assert "Podman" not in out
     assert "sudo apt-get install -y docker.io" in out
     assert "manage-computer.sh bootstrap" in out
+
+
+def test_guide_linux_computer_is_quiet_when_opt_in_desktop_is_ready(monkeypatch, capsys) -> None:
+    class FakeLinuxComputer:
+        @staticmethod
+        def computer_readiness():
+            return {
+                "state": "ready",
+                "message": "Fetch computer is already configured on this host.",
+            }
+
+        @staticmethod
+        def guide_linux_computer(*, offer_bootstrap=True, printer=print):
+            raise AssertionError("opt-in desktops must not be steered into bootstrap")
+
+    monkeypatch.setattr(pairing.sys, "platform", "linux")
+    monkeypatch.setattr(pairing, "_linux_computer_module", lambda: FakeLinuxComputer())
+
+    assert pairing._guide_linux_computer() == "ready"
+    out = capsys.readouterr().out
+    assert "already configured" in out
+    assert "not ready" not in out
+    assert "bootstrap" not in out
