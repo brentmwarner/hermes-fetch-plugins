@@ -101,11 +101,21 @@ def test_disable_computer_stops_bridge_and_clears_persisted_target(tmp_path, mon
             calls.append("stop")
             return True
 
+    class FakeRelayRuntime:
+        def restart_relay_runtime_for_reconfigure(self):
+            calls.append("restart-relay")
+            return {"stopped": [42], "left_running": []}
+
+        def ensure_relay_runtime(self):
+            calls.append("start-relay")
+            return "started"
+
     monkeypatch.setattr(setup, "_computer_runtime_module", lambda: FakeRuntime())
+    monkeypatch.setattr(setup, "_relay_runtime_module", lambda: FakeRelayRuntime())
 
     setup.disable_computer()
 
-    assert calls == ["stop"]
+    assert calls == ["stop", "restart-relay", "start-relay"]
     saved = env_path.read_text(encoding="utf-8")
     assert "HERMES_FETCH_COMPUTER_TARGET" not in saved
     assert setup.VNC_PASSWORD_ENV not in saved
@@ -383,3 +393,80 @@ def test_configure_requires_a_managed_runtime_to_adopt_the_visible_display(
             wait_seconds=5,
             check_only=False,
         )
+
+
+def test_configure_accepts_a_restarted_manual_gateway(tmp_path, monkeypatch) -> None:
+    calls = []
+    owner_pids = [[42], [84]]
+
+    class FakeComputerRuntime:
+        def restart_computer_runtime(self):
+            return True
+
+        def ensure_computer_runtime(self):
+            return "started"
+
+    class FakeRelayRuntime:
+        def restart_relay_runtime_for_reconfigure(self):
+            return {"stopped": [], "left_running": owner_pids.pop(0)}
+
+        def ensure_relay_runtime(self):
+            raise AssertionError("A live manual gateway already owns the relay")
+
+    monkeypatch.setattr(setup, "probe_desktop", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        setup,
+        "_credentials",
+        lambda: {"relay_url": "https://relay", "agent_id": "agent", "agent_secret": "secret"},
+    )
+    monkeypatch.setattr(setup, "hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(setup, "_computer_runtime_module", lambda: FakeComputerRuntime())
+    monkeypatch.setattr(setup, "_relay_runtime_module", lambda: FakeRelayRuntime())
+    monkeypatch.setattr(
+        setup,
+        "wait_for_relay",
+        lambda credentials, wait_seconds: calls.append("ready") or {"ok": True},
+    )
+
+    kwargs = {
+        "target": "tcp://127.0.0.1:5901",
+        "kind": "Virtual Linux desktop",
+        "name": "",
+        "display": ":1",
+        "xauthority": "/tmp/fetch.Xauthority",
+        "headed_browser": True,
+        "vnc_password": "",
+        "wait_seconds": 5,
+        "check_only": False,
+    }
+    with pytest.raises(setup.SetupError, match="Restart that gateway"):
+        setup.configure(**kwargs)
+
+    assert setup.configure(**kwargs) == {"ok": True}
+    assert calls == ["ready"]
+    assert not (tmp_path / "run" / "fetch-computer-gateway-restart.json").exists()
+
+
+def test_disable_computer_requires_manual_gateway_restart(tmp_path, monkeypatch) -> None:
+    owner_pids = [[42], [84]]
+
+    class FakeComputerRuntime:
+        def restart_computer_runtime(self):
+            return True
+
+    class FakeRelayRuntime:
+        def restart_relay_runtime_for_reconfigure(self):
+            return {"stopped": [], "left_running": owner_pids.pop(0)}
+
+        def ensure_relay_runtime(self):
+            raise AssertionError("A live manual gateway already owns the relay")
+
+    monkeypatch.setattr(setup, "hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(setup, "_computer_runtime_module", lambda: FakeComputerRuntime())
+    monkeypatch.setattr(setup, "_relay_runtime_module", lambda: FakeRelayRuntime())
+
+    with pytest.raises(setup.SetupError, match="Restart that gateway"):
+        setup.disable_computer()
+
+    setup.disable_computer()
+    assert not (tmp_path / "run" / "fetch-computer-gateway-restart.json").exists()

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
+import hashlib
 import importlib.util
 import json
 import os
@@ -36,6 +37,7 @@ COMPUTER_ENV_KEYS = (
     BROWSER_HEADED_ENV,
     VNC_PASSWORD_ENV,
 )
+_GATEWAY_RESTART_STATE_FILE = "fetch-computer-gateway-restart.json"
 
 
 class SetupError(RuntimeError):
@@ -142,6 +144,68 @@ def _relay_runtime_module():
     return _load_sibling("fetch_plugin_runtime_setup", "_runtime.py")
 
 
+def _gateway_restart_state_path() -> Path:
+    return hermes_home() / "run" / _GATEWAY_RESTART_STATE_FILE
+
+
+def _configuration_fingerprint(values: dict[str, str]) -> str:
+    payload = json.dumps(values, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _read_gateway_restart_state() -> tuple[str, set[int]]:
+    try:
+        data = json.loads(_gateway_restart_state_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "", set()
+    if not isinstance(data, dict):
+        return "", set()
+    fingerprint = str(data.get("fingerprint") or "")
+    pids: set[int] = set()
+    for raw_pid in data.get("pids") or []:
+        try:
+            pid = int(raw_pid)
+        except (TypeError, ValueError):
+            continue
+        if pid > 0:
+            pids.add(pid)
+    return fingerprint, pids
+
+
+def _write_gateway_restart_state(fingerprint: str, pids: set[int]) -> None:
+    path = _gateway_restart_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(
+        {"fingerprint": fingerprint, "pids": sorted(pids)},
+        separators=(",", ":"),
+    )
+    _write_env_file(path, [payload])
+
+
+def _clear_gateway_restart_state() -> None:
+    try:
+        _gateway_restart_state_path().unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise SetupError(f"Could not clear the Hermes restart checkpoint: {exc}") from exc
+
+
+def _manual_gateway_adopted_configuration(fingerprint: str, pids: list[int]) -> bool:
+    current_pids = {pid for pid in pids if pid > 0}
+    previous_fingerprint, previous_pids = _read_gateway_restart_state()
+    if (
+        current_pids
+        and previous_fingerprint == fingerprint
+        and previous_pids
+        and current_pids.isdisjoint(previous_pids)
+    ):
+        _clear_gateway_restart_state()
+        return True
+    _write_gateway_restart_state(fingerprint, current_pids)
+    return False
+
+
 def disable_computer() -> None:
     computer_runtime = _computer_runtime_module()
     if not computer_runtime.restart_computer_runtime():
@@ -149,6 +213,24 @@ def disable_computer() -> None:
     remove_environment_keys(hermes_home() / ".env", COMPUTER_ENV_KEYS)
     for key in COMPUTER_ENV_KEYS:
         os.environ.pop(key, None)
+
+    relay_runtime = _relay_runtime_module()
+    relay_handoff = relay_runtime.restart_relay_runtime_for_reconfigure()
+    left_running = relay_handoff.get("left_running") or []
+    if left_running:
+        disabled_fingerprint = _configuration_fingerprint({"computer": "disabled"})
+        if not _manual_gateway_adopted_configuration(disabled_fingerprint, left_running):
+            raise SetupError(
+                "Computer access is disabled, but a manually managed Hermes gateway still has the "
+                "old desktop environment. Restart that gateway, then rerun this cleanup."
+            )
+    else:
+        _clear_gateway_restart_state()
+        relay_runtime_status = relay_runtime.ensure_relay_runtime()
+        if relay_runtime_status not in {"started", "already-running", "self", "disabled"}:
+            raise SetupError(
+                f"Could not restart the Hermes runtime after cleanup: {relay_runtime_status}"
+            )
 
 
 def _persisted_environment_value(path: Path, key: str) -> str:
@@ -311,16 +393,23 @@ def configure(
 
         relay_runtime = _relay_runtime_module()
         relay_handoff = relay_runtime.restart_relay_runtime_for_reconfigure()
-        if relay_handoff.get("left_running"):
-            raise SetupError(
-                "The desktop is configured, but a manually managed Hermes gateway is still running "
-                "with the old display environment. Restart that gateway, then rerun this check."
-            )
-        relay_runtime_status = relay_runtime.ensure_relay_runtime()
-        if relay_runtime_status not in {"started", "already-running", "self"}:
-            raise SetupError(
-                f"Could not restart the Hermes runtime on the visible desktop: {relay_runtime_status}"
-            )
+        left_running = relay_handoff.get("left_running") or []
+        fingerprint = _configuration_fingerprint(values)
+        if left_running:
+            if not _manual_gateway_adopted_configuration(fingerprint, left_running):
+                raise SetupError(
+                    "The desktop is configured, but a manually managed Hermes gateway is still "
+                    "running with the old display environment. Restart that gateway, then rerun "
+                    "this check."
+                )
+        else:
+            _clear_gateway_restart_state()
+            relay_runtime_status = relay_runtime.ensure_relay_runtime()
+            if relay_runtime_status not in {"started", "already-running", "self"}:
+                raise SetupError(
+                    f"Could not restart the Hermes runtime on the visible desktop: "
+                    f"{relay_runtime_status}"
+                )
     return wait_for_relay(credentials, wait_seconds=wait_seconds)
 
 
