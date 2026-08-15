@@ -93,6 +93,16 @@ def test_ensure_does_not_start_before_pairing(tmp_path, monkeypatch) -> None:
     assert computer_runtime.ensure_computer_runtime() == "unpaired"
 
 
+def test_child_reads_vnc_password_locally_without_embedding_it(monkeypatch) -> None:
+    monkeypatch.setenv(computer_runtime.VNC_PASSWORD_ENV, "never-embed-this")
+
+    script = computer_runtime._child_script()
+
+    assert computer_runtime.VNC_PASSWORD_ENV in script
+    assert "vnc_password=os.environ.get" in script
+    assert "never-embed-this" not in script
+
+
 def test_active_pid_does_not_terminate_reused_foreign_process(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv(computer_runtime.TARGET_ENV, "tcp://127.0.0.1:5901")
     monkeypatch.setenv("HERMES_FETCH_STORE_HOME", str(tmp_path))

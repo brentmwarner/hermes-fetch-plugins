@@ -9,13 +9,16 @@ forwards to a LAN/public VNC endpoint.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import ipaddress
 import json
 import logging
 import platform
 import random
 import socket
+import sys
 import uuid
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -34,6 +37,30 @@ CID_BYTES = 16
 DEFAULT_MAX_FRAME_BYTES = 8 * 1024 * 1024
 _LOCAL_CONNECT_TIMEOUT_S = 5.0
 _RECONNECT_CAP_S = 30.0
+
+_RFB_VERSION_38 = b"RFB 003.008\n"
+_RFB_SECURITY_NONE = 1
+_RFB_SECURITY_VNC_AUTH = 2
+_RFB_SECURITY_ARD = 30
+
+
+class VNCSetupError(RuntimeError):
+    """The loopback VNC server is reachable but not safely configured."""
+
+
+def _load_vnc_auth_module():
+    name = "fetch_plugin_vnc_auth"
+    existing = sys.modules.get(name)
+    if existing is not None:
+        return existing
+    path = Path(__file__).resolve().parent / "_vnc_auth.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise VNCSetupError("Fetch could not load local VNC authentication support")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def _http_to_ws(url: str) -> str:
@@ -172,6 +199,9 @@ class _TCPConnection:
         self.writer.write(data)
         await self.writer.drain()
 
+    async def readexactly(self, size: int) -> bytes:
+        return await self.reader.readexactly(size)
+
     async def close(self) -> None:
         self.writer.close()
         try:
@@ -189,6 +219,170 @@ class _TCPConnection:
         return data
 
 
+class _PreauthenticatedVNCConnection:
+    """Present a no-auth RFB 3.8 handshake after host-side authentication."""
+
+    def __init__(self, conn: _TCPConnection) -> None:
+        self.conn = conn
+        self._viewer_input = bytearray()
+        self._viewer_state = "version"
+        self._initial_banner_pending = True
+        self._responses: asyncio.Queue[bytes] = asyncio.Queue()
+
+    async def send(self, data: bytes) -> None:
+        if not isinstance(data, bytes) or not data:
+            raise VNCSetupError("The viewer sent an invalid RFB frame")
+        self._viewer_input.extend(data)
+        while self._viewer_input:
+            if self._viewer_state == "version":
+                if len(self._viewer_input) < 12:
+                    return
+                version = bytes(self._viewer_input[:12])
+                del self._viewer_input[:12]
+                if not _valid_rfb_banner(version):
+                    raise VNCSetupError("The viewer sent an invalid RFB version")
+                self._viewer_state = "security"
+                self._responses.put_nowait(bytes((_RFB_SECURITY_NONE, _RFB_SECURITY_NONE)))
+                continue
+            if self._viewer_state == "security":
+                security_type = self._viewer_input.pop(0)
+                if security_type != _RFB_SECURITY_NONE:
+                    raise VNCSetupError("The viewer rejected the private RFB session")
+                self._viewer_state = "proxy"
+                self._responses.put_nowait(b"\0\0\0\0")
+                continue
+            payload = bytes(self._viewer_input)
+            self._viewer_input.clear()
+            await self.conn.send(payload)
+
+    async def close(self) -> None:
+        await self.conn.close()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> bytes:
+        if self._initial_banner_pending:
+            self._initial_banner_pending = False
+            return _RFB_VERSION_38
+        if self._viewer_state != "proxy" or not self._responses.empty():
+            return await self._responses.get()
+        return await self.conn.__anext__()
+
+
+def _valid_rfb_banner(value: bytes) -> bool:
+    if len(value) != 12 or not value.startswith(b"RFB ") or not value.endswith(b"\n"):
+        return False
+    try:
+        major, minor = value[4:11].decode("ascii").split(".", maxsplit=1)
+        return len(major) == 3 and len(minor) == 3 and major.isdigit() and minor.isdigit()
+    except (UnicodeDecodeError, ValueError):
+        return False
+
+
+def _rfb_version(value: bytes) -> tuple[int, int]:
+    if not _valid_rfb_banner(value):
+        raise VNCSetupError("The local computer did not provide a valid RFB version")
+    major, minor = value[4:11].decode("ascii").split(".", maxsplit=1)
+    return int(major), int(minor)
+
+
+async def _rfb_failure_reason(conn: _TCPConnection) -> str:
+    try:
+        length = int.from_bytes(await conn.readexactly(4), "big")
+        if length <= 0 or length > 4096:
+            return "authentication rejected"
+        value = await conn.readexactly(length)
+        return value.decode("utf-8", errors="replace")[:200]
+    except (asyncio.IncompleteReadError, OSError):
+        return "authentication rejected"
+
+
+async def _authenticate_local_vnc(
+    conn: _TCPConnection,
+    password: str,
+) -> _PreauthenticatedVNCConnection:
+    banner = await conn.readexactly(12)
+    major, minor = _rfb_version(banner)
+    if major != 3 or minor < 3:
+        raise VNCSetupError(f"Unsupported local RFB version {major}.{minor}")
+    await conn.send(banner)
+
+    security_type: int
+    if minor == 3:
+        security_type = int.from_bytes(await conn.readexactly(4), "big")
+        if security_type == 0:
+            reason = await _rfb_failure_reason(conn)
+            raise VNCSetupError(f"The local VNC server refused access: {reason}")
+        if security_type not in {_RFB_SECURITY_NONE, _RFB_SECURITY_VNC_AUTH}:
+            raise VNCSetupError(
+                f"The local VNC server requires unsupported security type {security_type}"
+            )
+    else:
+        count = (await conn.readexactly(1))[0]
+        if count == 0:
+            reason = await _rfb_failure_reason(conn)
+            raise VNCSetupError(f"The local VNC server refused access: {reason}")
+        offered = set(await conn.readexactly(count))
+        if _RFB_SECURITY_VNC_AUTH in offered and password:
+            security_type = _RFB_SECURITY_VNC_AUTH
+        elif _RFB_SECURITY_NONE in offered:
+            security_type = _RFB_SECURITY_NONE
+        elif _RFB_SECURITY_VNC_AUTH in offered:
+            raise VNCSetupError(
+                "The local VNC password is not configured in Fetch computer setup"
+            )
+        elif _RFB_SECURITY_ARD in offered:
+            raise VNCSetupError(
+                "macOS Screen Sharing is using account authentication. Enable "
+                "'VNC viewers may control screen with password' and rerun Fetch computer setup."
+            )
+        else:
+            offered_label = ", ".join(str(value) for value in sorted(offered))
+            raise VNCSetupError(
+                f"The local VNC server requires unsupported security types: {offered_label}"
+            )
+        await conn.send(bytes((security_type,)))
+
+    if security_type == _RFB_SECURITY_VNC_AUTH:
+        if not password:
+            raise VNCSetupError(
+                "The local VNC password is not configured in Fetch computer setup"
+            )
+        challenge = await conn.readexactly(16)
+        response = _load_vnc_auth_module().challenge_response(password, challenge)
+        await conn.send(response)
+
+    # RFC 6143 Appendix A.2: RFB 3.7 None skips SecurityResult and goes
+    # straight to ClientInit/ServerInit. VNC Authentication still sends it.
+    # RFB 3.8 always sends SecurityResult, including for None.
+    expects_result = security_type == _RFB_SECURITY_VNC_AUTH or minor >= 8
+    if expects_result:
+        result = int.from_bytes(await conn.readexactly(4), "big")
+        if result != 0:
+            reason = await _rfb_failure_reason(conn) if minor >= 8 else "authentication rejected"
+            raise VNCSetupError(f"The local VNC server rejected its saved password: {reason}")
+    return _PreauthenticatedVNCConnection(conn)
+
+
+async def open_local_vnc(
+    target: str,
+    *,
+    password: str = "",
+    read_size: int = 64 * 1024,
+) -> _PreauthenticatedVNCConnection:
+    parsed = urlsplit(validate_local_target(target))
+    if parsed.scheme != "tcp" or parsed.hostname is None or parsed.port is None:
+        raise VNCSetupError("Automatic local authentication requires a tcp:// VNC target")
+    reader, writer = await asyncio.open_connection(parsed.hostname, parsed.port)
+    conn = _TCPConnection(reader, writer, read_size=read_size)
+    try:
+        return await _authenticate_local_vnc(conn, password)
+    except BaseException:
+        await conn.close()
+        raise
+
+
 class AgentComputer:
     def __init__(
         self,
@@ -200,6 +394,7 @@ class AgentComputer:
         computer_name: str | None = None,
         computer_platform: str | None = None,
         computer_kind: str | None = None,
+        vnc_password: str | None = None,
         max_frame_bytes: int = DEFAULT_MAX_FRAME_BYTES,
         relay_connect=None,
         local_connect=None,
@@ -220,6 +415,7 @@ class AgentComputer:
             computer_kind or default_computer_kind(),
             fallback="Computer",
         )
+        self.vnc_password = vnc_password or ""
         self.max_frame_bytes = max(1024, max_frame_bytes)
         self._relay_connect = relay_connect or self._default_relay_connect
         self._local_connect = local_connect or self._default_local_connect
@@ -399,9 +595,8 @@ class AgentComputer:
             )
         if parsed.scheme != "tcp" or parsed.hostname is None or parsed.port is None:
             raise ValueError(f"{COMPUTER_TARGET_ENV} is invalid")
-        reader, writer = await asyncio.open_connection(parsed.hostname, parsed.port)
-        return _TCPConnection(
-            reader,
-            writer,
+        return await open_local_vnc(
+            url,
+            password=self.vnc_password,
             read_size=min(self.max_frame_bytes, 64 * 1024),
         )

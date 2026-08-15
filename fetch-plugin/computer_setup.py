@@ -4,10 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import getpass
 import importlib.util
 import json
 import os
-import socket
 import sys
 import tempfile
 import time
@@ -22,7 +23,14 @@ KIND_ENV = "HERMES_FETCH_COMPUTER_KIND"
 LEGACY_TARGET_ENV = "HERMES_FETCH_COMPUTER_WS_URL"
 TUNNEL_ENV = "HERMES_FETCH_TUNNEL_ENABLED"
 DISPLAY_ENV = "DISPLAY"
-COMPUTER_ENV_KEYS = (TARGET_ENV, NAME_ENV, KIND_ENV, LEGACY_TARGET_ENV)
+VNC_PASSWORD_ENV = "HERMES_FETCH_COMPUTER_VNC_PASSWORD"
+COMPUTER_ENV_KEYS = (
+    TARGET_ENV,
+    NAME_ENV,
+    KIND_ENV,
+    LEGACY_TARGET_ENV,
+    VNC_PASSWORD_ENV,
+)
 
 
 class SetupError(RuntimeError):
@@ -134,19 +142,34 @@ def disable_computer() -> None:
         os.environ.pop(key, None)
 
 
-def _read_rfb_banner(sock: socket.socket) -> bytes:
-    chunks: list[bytes] = []
-    remaining = 12
-    while remaining > 0:
-        chunk = sock.recv(remaining)
-        if not chunk:
-            break
-        chunks.append(chunk)
-        remaining -= len(chunk)
-    return b"".join(chunks)
+def _persisted_environment_value(path: Path, key: str) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    for line in reversed(lines):
+        if _env_line_key(line) != key:
+            continue
+        raw = line.strip()
+        if raw.startswith("export "):
+            raw = raw[7:].lstrip()
+        _name, _separator, value = raw.partition("=")
+        try:
+            decoded = json.loads(value)
+            return decoded if isinstance(decoded, str) else ""
+        except (TypeError, ValueError):
+            return value.strip().strip("'\"")
+    return ""
 
 
-def probe_desktop(target: str, *, wait_seconds: float) -> None:
+def configured_vnc_password() -> str:
+    current = os.environ.get(VNC_PASSWORD_ENV, "")
+    if current:
+        return current
+    return _persisted_environment_value(hermes_home() / ".env", VNC_PASSWORD_ENV)
+
+
+def probe_desktop(target: str, *, password: str, wait_seconds: float) -> None:
     computer = _load_sibling("fetch_plugin_computer_setup_probe", "_computer.py")
     target = computer.validate_local_target(target)
     parsed = urlsplit(target)
@@ -157,13 +180,15 @@ def probe_desktop(target: str, *, wait_seconds: float) -> None:
     last_error = "no RFB response"
     while True:
         try:
-            with socket.create_connection((parsed.hostname, parsed.port), timeout=2.0) as connection:
-                connection.settimeout(2.0)
-                banner = _read_rfb_banner(connection)
-            if banner.startswith(b"RFB "):
-                return
-            last_error = f"unexpected protocol banner {banner[:12]!r}"
-        except OSError as exc:
+            async def open_and_close() -> None:
+                connection = await computer.open_local_vnc(target, password=password)
+                await connection.close()
+
+            asyncio.run(asyncio.wait_for(open_and_close(), timeout=2.0))
+            return
+        except computer.VNCSetupError as exc:
+            raise SetupError(str(exc)) from exc
+        except (asyncio.IncompleteReadError, OSError, TimeoutError) as exc:
             last_error = str(exc)
         if time.monotonic() >= deadline:
             break
@@ -239,10 +264,11 @@ def configure(
     kind: str,
     name: str,
     display: str,
+    vnc_password: str,
     wait_seconds: float,
     check_only: bool,
 ) -> dict:
-    probe_desktop(target, wait_seconds=wait_seconds)
+    probe_desktop(target, password=vnc_password, wait_seconds=wait_seconds)
     credentials = _credentials()
     if not check_only:
         values = {
@@ -254,8 +280,13 @@ def configure(
             values[NAME_ENV] = name
         if display:
             values[DISPLAY_ENV] = display
+        if vnc_password:
+            values[VNC_PASSWORD_ENV] = vnc_password
         persist_environment(hermes_home() / ".env", values)
         os.environ.update(values)
+        if not vnc_password:
+            remove_environment_keys(hermes_home() / ".env", (VNC_PASSWORD_ENV,))
+            os.environ.pop(VNC_PASSWORD_ENV, None)
         computer_runtime = _computer_runtime_module()
         if not computer_runtime.restart_computer_runtime():
             raise SetupError("Could not restart the Fetch computer bridge.")
@@ -276,6 +307,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--kind")
     parser.add_argument("--name", default="")
     parser.add_argument("--display", default="")
+    parser.add_argument(
+        "--ask-vnc-password",
+        action="store_true",
+        help="Securely prompt on this host for its dedicated VNC password.",
+    )
     parser.add_argument("--wait-seconds", type=float, default=60.0)
     parser.add_argument("--check-only", action="store_true")
     return parser
@@ -291,11 +327,17 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if not args.target or not args.kind:
             parser.error("--target and --kind are required unless --disable is set")
+        vnc_password = configured_vnc_password()
+        if args.ask_vnc_password:
+            vnc_password = getpass.getpass("Dedicated Screen Sharing/VNC password: ")
+            if not vnc_password:
+                raise SetupError("A dedicated Screen Sharing/VNC password is required.")
         status = configure(
             target=args.target,
             kind=args.kind,
             name=args.name,
             display=args.display,
+            vnc_password=vnc_password,
             wait_seconds=args.wait_seconds,
             check_only=args.check_only,
         )

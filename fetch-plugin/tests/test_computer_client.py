@@ -102,7 +102,7 @@ def test_local_computer_target_rejects_unsafe_targets(url: str) -> None:
 
 
 def test_relay_websocket_url_and_credentials() -> None:
-    client = _client()
+    client = _client(vnc_password="host-only-password")
 
     assert client.relay_ws_url == "wss://relay.test/v1/computer/agent"
     assert client._headers == {
@@ -155,6 +155,9 @@ async def test_default_connections_apply_binary_protocol_and_frame_limits(monkey
 
 async def test_direct_tcp_target_opens_loopback_stream(monkeypatch) -> None:
     reader = asyncio.StreamReader()
+    reader.feed_data(b"RFB 003.008\n")
+    reader.feed_data(b"\x01\x01")
+    reader.feed_data(b"\0\0\0\0")
 
     class FakeWriter:
         def __init__(self) -> None:
@@ -183,10 +186,198 @@ async def test_direct_tcp_target_opens_loopback_stream(monkeypatch) -> None:
     client = _client(local_target="tcp://127.0.0.1:5900", max_frame_bytes=4096)
     conn = await client._default_local_connect(client.local_target)
 
+    assert await conn.__anext__() == b"RFB 003.008\n"
     await conn.send(b"RFB 003.008\n")
-    assert writer.sent == [b"RFB 003.008\n"]
+    assert await conn.__anext__() == b"\x01\x01"
+    await conn.send(b"\x01")
+    assert await conn.__anext__() == b"\0\0\0\0"
+    await conn.send(b"\x01")
+    assert writer.sent == [b"RFB 003.008\n", b"\x01", b"\x01"]
     await conn.close()
     assert writer.closed is True
+
+
+async def test_direct_tcp_target_authenticates_saved_vnc_password(monkeypatch) -> None:
+    reader = asyncio.StreamReader()
+    challenge = bytes(range(16))
+    reader.feed_data(b"RFB 003.008\n")
+    reader.feed_data(b"\x02\x01\x02")
+    reader.feed_data(challenge)
+    reader.feed_data(b"\0\0\0\0")
+
+    class FakeWriter:
+        def __init__(self) -> None:
+            self.sent: list[bytes] = []
+
+        def write(self, data: bytes) -> None:
+            self.sent.append(data)
+
+        async def drain(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+        async def wait_closed(self) -> None:
+            return None
+
+    writer = FakeWriter()
+
+    async def fake_open_connection(_host: str, _port: int):
+        return reader, writer
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open_connection)
+    client = _client(
+        local_target="tcp://127.0.0.1:5900",
+        vnc_password="secret",
+        max_frame_bytes=4096,
+    )
+
+    conn = await client._default_local_connect(client.local_target)
+
+    assert await conn.__anext__() == b"RFB 003.008\n"
+    await conn.send(b"RFB 003.008\n\x01\x01")
+    assert await conn.__anext__() == b"\x01\x01"
+    assert await conn.__anext__() == b"\0\0\0\0"
+
+    assert writer.sent == [
+        b"RFB 003.008\n",
+        b"\x02",
+        bytes.fromhex("ee22539f33a5983ec12f9c2edbc995dd"),
+        b"\x01",
+    ]
+
+
+async def test_rfb_37_none_skips_security_result_and_forwards_server_init(monkeypatch) -> None:
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"RFB 003.007\n")
+    reader.feed_data(b"\x01\x01")
+    reader.feed_data(b"server-init")
+
+    class FakeWriter:
+        def __init__(self) -> None:
+            self.sent: list[bytes] = []
+
+        def write(self, data: bytes) -> None:
+            self.sent.append(data)
+
+        async def drain(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+        async def wait_closed(self) -> None:
+            return None
+
+    writer = FakeWriter()
+
+    async def fake_open_connection(_host: str, _port: int):
+        return reader, writer
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open_connection)
+    client = _client(local_target="tcp://127.0.0.1:5900")
+
+    conn = await client._default_local_connect(client.local_target)
+    assert await conn.__anext__() == b"RFB 003.008\n"
+    await conn.send(b"RFB 003.008\n\x01\x01")
+    assert await conn.__anext__() == b"\x01\x01"
+    assert await conn.__anext__() == b"\0\0\0\0"
+    assert await conn.__anext__() == b"server-init"
+    assert writer.sent == [b"RFB 003.007\n", b"\x01", b"\x01"]
+
+
+async def test_rfb_37_vnc_auth_consumes_security_result_before_desktop_bytes(monkeypatch) -> None:
+    reader = asyncio.StreamReader()
+    challenge = bytes(range(16))
+    reader.feed_data(b"RFB 003.007\n")
+    reader.feed_data(b"\x01\x02")
+    reader.feed_data(challenge)
+    reader.feed_data(b"\0\0\0\0server-init")
+
+    class FakeWriter:
+        def __init__(self) -> None:
+            self.sent: list[bytes] = []
+
+        def write(self, data: bytes) -> None:
+            self.sent.append(data)
+
+        async def drain(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+        async def wait_closed(self) -> None:
+            return None
+
+    writer = FakeWriter()
+
+    async def fake_open_connection(_host: str, _port: int):
+        return reader, writer
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open_connection)
+    client = _client(local_target="tcp://127.0.0.1:5900", vnc_password="secret")
+
+    conn = await client._default_local_connect(client.local_target)
+    assert await conn.__anext__() == b"RFB 003.008\n"
+    await conn.send(b"RFB 003.008\n\x01\x01")
+    assert await conn.__anext__() == b"\x01\x01"
+    assert await conn.__anext__() == b"\0\0\0\0"
+    assert await conn.__anext__() == b"server-init"
+    assert writer.sent == [
+        b"RFB 003.007\n",
+        b"\x02",
+        bytes.fromhex("ee22539f33a5983ec12f9c2edbc995dd"),
+        b"\x01",
+    ]
+
+
+def test_vnc_auth_loader_fails_cleanly_when_module_is_unavailable(monkeypatch) -> None:
+    monkeypatch.delitem(computer.sys.modules, "fetch_plugin_vnc_auth", raising=False)
+    monkeypatch.setattr(computer.importlib.util, "spec_from_file_location", lambda *_args: None)
+
+    with pytest.raises(computer.VNCSetupError, match="could not load"):
+        computer._load_vnc_auth_module()
+
+
+@pytest.mark.parametrize(
+    ("offered", "message"),
+    [
+        (b"\x01\x02", "password is not configured"),
+        (b"\x01\x1e", "VNC viewers may control screen with password"),
+    ],
+)
+async def test_direct_tcp_target_fails_closed_without_host_auth(
+    monkeypatch,
+    offered: bytes,
+    message: str,
+) -> None:
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"RFB 003.889\n")
+    reader.feed_data(offered)
+
+    class FakeWriter:
+        def write(self, _data: bytes) -> None:
+            return None
+
+        async def drain(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+        async def wait_closed(self) -> None:
+            return None
+
+    async def fake_open_connection(_host: str, _port: int):
+        return reader, FakeWriter()
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open_connection)
+    client = _client(local_target="tcp://127.0.0.1:5900")
+
+    with pytest.raises(computer.VNCSetupError, match=message):
+        await client._default_local_connect(client.local_target)
 
 
 async def test_binary_frames_bridge_in_both_directions() -> None:

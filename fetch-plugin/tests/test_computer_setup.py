@@ -50,6 +50,16 @@ def test_persist_environment_treats_chmod_as_best_effort(tmp_path, monkeypatch) 
     )
 
 
+def test_configured_vnc_password_reads_owner_only_hermes_environment(tmp_path, monkeypatch) -> None:
+    env_path = tmp_path / ".env"
+    setup.persist_environment(env_path, {setup.VNC_PASSWORD_ENV: 'local "secret"'})
+    monkeypatch.setattr(setup, "hermes_home", lambda: tmp_path)
+    monkeypatch.delenv(setup.VNC_PASSWORD_ENV, raising=False)
+
+    assert setup.configured_vnc_password() == 'local "secret"'
+    assert env_path.stat().st_mode & 0o777 == 0o600
+
+
 def test_remove_environment_keys_drops_computer_settings_and_keeps_other_lines(tmp_path) -> None:
     env_path = tmp_path / ".env"
     env_path.write_text(
@@ -71,11 +81,14 @@ def test_remove_environment_keys_drops_computer_settings_and_keeps_other_lines(t
 def test_disable_computer_stops_bridge_and_clears_persisted_target(tmp_path, monkeypatch) -> None:
     env_path = tmp_path / ".env"
     env_path.write_text(
-        'HERMES_FETCH_COMPUTER_TARGET="tcp://127.0.0.1:5901"\nHERMES_FETCH_TUNNEL_ENABLED="1"\n',
+        'HERMES_FETCH_COMPUTER_TARGET="tcp://127.0.0.1:5901"\n'
+        'HERMES_FETCH_COMPUTER_VNC_PASSWORD="dedicated-password"\n'
+        'HERMES_FETCH_TUNNEL_ENABLED="1"\n',
         encoding="utf-8",
     )
     monkeypatch.setenv("HERMES_FETCH_COMPUTER_TARGET", "tcp://127.0.0.1:5901")
     monkeypatch.setenv("HERMES_FETCH_COMPUTER_KIND", "Virtual Linux desktop")
+    monkeypatch.setenv(setup.VNC_PASSWORD_ENV, "dedicated-password")
     monkeypatch.setattr(setup, "hermes_home", lambda: tmp_path)
     calls = []
 
@@ -91,9 +104,11 @@ def test_disable_computer_stops_bridge_and_clears_persisted_target(tmp_path, mon
     assert calls == ["stop"]
     saved = env_path.read_text(encoding="utf-8")
     assert "HERMES_FETCH_COMPUTER_TARGET" not in saved
+    assert setup.VNC_PASSWORD_ENV not in saved
     assert 'HERMES_FETCH_TUNNEL_ENABLED="1"' in saved
     assert "HERMES_FETCH_COMPUTER_TARGET" not in setup.os.environ
     assert "HERMES_FETCH_COMPUTER_KIND" not in setup.os.environ
+    assert setup.VNC_PASSWORD_ENV not in setup.os.environ
 
 
 def test_disable_computer_fails_when_bridge_cannot_be_stopped(tmp_path, monkeypatch) -> None:
@@ -132,11 +147,79 @@ def test_probe_desktop_requires_an_actual_rfb_server() -> None:
         connection, _address = server.accept()
         with connection:
             connection.sendall(b"RFB 003.008\n")
+            assert connection.recv(12) == b"RFB 003.008\n"
+            connection.sendall(b"\x01\x01")
+            assert connection.recv(1) == b"\x01"
+            connection.sendall(b"\0\0\0\0")
         server.close()
 
     thread = threading.Thread(target=serve)
     thread.start()
-    setup.probe_desktop(f"tcp://127.0.0.1:{port}", wait_seconds=1)
+    setup.probe_desktop(f"tcp://127.0.0.1:{port}", password="", wait_seconds=1)
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+
+
+def test_probe_desktop_authenticates_on_the_host_before_reporting_ready() -> None:
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+    challenge = bytes(range(16))
+
+    def serve() -> None:
+        connection, _address = server.accept()
+        with connection:
+            connection.sendall(b"RFB 003.008\n")
+            assert connection.recv(12) == b"RFB 003.008\n"
+            connection.sendall(b"\x02\x01\x02")
+            assert connection.recv(1) == b"\x02"
+            connection.sendall(challenge)
+            assert connection.recv(16) == bytes.fromhex(
+                "ee22539f33a5983ec12f9c2edbc995dd"
+            )
+            connection.sendall(b"\0\0\0\0")
+        server.close()
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+    setup.probe_desktop(
+        f"tcp://127.0.0.1:{port}",
+        password="secret",
+        wait_seconds=1,
+    )
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+
+
+def test_probe_desktop_retries_a_short_rfb_read_during_server_startup() -> None:
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(2)
+    port = server.getsockname()[1]
+
+    def serve() -> None:
+        first, _address = server.accept()
+        with first:
+            first.sendall(b"RFB")
+        second, _address = server.accept()
+        with second:
+            second.sendall(b"RFB 003.008\n")
+            assert second.recv(12) == b"RFB 003.008\n"
+            second.sendall(b"\x01\x01")
+            assert second.recv(1) == b"\x01"
+            second.sendall(b"\0\0\0\0")
+        server.close()
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+    setup.probe_desktop(
+        f"tcp://127.0.0.1:{port}",
+        password="",
+        wait_seconds=2,
+    )
     thread.join(timeout=2)
 
     assert not thread.is_alive()
@@ -174,7 +257,11 @@ def test_configure_starts_dedicated_bridge_before_reporting_ready(tmp_path, monk
             calls.append("start")
             return "started"
 
-    monkeypatch.setattr(setup, "probe_desktop", lambda target, wait_seconds: calls.append("probe"))
+    monkeypatch.setattr(
+        setup,
+        "probe_desktop",
+        lambda target, password, wait_seconds: calls.append(("probe", password)),
+    )
     monkeypatch.setattr(
         setup,
         "_credentials",
@@ -193,12 +280,15 @@ def test_configure_starts_dedicated_bridge_before_reporting_ready(tmp_path, monk
         kind="Virtual Linux desktop",
         name="Hermes VPS",
         display=":1",
+        vnc_password="dedicated-password",
         wait_seconds=5,
         check_only=False,
     )
 
     assert result == {"ok": True}
-    assert calls == ["probe", "restart", "start", "ready"]
+    assert calls == [("probe", "dedicated-password"), "restart", "start", "ready"]
     saved = (tmp_path / ".env").read_text(encoding="utf-8")
     assert 'DISPLAY=":1"' in saved
     assert 'HERMES_FETCH_COMPUTER_NAME="Hermes VPS"' in saved
+    assert 'HERMES_FETCH_COMPUTER_VNC_PASSWORD="dedicated-password"' in saved
+    assert (tmp_path / ".env").stat().st_mode & 0o777 == 0o600
