@@ -81,7 +81,7 @@ case "$action" in
     printf 'Fetch computer services were removed. Installed OS packages were left in place.\n'
     ;;
   status)
-    require_command loginctl
+    require_runtime_dependencies
     require_linger
     systemctl --user status fetch-computer-vnc.service
     python3 "${script_dir}/../computer_setup.py" \

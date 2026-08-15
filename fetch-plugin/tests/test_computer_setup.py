@@ -154,6 +154,7 @@ def test_virtual_linux_setup_supports_fedora_and_a_fixed_headed_desktop() -> Non
     )
 
     assert "bootstrap" in manager
+    assert "require_command" not in manager
     assert "apt-get install" in manager
     assert "dnf install" in manager
     assert "tigervnc-server-minimal" in manager
