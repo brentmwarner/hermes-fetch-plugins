@@ -19,8 +19,10 @@ from urllib.request import Request, urlopen
 TARGET_ENV = "HERMES_FETCH_COMPUTER_TARGET"
 NAME_ENV = "HERMES_FETCH_COMPUTER_NAME"
 KIND_ENV = "HERMES_FETCH_COMPUTER_KIND"
+LEGACY_TARGET_ENV = "HERMES_FETCH_COMPUTER_WS_URL"
 TUNNEL_ENV = "HERMES_FETCH_TUNNEL_ENABLED"
 DISPLAY_ENV = "DISPLAY"
+COMPUTER_ENV_KEYS = (TARGET_ENV, NAME_ENV, KIND_ENV, LEGACY_TARGET_ENV)
 
 
 class SetupError(RuntimeError):
@@ -54,6 +56,36 @@ def _quoted_env_value(value: str) -> str:
     return f'"{escaped}"'
 
 
+def _env_line_key(line: str) -> str | None:
+    stripped = line.strip()
+    candidate = stripped[7:].lstrip() if stripped.startswith("export ") else stripped
+    key, separator, _value = candidate.partition("=")
+    if not separator:
+        return None
+    return key.strip()
+
+
+def _write_env_file(path: Path, lines: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            delete=False,
+        ) as handle:
+            handle.write("\n".join(lines).rstrip() + "\n")
+            temporary_path = Path(handle.name)
+        try:
+            os.chmod(temporary_path, 0o600)
+        except OSError:
+            pass
+        os.replace(temporary_path, path)
+    except OSError as exc:
+        raise SetupError(f"Could not update {path}: {exc}") from exc
+
+
 def persist_environment(path: Path, values: dict[str, str]) -> None:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -65,11 +97,8 @@ def persist_environment(path: Path, values: dict[str, str]) -> None:
     remaining = dict(values)
     updated: list[str] = []
     for line in lines:
-        stripped = line.strip()
-        candidate = stripped[7:].lstrip() if stripped.startswith("export ") else stripped
-        key, separator, _value = candidate.partition("=")
-        key = key.strip()
-        if separator and key in remaining:
+        key = _env_line_key(line)
+        if key is not None and key in remaining:
             updated.append(f"{key}={_quoted_env_value(remaining.pop(key))}")
         else:
             updated.append(line)
@@ -77,22 +106,32 @@ def persist_environment(path: Path, values: dict[str, str]) -> None:
         updated.append("")
     for key, value in remaining.items():
         updated.append(f"{key}={_quoted_env_value(value)}")
+    _write_env_file(path, updated)
 
-    path.parent.mkdir(parents=True, exist_ok=True)
+
+def remove_environment_keys(path: Path, keys: tuple[str, ...] | list[str] | set[str]) -> None:
+    drop = set(keys)
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            delete=False,
-        ) as handle:
-            handle.write("\n".join(updated).rstrip() + "\n")
-            temporary_path = Path(handle.name)
-        os.chmod(temporary_path, 0o600)
-        os.replace(temporary_path, path)
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return
     except OSError as exc:
-        raise SetupError(f"Could not update {path}: {exc}") from exc
+        raise SetupError(f"Could not read {path}: {exc}") from exc
+    updated = [line for line in lines if _env_line_key(line) not in drop]
+    _write_env_file(path, updated)
+
+
+def _computer_runtime_module():
+    return _load_sibling("fetch_plugin_computer_runtime_setup", "_computer_runtime.py")
+
+
+def disable_computer() -> None:
+    computer_runtime = _computer_runtime_module()
+    if not computer_runtime.restart_computer_runtime():
+        raise SetupError("Could not stop the Fetch computer bridge.")
+    remove_environment_keys(hermes_home() / ".env", COMPUTER_ENV_KEYS)
+    for key in COMPUTER_ENV_KEYS:
+        os.environ.pop(key, None)
 
 
 def _read_rfb_banner(sock: socket.socket) -> bytes:
@@ -217,10 +256,7 @@ def configure(
             values[DISPLAY_ENV] = display
         persist_environment(hermes_home() / ".env", values)
         os.environ.update(values)
-        computer_runtime = _load_sibling(
-            "fetch_plugin_computer_runtime_setup",
-            "_computer_runtime.py",
-        )
+        computer_runtime = _computer_runtime_module()
         if not computer_runtime.restart_computer_runtime():
             raise SetupError("Could not restart the Fetch computer bridge.")
         runtime_status = computer_runtime.ensure_computer_runtime()
@@ -231,8 +267,13 @@ def configure(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--target", required=True)
-    parser.add_argument("--kind", required=True)
+    parser.add_argument(
+        "--disable",
+        action="store_true",
+        help="Stop the computer bridge and remove persisted computer settings.",
+    )
+    parser.add_argument("--target")
+    parser.add_argument("--kind")
     parser.add_argument("--name", default="")
     parser.add_argument("--display", default="")
     parser.add_argument("--wait-seconds", type=float, default=60.0)
@@ -241,8 +282,15 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
     try:
+        if args.disable:
+            disable_computer()
+            print("Fetch computer access is disabled on this machine.")
+            return 0
+        if not args.target or not args.kind:
+            parser.error("--target and --kind are required unless --disable is set")
         status = configure(
             target=args.target,
             kind=args.kind,

@@ -3,7 +3,7 @@ set -euo pipefail
 
 action="${1:-install}"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-user_config_dir="$(systemd-path user-configuration)"
+user_config_dir="${XDG_CONFIG_HOME:-$HOME/.config}"
 service_dir="${user_config_dir}/systemd/user"
 vnc_service="${service_dir}/fetch-computer-vnc.service"
 
@@ -45,7 +45,8 @@ case "$action" in
   uninstall)
     systemctl --user disable --now fetch-computer-vnc.service || true
     rm -f "$vnc_service"
-    systemctl --user daemon-reload
+    systemctl --user daemon-reload || true
+    python3 "${script_dir}/../computer_setup.py" --disable
     printf 'Fetch computer services were removed. Installed Ubuntu packages were left in place.\n'
     ;;
   status)

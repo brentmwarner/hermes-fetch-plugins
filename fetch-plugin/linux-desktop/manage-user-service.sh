@@ -3,7 +3,7 @@ set -euo pipefail
 
 action="${1:-install}"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-user_config_dir="$(systemd-path user-configuration)"
+user_config_dir="${XDG_CONFIG_HOME:-$HOME/.config}"
 service_dir="${user_config_dir}/systemd/user"
 runtime_dir="${HOME}/.local/share/fetch-computer"
 service_path="${service_dir}/fetch-computer-x11.service"
@@ -48,7 +48,8 @@ case "$action" in
   uninstall)
     systemctl --user disable --now fetch-computer-x11.service || true
     rm -f "$service_path" "${runtime_dir}/run-x0vncserver.sh"
-    systemctl --user daemon-reload
+    systemctl --user daemon-reload || true
+    python3 "${script_dir}/../computer_setup.py" --disable
     printf 'Fetch desktop sharing was removed. TigerVNC was left installed.\n'
     ;;
   status)

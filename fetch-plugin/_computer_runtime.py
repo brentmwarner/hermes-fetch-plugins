@@ -87,6 +87,19 @@ def _read_record(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _unlink_pid(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _command_looks_like_computer_runtime(command: str | None) -> bool:
+    if not command:
+        return False
+    return AUTOSTART_ENV.lower() in command.lower()
+
+
 def _active_pid(*, reclaim: bool) -> int | None:
     runtime = _load_runtime_module()
     path = _pid_path()
@@ -97,21 +110,28 @@ def _active_pid(*, reclaim: bool) -> int | None:
         pid = 0
     if pid <= 0 or pid == os.getpid() or not runtime._process_alive(pid):
         if reclaim:
-            try:
-                path.unlink()
-            except OSError:
-                pass
+            _unlink_pid(path)
         return None
     if record.get("role") != _PID_ROLE:
+        if reclaim:
+            _unlink_pid(path)
         return None
+    command = runtime._process_command(pid)
+    owned = _command_looks_like_computer_runtime(command)
+    if not owned:
+        if command is None:
+            # Match the relay runtime: a structured owner record is trusted when
+            # the live command cannot be inspected (Windows / restricted ps).
+            owned = True
+        else:
+            if reclaim:
+                _unlink_pid(path)
+            return None
     if not reclaim or record.get("signature") == _signature():
         return pid
     if not runtime._terminate_process(pid):
         return pid
-    try:
-        path.unlink()
-    except OSError:
-        pass
+    _unlink_pid(path)
     return None
 
 
@@ -211,8 +231,5 @@ def restart_computer_runtime() -> bool:
     runtime = _load_runtime_module()
     if not runtime._terminate_process(pid):
         return False
-    try:
-        _pid_path().unlink()
-    except OSError:
-        pass
+    _unlink_pid(_pid_path())
     return True

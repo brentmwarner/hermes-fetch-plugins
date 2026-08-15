@@ -128,6 +128,21 @@ class _FakeRuntime:
         return self.status
 
 
+class _FakeComputerRuntime:
+    def __init__(self, restart_ok=True, status="started"):
+        self.restart_ok = restart_ok
+        self.status = status
+        self.calls = []
+
+    def restart_computer_runtime(self):
+        self.calls.append("restart")
+        return self.restart_ok
+
+    def ensure_computer_runtime(self):
+        self.calls.append("ensure")
+        return self.status
+
+
 class _FakeRelayClient:
     def __init__(self, status):
         self.status = status
@@ -328,3 +343,53 @@ def test_ensure_dashboard_session_token_survives_persistence_failure(monkeypatch
     # token so the runtime it starts next can share it.
     assert token
     assert os.environ["HERMES_DASHBOARD_SESSION_TOKEN"] == token
+
+
+def _online_pairing(link: str):
+    return {
+        "client": _FakeRelayClient({"ok": True, "agent_online": True}),
+        "agent_id": "a1",
+        "link": link,
+    }
+
+
+def test_interactive_setup_restarts_computer_bridge_when_configured(monkeypatch, capsys, tmp_path) -> None:
+    link = "https://tryfetchapp.com/setup?agent=a1&pairing=p1"
+    computer = _FakeComputerRuntime()
+    monkeypatch.setenv("HERMES_FETCH_COMPUTER_TARGET", "tcp://127.0.0.1:5901")
+    monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(pairing, "is_pairing_configured", lambda: False)
+    monkeypatch.setattr(pairing, "_inbox_module", lambda: _FakeInbox())
+    monkeypatch.setattr(pairing, "_ensure_dashboard_session_token", lambda: "session-tok")
+    monkeypatch.setattr(pairing, "_runtime_module", lambda: _FakeRuntime())
+    monkeypatch.setattr(pairing, "_computer_runtime_module", lambda: computer)
+    monkeypatch.setattr(pairing, "render_qr", lambda data: None)
+    monkeypatch.setattr(pairing, "_try_build_relay_pairing", lambda: _online_pairing(link))
+
+    pairing.interactive_setup()
+
+    assert computer.calls == ["restart", "ensure"]
+    assert link in capsys.readouterr().out
+
+
+def test_interactive_setup_warns_when_computer_bridge_cannot_be_stopped(
+    monkeypatch, capsys, tmp_path
+) -> None:
+    link = "https://tryfetchapp.com/setup?agent=a1&pairing=p1"
+    computer = _FakeComputerRuntime(restart_ok=False)
+    monkeypatch.setenv("HERMES_FETCH_COMPUTER_TARGET", "tcp://127.0.0.1:5901")
+    monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(pairing, "is_pairing_configured", lambda: False)
+    monkeypatch.setattr(pairing, "_inbox_module", lambda: _FakeInbox())
+    monkeypatch.setattr(pairing, "_ensure_dashboard_session_token", lambda: "session-tok")
+    monkeypatch.setattr(pairing, "_runtime_module", lambda: _FakeRuntime())
+    monkeypatch.setattr(pairing, "_computer_runtime_module", lambda: computer)
+    monkeypatch.setattr(pairing, "render_qr", lambda data: None)
+    monkeypatch.setattr(pairing, "_try_build_relay_pairing", lambda: _online_pairing(link))
+
+    pairing.interactive_setup()
+
+    assert computer.calls == ["restart"]
+    out = capsys.readouterr().out
+    assert "could not stop the existing computer bridge" in out
+    assert link in out

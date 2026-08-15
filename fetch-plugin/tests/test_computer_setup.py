@@ -36,6 +36,92 @@ def test_persist_environment_preserves_unrelated_lines_and_replaces_values(tmp_p
     assert env_path.stat().st_mode & 0o777 == 0o600
 
 
+def test_persist_environment_treats_chmod_as_best_effort(tmp_path, monkeypatch) -> None:
+    env_path = tmp_path / ".env"
+
+    def _unsupported(_path, _mode):
+        raise OSError("chmod is not supported")
+
+    monkeypatch.setattr(setup.os, "chmod", _unsupported)
+    setup.persist_environment(env_path, {"HERMES_FETCH_COMPUTER_TARGET": "tcp://127.0.0.1:5901"})
+
+    assert 'HERMES_FETCH_COMPUTER_TARGET="tcp://127.0.0.1:5901"' in env_path.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_remove_environment_keys_drops_computer_settings_and_keeps_other_lines(tmp_path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "# keep\nOTHER=value\nHERMES_FETCH_COMPUTER_TARGET=tcp://127.0.0.1:5901\n"
+        "export HERMES_FETCH_COMPUTER_KIND=Old\nHERMES_FETCH_TUNNEL_ENABLED=1\n",
+        encoding="utf-8",
+    )
+
+    setup.remove_environment_keys(env_path, setup.COMPUTER_ENV_KEYS)
+
+    text = env_path.read_text(encoding="utf-8")
+    assert "# keep" in text
+    assert "OTHER=value" in text
+    assert "HERMES_FETCH_TUNNEL_ENABLED=1" in text
+    assert "HERMES_FETCH_COMPUTER_TARGET" not in text
+    assert "HERMES_FETCH_COMPUTER_KIND" not in text
+
+
+def test_disable_computer_stops_bridge_and_clears_persisted_target(tmp_path, monkeypatch) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        'HERMES_FETCH_COMPUTER_TARGET="tcp://127.0.0.1:5901"\nHERMES_FETCH_TUNNEL_ENABLED="1"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_FETCH_COMPUTER_TARGET", "tcp://127.0.0.1:5901")
+    monkeypatch.setenv("HERMES_FETCH_COMPUTER_KIND", "Virtual Linux desktop")
+    monkeypatch.setattr(setup, "hermes_home", lambda: tmp_path)
+    calls = []
+
+    class FakeRuntime:
+        def restart_computer_runtime(self):
+            calls.append("stop")
+            return True
+
+    monkeypatch.setattr(setup, "_computer_runtime_module", lambda: FakeRuntime())
+
+    setup.disable_computer()
+
+    assert calls == ["stop"]
+    saved = env_path.read_text(encoding="utf-8")
+    assert "HERMES_FETCH_COMPUTER_TARGET" not in saved
+    assert 'HERMES_FETCH_TUNNEL_ENABLED="1"' in saved
+    assert "HERMES_FETCH_COMPUTER_TARGET" not in setup.os.environ
+    assert "HERMES_FETCH_COMPUTER_KIND" not in setup.os.environ
+
+
+def test_disable_computer_fails_when_bridge_cannot_be_stopped(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(setup, "hermes_home", lambda: tmp_path)
+
+    class FakeRuntime:
+        def restart_computer_runtime(self):
+            return False
+
+    monkeypatch.setattr(setup, "_computer_runtime_module", lambda: FakeRuntime())
+
+    with pytest.raises(setup.SetupError, match="Could not stop"):
+        setup.disable_computer()
+
+
+def test_linux_service_scripts_use_xdg_config_home_and_disable_on_uninstall() -> None:
+    plugin_dir = Path(__file__).resolve().parent.parent
+    scripts = (
+        plugin_dir / "linux-vps" / "manage-user-services.sh",
+        plugin_dir / "linux-desktop" / "manage-user-service.sh",
+    )
+    for script in scripts:
+        text = script.read_text(encoding="utf-8")
+        assert "systemd-path" not in text
+        assert "XDG_CONFIG_HOME" in text
+        assert "computer_setup.py" in text and "--disable" in text
+
+
 def test_probe_desktop_requires_an_actual_rfb_server() -> None:
     server = socket.socket()
     server.bind(("127.0.0.1", 0))

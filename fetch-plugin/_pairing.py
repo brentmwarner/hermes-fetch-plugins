@@ -438,12 +438,17 @@ def interactive_setup() -> None:
         ).strip()
         if computer_target:
             computer_runtime = _computer_runtime_module()
-            computer_runtime.restart_computer_runtime()
-            computer_runtime_status = computer_runtime.ensure_computer_runtime()
-            if computer_runtime_status == "failed":
+            if not computer_runtime.restart_computer_runtime():
                 print_warning(
-                    "Fetch could not restart the computer bridge. Run the platform computer setup again."
+                    "Fetch could not stop the existing computer bridge, so it may still "
+                    "be using old pairing credentials. Run the platform computer setup again."
                 )
+            else:
+                computer_runtime_status = computer_runtime.ensure_computer_runtime()
+                if computer_runtime_status == "failed":
+                    print_warning(
+                        "Fetch could not restart the computer bridge. Run the platform computer setup again."
+                    )
         relay_link = str(relay_pairing["link"])
         tunnel_status = {"ok": False, "reason": "runtime_not_started"}
         if runtime_status in {"started", "already-running", "self"}:

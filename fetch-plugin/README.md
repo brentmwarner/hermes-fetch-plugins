@@ -179,7 +179,9 @@ use a display emulator, or use the virtual-desktop setup below. GNOME/KDE
 Wayland sessions are not part of this first release—choose Xorg at sign-in.
 
 Lifecycle commands are `./manage-user-service.sh status` and
-`./manage-user-service.sh uninstall`.
+`./manage-user-service.sh uninstall`. Uninstall stops the X11 VNC service,
+terminates the Fetch computer bridge, and removes the persisted computer
+target so later plugin starts do not re-advertise this desktop.
 
 #### Linux VPS or monitorless Linux
 
@@ -221,8 +223,10 @@ Useful lifecycle commands:
 ./manage-user-services.sh uninstall
 ```
 
-Uninstall stops and removes the user service. It leaves the Ubuntu packages
-installed so it does not disturb other desktop workloads.
+Uninstall stops and removes the user service, terminates the Fetch computer
+bridge, and removes the persisted computer target so later plugin starts do
+not re-advertise this host. It leaves the Ubuntu packages installed so it
+does not disturb other desktop workloads.
 
 ## Reconfigure or reset
 
