@@ -10,6 +10,7 @@ $setupArguments = @(
     $setup,
     "--target", "tcp://127.0.0.1:5900",
     "--kind", "Windows desktop",
+    "--ask-vnc-password",
     "--wait-seconds", "15"
 )
 $python = Get-Command python -ErrorAction SilentlyContinue
@@ -25,4 +26,4 @@ if ($python) {
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
-Write-Output "Fetch will ask for the VNC password on the iPhone when you connect."
+Write-Output "Fetch saved the dedicated VNC password on this PC. The iPhone will connect without a transport credential prompt."

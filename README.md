@@ -55,6 +55,7 @@ Optional environment variables:
 | `HERMES_FETCH_COMPUTER_TARGET` | Optional loopback-only VNC target for the Fetch computer viewer on Mac, Linux desktops, or Linux VPS hosts. See the plugin README. |
 | `HERMES_FETCH_COMPUTER_NAME` | Optional friendly computer name displayed in the Fetch viewer. |
 | `HERMES_FETCH_COMPUTER_KIND` | Optional display label such as `Mac desktop` or `Virtual Linux desktop`. |
+| `HERMES_FETCH_COMPUTER_VNC_PASSWORD` | Dedicated Mac/Windows VNC password consumed only by the host-side loopback bridge; computer setup saves it locally so the phone is never prompted. |
 
 Delivery enablement and the home channel are configured for you by setup; see
 [`fetch-plugin/README.md`](fetch-plugin/README.md) for the advanced internal

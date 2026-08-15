@@ -103,6 +103,13 @@ do not run a Linux container. The plugin connects only to a loopback VNC port,
 then carries the pixels and input over the existing authenticated outbound
 Fetch relay.
 
+VNC transport authentication is completed on the host before any pixels are
+forwarded. Its dedicated password stays in the owner-only Hermes environment
+file and is never sent to the Fetch relay or iPhone. Consequently, opening an
+already signed-in desktop does not show a second username/password form on the
+phone. If the operating system itself is locked, its real lock screen remains
+visible and the person can unlock it after taking control.
+
 On Hermes versions that advertise foreground delivery in the public
 `computer_use` schema, input requested from a Fetch conversation is delivered
 to the visible foreground window so the streamed desktop and the agent's target
@@ -134,12 +141,14 @@ Use macOS's built-in Screen Sharing server:
    ./check-computer.sh
    ```
 
-Fetch asks for the VNC password on the iPhone when the stream connects and does
-not save it. Turning the display off does not remove the shared framebuffer,
-but the Mac must remain awake and logged in. Enable **Wake for network access**
-and prevent automatic system sleep while on power if this Mac should remain
-reachable unattended. For isolation from personal apps and files, run Hermes
-and Screen Sharing in a dedicated macOS user account.
+The check prompts once on the Mac for that dedicated VNC password, verifies it
+against the loopback Screen Sharing service, and saves it in the owner-only
+Hermes environment file. It is not the user's macOS account password. Turning
+the display off does not remove the shared framebuffer, but the Mac must remain
+awake. Enable **Wake for network access** and prevent automatic system sleep
+while on power if this Mac should remain reachable unattended. For isolation
+from personal apps and files, run Hermes and Screen Sharing in a dedicated
+macOS user account.
 
 #### Windows
 
@@ -158,12 +167,13 @@ Use UltraVNC Server to share the signed-in Windows desktop without a container:
    .\check-computer.ps1
    ```
 
-Fetch asks for the VNC password on the iPhone and does not save it. Keep the
-Windows user session signed in and disable automatic sleep for unattended use.
-For isolation from personal apps and files, use a dedicated Windows account.
-The plugin rejects non-loopback targets even if the VNC server is accidentally
-configured more broadly, but **Loopback Only** prevents any other program on
-the network from reaching UltraVNC directly.
+The check prompts once on the PC for that dedicated UltraVNC password, verifies
+it against the loopback server, and saves it in the owner-only Hermes
+environment file. It is not the user's Windows account password. Keep the PC
+awake for unattended use. For isolation from personal apps and files, use a
+dedicated Windows account. The plugin rejects non-loopback targets even if the
+VNC server is accidentally configured more broadly, but **Loopback Only**
+prevents any other program on the network from reaching UltraVNC directly.
 
 #### Existing Linux desktop
 
@@ -269,6 +279,7 @@ All env vars are `HERMES_FETCH_*`; there is no separate inbox product.
 | `HERMES_FETCH_COMPUTER_TARGET` | _(unset)_ | Enable computer viewing with a loopback-only VNC target, normally `tcp://127.0.0.1:5900` for Mac/Windows/physical Linux or `tcp://127.0.0.1:5901` for virtual Linux. Fetch rejects LAN/public targets. |
 | `HERMES_FETCH_COMPUTER_NAME` | host name | Friendly computer name shown in the Fetch viewer. |
 | `HERMES_FETCH_COMPUTER_KIND` | inferred from OS | Secondary label such as `Mac desktop`, `Windows desktop`, `Linux desktop`, or `Virtual Linux desktop`. |
+| `HERMES_FETCH_COMPUTER_VNC_PASSWORD` | _(unset)_ | Dedicated VNC transport password saved by Mac/Windows computer setup. It is consumed only by the host-side loopback bridge and is never sent to the relay or phone. |
 | `HERMES_FETCH_COMPUTER_WS_URL` | _(unset)_ | Legacy loopback websockify target. Still accepted for compatibility; new setups should use `HERMES_FETCH_COMPUTER_TARGET`. |
 
 **Internal / advanced** (written by Fetch setup or the `/api/plugins/fetch/inbox/enable`

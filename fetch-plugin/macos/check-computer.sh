@@ -10,5 +10,6 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 python3 "${script_dir}/../computer_setup.py" \
   --target tcp://127.0.0.1:5900 \
   --kind "Mac desktop" \
+  --ask-vnc-password \
   --wait-seconds 15
-printf 'Fetch will ask for the VNC password on the iPhone when you connect.\n'
+printf 'Fetch saved the dedicated VNC password on this Mac. The iPhone will connect without a transport credential prompt.\n'

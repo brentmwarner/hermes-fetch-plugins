@@ -23,6 +23,7 @@ log = logging.getLogger("fetch_plugin.computer_runtime")
 AUTOSTART_ENV = "HERMES_FETCH_COMPUTER_AUTOSTARTED_RUNTIME"
 TARGET_ENV = "HERMES_FETCH_COMPUTER_TARGET"
 LEGACY_TARGET_ENV = "HERMES_FETCH_COMPUTER_WS_URL"
+VNC_PASSWORD_ENV = "HERMES_FETCH_COMPUTER_VNC_PASSWORD"
 
 _PID_FILE = "fetch-computer-runtime.pid"
 _LOG_FILE = "fetch-computer-runtime.log"
@@ -32,6 +33,7 @@ _CONFIG_ENVS = (
     LEGACY_TARGET_ENV,
     "HERMES_FETCH_COMPUTER_NAME",
     "HERMES_FETCH_COMPUTER_KIND",
+    VNC_PASSWORD_ENV,
     "HERMES_FETCH_RELAY_URL",
     "HERMES_FETCH_STORE_HOME",
 )
@@ -175,6 +177,7 @@ async def main():
         local_target=target,
         computer_name=os.environ.get(computer.COMPUTER_NAME_ENV),
         computer_kind=os.environ.get(computer.COMPUTER_KIND_ENV),
+        vnc_password=os.environ.get({VNC_PASSWORD_ENV!r}),
     )
     await bridge.run_forever()
 
