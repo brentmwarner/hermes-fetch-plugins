@@ -55,7 +55,8 @@ def _load_vnc_auth_module():
         return existing
     path = Path(__file__).resolve().parent / "_vnc_auth.py"
     spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None and spec.loader is not None
+    if spec is None or spec.loader is None:
+        raise VNCSetupError("Fetch could not load local VNC authentication support")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -352,7 +353,7 @@ async def _authenticate_local_vnc(
         response = _load_vnc_auth_module().challenge_response(password, challenge)
         await conn.send(response)
 
-    expects_result = security_type == _RFB_SECURITY_VNC_AUTH or minor >= 8
+    expects_result = security_type == _RFB_SECURITY_VNC_AUTH or minor >= 7
     if expects_result:
         result = int.from_bytes(await conn.readexactly(4), "big")
         if result != 0:

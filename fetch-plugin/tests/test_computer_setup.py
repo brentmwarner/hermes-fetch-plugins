@@ -194,6 +194,37 @@ def test_probe_desktop_authenticates_on_the_host_before_reporting_ready() -> Non
     assert not thread.is_alive()
 
 
+def test_probe_desktop_retries_a_short_rfb_read_during_server_startup() -> None:
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(2)
+    port = server.getsockname()[1]
+
+    def serve() -> None:
+        first, _address = server.accept()
+        with first:
+            first.sendall(b"RFB")
+        second, _address = server.accept()
+        with second:
+            second.sendall(b"RFB 003.008\n")
+            assert second.recv(12) == b"RFB 003.008\n"
+            second.sendall(b"\x01\x01")
+            assert second.recv(1) == b"\x01"
+            second.sendall(b"\0\0\0\0")
+        server.close()
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+    setup.probe_desktop(
+        f"tcp://127.0.0.1:{port}",
+        password="",
+        wait_seconds=2,
+    )
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+
+
 def test_wait_for_relay_waits_until_computer_uplink_is_online(monkeypatch) -> None:
     responses = [
         (503, {"reason": "agent_offline"}),

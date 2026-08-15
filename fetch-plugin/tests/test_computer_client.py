@@ -248,6 +248,52 @@ async def test_direct_tcp_target_authenticates_saved_vnc_password(monkeypatch) -
     ]
 
 
+async def test_rfb_37_none_security_result_is_consumed_before_desktop_bytes(monkeypatch) -> None:
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"RFB 003.007\n")
+    reader.feed_data(b"\x01\x01")
+    reader.feed_data(b"\0\0\0\0server-init")
+
+    class FakeWriter:
+        def __init__(self) -> None:
+            self.sent: list[bytes] = []
+
+        def write(self, data: bytes) -> None:
+            self.sent.append(data)
+
+        async def drain(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+        async def wait_closed(self) -> None:
+            return None
+
+    writer = FakeWriter()
+
+    async def fake_open_connection(_host: str, _port: int):
+        return reader, writer
+
+    monkeypatch.setattr(asyncio, "open_connection", fake_open_connection)
+    client = _client(local_target="tcp://127.0.0.1:5900")
+
+    conn = await client._default_local_connect(client.local_target)
+    assert await conn.__anext__() == b"RFB 003.008\n"
+    await conn.send(b"RFB 003.008\n\x01\x01")
+    assert await conn.__anext__() == b"\x01\x01"
+    assert await conn.__anext__() == b"\0\0\0\0"
+    assert await conn.__anext__() == b"server-init"
+
+
+def test_vnc_auth_loader_fails_cleanly_when_module_is_unavailable(monkeypatch) -> None:
+    monkeypatch.delitem(computer.sys.modules, "fetch_plugin_vnc_auth", raising=False)
+    monkeypatch.setattr(computer.importlib.util, "spec_from_file_location", lambda *_args: None)
+
+    with pytest.raises(computer.VNCSetupError, match="could not load"):
+        computer._load_vnc_auth_module()
+
+
 @pytest.mark.parametrize(
     ("offered", "message"),
     [

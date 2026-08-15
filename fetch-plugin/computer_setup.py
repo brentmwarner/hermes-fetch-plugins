@@ -188,7 +188,7 @@ def probe_desktop(target: str, *, password: str, wait_seconds: float) -> None:
             return
         except computer.VNCSetupError as exc:
             raise SetupError(str(exc)) from exc
-        except (OSError, TimeoutError) as exc:
+        except (asyncio.IncompleteReadError, OSError, TimeoutError) as exc:
             last_error = str(exc)
         if time.monotonic() >= deadline:
             break
