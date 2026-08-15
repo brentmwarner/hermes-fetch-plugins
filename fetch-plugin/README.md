@@ -87,6 +87,143 @@ comes in through that reverse tunnel.
   `~/.hermes/.env` for this; **restart your own dashboard after setup** so it
   reloads `.env` and picks up the same token.
 
+### Computer view (Mac, Windows, Linux desktop, and Linux VPS)
+
+When browser or desktop work reaches a step only the person should complete
+(MFA, CAPTCHA, private information, payment approval, or legal certification),
+the Fetch platform guidance tells Hermes to call `clarify` with `I'm done` and
+`Skip`. The iOS app turns that blocking request into an **Action needed** card
+with the real desktop frame and Take over controls. Marking the step done or
+skipping it answers the existing clarify request so the paused agent can
+continue; no private input needs to be pasted into chat.
+
+Fetch can watch the computer Hermes is using and, after confirmation, hand
+control to the iPhone. The screen source is native to each host; Mac and Linux
+do not run a Linux container. The plugin connects only to a loopback VNC port,
+then carries the pixels and input over the existing authenticated outbound
+Fetch relay.
+
+Every session starts in **Watch** mode. Choosing **Control** asks for
+confirmation and stops the current Hermes turn started from Fetch before the
+phone can send input. The MVP cannot pause a separate Hermes process or turn
+started from another client, so do not run two computer-controlling Hermes
+sessions against the same desktop.
+
+#### Mac
+
+Use macOS's built-in Screen Sharing server:
+
+1. Open **System Settings → General → Sharing** and turn on **Screen Sharing**.
+2. Open its info panel, allow only the intended macOS account, enable **VNC
+   viewers may control screen with password**, and set a dedicated password.
+3. Pair Fetch with `hermes setup`, then configure and verify the complete path:
+
+   ```bash
+   cd <plugin-checkout>/fetch-plugin/macos
+   ./check-computer.sh
+   ```
+
+Fetch asks for the VNC password on the iPhone when the stream connects and does
+not save it. Turning the display off does not remove the shared framebuffer,
+but the Mac must remain awake and logged in. Enable **Wake for network access**
+and prevent automatic system sleep while on power if this Mac should remain
+reachable unattended. For isolation from personal apps and files, run Hermes
+and Screen Sharing in a dedicated macOS user account.
+
+#### Windows
+
+Use UltraVNC Server to share the signed-in Windows desktop without a container:
+
+1. Install **UltraVNC Server** and open its **Admin Properties**.
+2. Enable **Accept Socket Connections**, **Allow Loopback Connections**, and
+   **Loopback Only**. Use display `0` / port `5900`, turn off the Java/HTTP
+   viewer and file transfer, and set a dedicated VNC password.
+3. Restart the UltraVNC Server service, pair Fetch with `hermes setup`, then
+   configure and verify the complete path from
+   PowerShell:
+
+   ```powershell
+   cd <plugin-checkout>\fetch-plugin\windows
+   .\check-computer.ps1
+   ```
+
+Fetch asks for the VNC password on the iPhone and does not save it. Keep the
+Windows user session signed in and disable automatic sleep for unattended use.
+For isolation from personal apps and files, use a dedicated Windows account.
+The plugin rejects non-loopback targets even if the VNC server is accidentally
+configured more broadly, but **Loopback Only** prevents any other program on
+the network from reaching UltraVNC directly.
+
+#### Existing Linux desktop
+
+The included service uses TigerVNC's `x0vncserver` to share the existing X11
+desktop—the same screen attached to the physical monitor. On Ubuntu, sign into
+an **Xorg** session, open a terminal in that desktop, and run:
+
+```bash
+sudo apt update
+sudo apt install tigervnc-scraping-server
+
+cd <plugin-checkout>/fetch-plugin/linux-desktop
+./manage-user-service.sh install
+```
+
+The installer writes the loopback target and current `DISPLAY` to the Hermes
+environment, starts the dedicated Fetch computer bridge, and exits successfully
+only after the VNC server and relay uplink both answer readiness checks.
+
+The display can be powered off while the X11 session remains active. Disable
+automatic system suspend for unattended use. A disconnected display can cause
+some graphics drivers to remove the framebuffer; keep the display connected,
+use a display emulator, or use the virtual-desktop setup below. GNOME/KDE
+Wayland sessions are not part of this first release—choose Xorg at sign-in.
+
+Lifecycle commands are `./manage-user-service.sh status` and
+`./manage-user-service.sh uninstall`.
+
+#### Linux VPS or monitorless Linux
+
+Fetch can show a dedicated 1920×1080 XFCE desktop even when Linux has no
+monitor. The screen is a virtual TigerVNC display, so Hermes and the phone see
+the same desktop while no physical display exists. Its framebuffer stays
+1920×1080 even when the machine running Fetch has a larger physical display.
+
+The included user service targets Ubuntu 24.04 and keeps the desktop available
+after disconnecting SSH. Run Hermes and the service as a dedicated,
+unprivileged Linux user on the VPS; do not reuse a personal desktop account.
+That user's home directory is the boundary for the agent environment:
+
+```bash
+sudo apt update
+sudo apt install xfce4 dbus-x11 tigervnc-standalone-server
+sudo loginctl enable-linger "$(id -un)"
+
+cd <plugin-checkout>/fetch-plugin/linux-vps
+./manage-user-services.sh install
+```
+
+`DISPLAY=:1` makes GUI programs launched by Hermes use the same virtual desktop
+that Fetch streams. The installer persists it with the loopback target, starts
+the dedicated Fetch computer bridge, and exits successfully only after the
+1920×1080 desktop and relay uplink both answer readiness checks. It also refuses
+to install unless login persistence is enabled, so a passing setup cannot stop
+merely because the SSH session closes.
+
+The VNC port is deliberately private: TigerVNC listens on `127.0.0.1:5901`.
+The VNC service uses no VNC password because it is unreachable off-host and the
+Fetch relay separately authenticates the paired agent and a short-lived viewer
+ticket. Never change it to `0.0.0.0` or open port 5901 in the VPS firewall.
+
+Useful lifecycle commands:
+
+```bash
+./manage-user-services.sh status
+./manage-user-services.sh uninstall
+```
+
+Uninstall stops and removes the user service. It leaves the Ubuntu packages
+installed so it does not disturb other desktop workloads.
+
 ## Reconfigure or reset
 
 Run `hermes setup` again, choose Fetch, and confirm the reconfigure prompt. The
@@ -114,6 +251,10 @@ All env vars are `HERMES_FETCH_*`; there is no separate inbox product.
 | `HERMES_FETCH_RELAY_REGISTRATION_TOKEN` | _(none)_ | Operator/private relay registration token. Public Fetch users should not need this. |
 | `HERMES_FETCH_TUNNEL_ENABLED` | auto after Fetch relay setup | Keep the agent-side reverse tunnel active for relay pairing. Set `0`/`false` only to force-disable it. |
 | `HERMES_FETCH_TUNNEL_DISABLE_DASHBOARD_AUTOSTART` | _(unset)_ | Opt out if you manage the local Hermes dashboard/API process yourself. |
+| `HERMES_FETCH_COMPUTER_TARGET` | _(unset)_ | Enable computer viewing with a loopback-only VNC target, normally `tcp://127.0.0.1:5900` for Mac/Windows/physical Linux or `tcp://127.0.0.1:5901` for virtual Linux. Fetch rejects LAN/public targets. |
+| `HERMES_FETCH_COMPUTER_NAME` | host name | Friendly computer name shown in the Fetch viewer. |
+| `HERMES_FETCH_COMPUTER_KIND` | inferred from OS | Secondary label such as `Mac desktop`, `Windows desktop`, `Linux desktop`, or `Virtual Linux desktop`. |
+| `HERMES_FETCH_COMPUTER_WS_URL` | _(unset)_ | Legacy loopback websockify target. Still accepted for compatibility; new setups should use `HERMES_FETCH_COMPUTER_TARGET`. |
 
 **Internal / advanced** (written by Fetch setup or the `/api/plugins/fetch/inbox/enable`
 dashboard route; rarely set by hand):

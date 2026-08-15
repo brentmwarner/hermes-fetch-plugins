@@ -1,7 +1,7 @@
 name: fetch
 label: Fetch
 kind: platform
-version: 0.6.5
+version: 0.7.0
 description: "Fetch iOS app channel for Hermes. Pairs the app to this agent (link + QR), like linking WhatsApp Web — relay pairing reaches the agent through the hosted relay with no inbound port / no Tailscale. Also sends a push when a turn finishes or the agent needs attention, owns the Fetch inbox delivery target for cron/webhooks, and teaches the agent to deliver host files with standard MEDIA markers. Registers a platform_hint for generative-UI `card` fences the app renders natively (see the `fetch-cards` skill for patterns). No Apple Developer credentials live on this host."
 author: Fetch
 hooks:
@@ -23,4 +23,16 @@ optional_env:
     password: false
   - name: HERMES_FETCH_TUNNEL_DISABLE_DASHBOARD_AUTOSTART
     description: "Set to 1/true only if you manage the local Hermes dashboard/API process yourself and do not want Fetch to start a headless relay runtime."
+    password: false
+  - name: HERMES_FETCH_COMPUTER_TARGET
+    description: "Optional loopback VNC target for Fetch computer viewing, for example tcp://127.0.0.1:5900. Non-loopback targets are rejected."
+    password: false
+  - name: HERMES_FETCH_COMPUTER_NAME
+    description: "Optional friendly computer name shown in the Fetch viewer."
+    password: false
+  - name: HERMES_FETCH_COMPUTER_KIND
+    description: "Optional viewer label such as Mac desktop, Windows desktop, Linux desktop, or Virtual Linux desktop."
+    password: false
+  - name: HERMES_FETCH_COMPUTER_WS_URL
+    description: "Legacy loopback websockify target retained for compatibility. Prefer HERMES_FETCH_COMPUTER_TARGET."
     password: false

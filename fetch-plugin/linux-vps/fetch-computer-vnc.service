@@ -1,0 +1,12 @@
+[Unit]
+Description=Fetch virtual computer (TigerVNC + XFCE)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/tigervncserver :1 -fg -localhost yes -SecurityTypes None -geometry 1920x1080 -depth 24 -xstartup /usr/bin/startxfce4
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
