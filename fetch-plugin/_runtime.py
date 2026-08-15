@@ -366,7 +366,7 @@ def restart_relay_runtime_for_reconfigure() -> dict:
     return {"stopped": stopped, "left_running": left_running}
 
 
-def ensure_relay_runtime() -> str:
+def ensure_relay_runtime(*, environment: dict[str, str] | None = None) -> str:
     """Start a long-lived headless relay runtime unless one is already running.
 
     Returns one of:
@@ -392,7 +392,7 @@ def ensure_relay_runtime() -> str:
         log.warning("Fetch could not create runtime/log directories", exc_info=True)
         return "failed"
 
-    env = os.environ.copy()
+    env = dict(environment) if environment is not None else os.environ.copy()
     env[TUNNEL_ENABLED_ENV] = "1"
     env[AUTOSTART_RUNTIME_ENV] = "1"
     env["PYTHONPATH"] = _child_pythonpath()
