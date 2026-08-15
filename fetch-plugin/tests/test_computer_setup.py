@@ -64,11 +64,13 @@ def test_remove_environment_keys_drops_computer_settings_and_keeps_other_lines(t
     env_path = tmp_path / ".env"
     env_path.write_text(
         "# keep\nOTHER=value\nHERMES_FETCH_COMPUTER_TARGET=tcp://127.0.0.1:5901\n"
-        "export HERMES_FETCH_COMPUTER_KIND=Old\nHERMES_FETCH_TUNNEL_ENABLED=1\n",
+        "export HERMES_FETCH_COMPUTER_KIND=Old\nHERMES_FETCH_TUNNEL_ENABLED=1\n"
+        "DISPLAY=:1\nXAUTHORITY=/tmp/fetch.Xauthority\nAGENT_BROWSER_HEADED=1\n"
+        "WAYLAND_DISPLAY=\nDBUS_SESSION_BUS_ADDRESS=\n",
         encoding="utf-8",
     )
 
-    setup.remove_environment_keys(env_path, setup.COMPUTER_ENV_KEYS)
+    setup.remove_environment_keys(env_path, setup.PERSISTED_COMPUTER_ENV_KEYS)
 
     text = env_path.read_text(encoding="utf-8")
     assert "# keep" in text
@@ -76,6 +78,11 @@ def test_remove_environment_keys_drops_computer_settings_and_keeps_other_lines(t
     assert "HERMES_FETCH_TUNNEL_ENABLED=1" in text
     assert "HERMES_FETCH_COMPUTER_TARGET" not in text
     assert "HERMES_FETCH_COMPUTER_KIND" not in text
+    assert "DISPLAY=" not in text
+    assert "XAUTHORITY=" not in text
+    assert "AGENT_BROWSER_HEADED" not in text
+    for key in setup.VIRTUAL_DESKTOP_ENV_KEYS:
+        assert key not in text
 
 
 def test_disable_computer_stops_bridge_and_clears_persisted_target(tmp_path, monkeypatch) -> None:
@@ -89,6 +96,8 @@ def test_disable_computer_stops_bridge_and_clears_persisted_target(tmp_path, mon
     monkeypatch.setenv("HERMES_FETCH_COMPUTER_TARGET", "tcp://127.0.0.1:5901")
     monkeypatch.setenv("HERMES_FETCH_COMPUTER_KIND", "Virtual Linux desktop")
     monkeypatch.setenv(setup.VNC_PASSWORD_ENV, "dedicated-password")
+    monkeypatch.setenv(setup.WAYLAND_DISPLAY_ENV, "wayland-0")
+    monkeypatch.setenv(setup.DBUS_SESSION_BUS_ADDRESS_ENV, "unix:path=/run/user/1000/bus")
     monkeypatch.setattr(setup, "hermes_home", lambda: tmp_path)
     calls = []
 
@@ -97,11 +106,21 @@ def test_disable_computer_stops_bridge_and_clears_persisted_target(tmp_path, mon
             calls.append("stop")
             return True
 
+    class FakeRelayRuntime:
+        def restart_relay_runtime_for_reconfigure(self):
+            calls.append("restart-relay")
+            return {"stopped": [42], "left_running": []}
+
+        def ensure_relay_runtime(self):
+            calls.append("start-relay")
+            return "started"
+
     monkeypatch.setattr(setup, "_computer_runtime_module", lambda: FakeRuntime())
+    monkeypatch.setattr(setup, "_relay_runtime_module", lambda: FakeRelayRuntime())
 
     setup.disable_computer()
 
-    assert calls == ["stop"]
+    assert calls == ["stop", "restart-relay", "start-relay"]
     saved = env_path.read_text(encoding="utf-8")
     assert "HERMES_FETCH_COMPUTER_TARGET" not in saved
     assert setup.VNC_PASSWORD_ENV not in saved
@@ -109,6 +128,8 @@ def test_disable_computer_stops_bridge_and_clears_persisted_target(tmp_path, mon
     assert "HERMES_FETCH_COMPUTER_TARGET" not in setup.os.environ
     assert "HERMES_FETCH_COMPUTER_KIND" not in setup.os.environ
     assert setup.VNC_PASSWORD_ENV not in setup.os.environ
+    assert setup.os.environ[setup.WAYLAND_DISPLAY_ENV] == "wayland-0"
+    assert setup.os.environ[setup.DBUS_SESSION_BUS_ADDRESS_ENV] == "unix:path=/run/user/1000/bus"
 
 
 def test_disable_computer_fails_when_bridge_cannot_be_stopped(tmp_path, monkeypatch) -> None:
@@ -135,6 +156,36 @@ def test_linux_service_scripts_use_xdg_config_home_and_disable_on_uninstall() ->
         assert "systemd-path" not in text
         assert "XDG_CONFIG_HOME" in text
         assert "computer_setup.py" in text and "--disable" in text
+
+
+def test_virtual_linux_setup_supports_fedora_and_a_fixed_headed_desktop() -> None:
+    plugin_dir = Path(__file__).resolve().parent.parent
+    manager = (plugin_dir / "linux-vps" / "manage-user-services.sh").read_text(
+        encoding="utf-8"
+    )
+    service = (plugin_dir / "linux-vps" / "fetch-computer-vnc.service").read_text(
+        encoding="utf-8"
+    )
+    launcher = (plugin_dir / "linux-vps" / "run-virtual-desktop.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "bootstrap" in manager
+    assert "require_command" not in manager
+    assert "apt-get install" in manager
+    assert "dnf install" in manager
+    assert "tigervnc-server-minimal" in manager
+    assert "xorg-x11-xauth" in manager
+    assert "--headed-browser" in manager
+    assert "run-virtual-desktop.sh" in service
+    assert "Restart=always" in service
+    assert "1920x1080" in launcher
+    assert "-localhost" in launcher
+    assert "-SecurityTypes None" in launcher
+    assert "MIT-MAGIC-COOKIE-1" in launcher
+    assert "unset DBUS_SESSION_BUS_ADDRESS DESKTOP_SESSION GDK_BACKEND QT_QPA_PLATFORM" in launcher
+    assert "dbus-run-session -- startxfce4" in launcher
+    assert "UnsetEnvironment=DBUS_SESSION_BUS_ADDRESS SESSION_MANAGER WAYLAND_DISPLAY XDG_SESSION_TYPE" in service
 
 
 def test_probe_desktop_requires_an_actual_rfb_server() -> None:
@@ -257,6 +308,15 @@ def test_configure_starts_dedicated_bridge_before_reporting_ready(tmp_path, monk
             calls.append("start")
             return "started"
 
+    class FakeRelayRuntime:
+        def restart_relay_runtime_for_reconfigure(self):
+            calls.append("restart-relay")
+            return {"stopped": [42], "left_running": []}
+
+        def ensure_relay_runtime(self):
+            calls.append("start-relay")
+            return "started"
+
     monkeypatch.setattr(
         setup,
         "probe_desktop",
@@ -268,7 +328,8 @@ def test_configure_starts_dedicated_bridge_before_reporting_ready(tmp_path, monk
         lambda: {"relay_url": "https://relay", "agent_id": "agent", "agent_secret": "secret"},
     )
     monkeypatch.setattr(setup, "hermes_home", lambda: tmp_path)
-    monkeypatch.setattr(setup, "_load_sibling", lambda module_name, filename: FakeRuntime())
+    monkeypatch.setattr(setup, "_computer_runtime_module", lambda: FakeRuntime())
+    monkeypatch.setattr(setup, "_relay_runtime_module", lambda: FakeRelayRuntime())
     monkeypatch.setattr(
         setup,
         "wait_for_relay",
@@ -280,15 +341,201 @@ def test_configure_starts_dedicated_bridge_before_reporting_ready(tmp_path, monk
         kind="Virtual Linux desktop",
         name="Hermes VPS",
         display=":1",
+        xauthority="/tmp/fetch.Xauthority",
+        headed_browser=True,
         vnc_password="dedicated-password",
         wait_seconds=5,
         check_only=False,
     )
 
     assert result == {"ok": True}
-    assert calls == [("probe", "dedicated-password"), "restart", "start", "ready"]
+    assert calls == [
+        ("probe", "dedicated-password"),
+        "restart",
+        "start",
+        "restart-relay",
+        "start-relay",
+        "ready",
+    ]
     saved = (tmp_path / ".env").read_text(encoding="utf-8")
     assert 'DISPLAY=":1"' in saved
+    assert 'XAUTHORITY="/tmp/fetch.Xauthority"' in saved
+    assert 'AGENT_BROWSER_HEADED="1"' in saved
+    assert 'WAYLAND_DISPLAY=""' in saved
+    assert 'SESSION_MANAGER=""' in saved
+    assert 'XDG_SESSION_TYPE="x11"' in saved
+    assert 'XDG_CURRENT_DESKTOP=""' in saved
+    assert 'XDG_SESSION_DESKTOP=""' in saved
+    assert 'DESKTOP_SESSION=""' in saved
+    assert 'DBUS_SESSION_BUS_ADDRESS=""' in saved
+    assert 'GDK_BACKEND="x11"' in saved
+    assert 'QT_QPA_PLATFORM="xcb"' in saved
     assert 'HERMES_FETCH_COMPUTER_NAME="Hermes VPS"' in saved
     assert 'HERMES_FETCH_COMPUTER_VNC_PASSWORD="dedicated-password"' in saved
     assert (tmp_path / ".env").stat().st_mode & 0o777 == 0o600
+
+
+def test_non_virtual_setup_removes_saved_virtual_settings_without_mutating_session(
+    tmp_path, monkeypatch
+) -> None:
+    setup.persist_environment(tmp_path / ".env", setup.VIRTUAL_DESKTOP_ENV_VALUES)
+    monkeypatch.setenv(setup.WAYLAND_DISPLAY_ENV, "wayland-0")
+    monkeypatch.setenv(setup.DBUS_SESSION_BUS_ADDRESS_ENV, "unix:path=/run/user/1000/bus")
+
+    class FakeComputerRuntime:
+        def restart_computer_runtime(self):
+            return True
+
+        def ensure_computer_runtime(self):
+            return "started"
+
+    class FakeRelayRuntime:
+        def restart_relay_runtime_for_reconfigure(self):
+            return {"stopped": [], "left_running": []}
+
+        def ensure_relay_runtime(self):
+            return "started"
+
+    monkeypatch.setattr(setup, "probe_desktop", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        setup,
+        "_credentials",
+        lambda: {"relay_url": "https://relay", "agent_id": "agent", "agent_secret": "secret"},
+    )
+    monkeypatch.setattr(setup, "hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(setup, "_computer_runtime_module", lambda: FakeComputerRuntime())
+    monkeypatch.setattr(setup, "_relay_runtime_module", lambda: FakeRelayRuntime())
+    monkeypatch.setattr(setup, "wait_for_relay", lambda *args, **kwargs: {"ok": True})
+
+    setup.configure(
+        target="tcp://127.0.0.1:5900",
+        kind="Linux desktop",
+        name="",
+        display=":0",
+        xauthority="/tmp/Xauthority",
+        headed_browser=True,
+        vnc_password="",
+        wait_seconds=5,
+        check_only=False,
+    )
+
+    saved = (tmp_path / ".env").read_text(encoding="utf-8")
+    for key in setup.VIRTUAL_DESKTOP_ENV_KEYS:
+        assert key not in saved
+    assert setup.os.environ[setup.WAYLAND_DISPLAY_ENV] == "wayland-0"
+    assert setup.os.environ[setup.DBUS_SESSION_BUS_ADDRESS_ENV] == "unix:path=/run/user/1000/bus"
+
+
+def test_configure_requires_a_managed_runtime_to_adopt_the_visible_display(
+    tmp_path, monkeypatch
+) -> None:
+    class FakeComputerRuntime:
+        def restart_computer_runtime(self):
+            return True
+
+        def ensure_computer_runtime(self):
+            return "started"
+
+    class FakeRelayRuntime:
+        def restart_relay_runtime_for_reconfigure(self):
+            return {"stopped": [], "left_running": [42]}
+
+    monkeypatch.setattr(setup, "probe_desktop", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        setup,
+        "_credentials",
+        lambda: {"relay_url": "https://relay", "agent_id": "agent", "agent_secret": "secret"},
+    )
+    monkeypatch.setattr(setup, "hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(setup, "_computer_runtime_module", lambda: FakeComputerRuntime())
+    monkeypatch.setattr(setup, "_relay_runtime_module", lambda: FakeRelayRuntime())
+
+    with pytest.raises(setup.SetupError, match="manually managed Hermes gateway"):
+        setup.configure(
+            target="tcp://127.0.0.1:5901",
+            kind="Virtual Linux desktop",
+            name="",
+            display=":1",
+            xauthority="/tmp/fetch.Xauthority",
+            headed_browser=True,
+            vnc_password="",
+            wait_seconds=5,
+            check_only=False,
+        )
+
+
+def test_configure_accepts_a_restarted_manual_gateway(tmp_path, monkeypatch) -> None:
+    calls = []
+    owner_pids = [[42], [84]]
+
+    class FakeComputerRuntime:
+        def restart_computer_runtime(self):
+            return True
+
+        def ensure_computer_runtime(self):
+            return "started"
+
+    class FakeRelayRuntime:
+        def restart_relay_runtime_for_reconfigure(self):
+            return {"stopped": [], "left_running": owner_pids.pop(0)}
+
+        def ensure_relay_runtime(self):
+            raise AssertionError("A live manual gateway already owns the relay")
+
+    monkeypatch.setattr(setup, "probe_desktop", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        setup,
+        "_credentials",
+        lambda: {"relay_url": "https://relay", "agent_id": "agent", "agent_secret": "secret"},
+    )
+    monkeypatch.setattr(setup, "hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(setup, "_computer_runtime_module", lambda: FakeComputerRuntime())
+    monkeypatch.setattr(setup, "_relay_runtime_module", lambda: FakeRelayRuntime())
+    monkeypatch.setattr(
+        setup,
+        "wait_for_relay",
+        lambda credentials, wait_seconds: calls.append("ready") or {"ok": True},
+    )
+
+    kwargs = {
+        "target": "tcp://127.0.0.1:5901",
+        "kind": "Virtual Linux desktop",
+        "name": "",
+        "display": ":1",
+        "xauthority": "/tmp/fetch.Xauthority",
+        "headed_browser": True,
+        "vnc_password": "",
+        "wait_seconds": 5,
+        "check_only": False,
+    }
+    with pytest.raises(setup.SetupError, match="Restart that gateway"):
+        setup.configure(**kwargs)
+
+    assert setup.configure(**kwargs) == {"ok": True}
+    assert calls == ["ready"]
+    assert not (tmp_path / "run" / "fetch-computer-gateway-restart.json").exists()
+
+
+def test_disable_computer_requires_manual_gateway_restart(tmp_path, monkeypatch) -> None:
+    owner_pids = [[42], [84]]
+
+    class FakeComputerRuntime:
+        def restart_computer_runtime(self):
+            return True
+
+    class FakeRelayRuntime:
+        def restart_relay_runtime_for_reconfigure(self):
+            return {"stopped": [], "left_running": owner_pids.pop(0)}
+
+        def ensure_relay_runtime(self):
+            raise AssertionError("A live manual gateway already owns the relay")
+
+    monkeypatch.setattr(setup, "hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(setup, "_computer_runtime_module", lambda: FakeComputerRuntime())
+    monkeypatch.setattr(setup, "_relay_runtime_module", lambda: FakeRelayRuntime())
+
+    with pytest.raises(setup.SetupError, match="Restart that gateway"):
+        setup.disable_computer()
+
+    setup.disable_computer()
+    assert not (tmp_path / "run" / "fetch-computer-gateway-restart.json").exists()

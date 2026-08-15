@@ -11,6 +11,7 @@ $setupArguments = @(
     "--target", "tcp://127.0.0.1:5900",
     "--kind", "Windows desktop",
     "--ask-vnc-password",
+    "--headed-browser",
     "--wait-seconds", "15"
 )
 $python = Get-Command python -ErrorAction SilentlyContinue
