@@ -211,9 +211,10 @@ bridge and fail-closes on `GET /v1/agents/computer/status` the same way
 on the virtual desktop. One Hermes install uses one computer container
 (display `:1`). Extra virtual displays can come later.
 
-The default backdrop is the Fetch-branded dark-slate wallpaper shipped at
-`linux-computer/branding/wallpaper.png`. Replace that file and rebuild the
-image to change the desktop background without a redesign.
+The default backdrop is the Fetch brand landscape shipped at
+`linux-computer/branding/wallpaper.png` — a soft-focus view of rolling green
+hills, warm golden-hour light, and a pale sky. Replace that file and rebuild
+the image to change the desktop background without a redesign.
 
 The VNC port is deliberately private. On Linux the container uses host
 networking so TigerVNC can bind `127.0.0.1:5901` with `-localhost`. On Docker
