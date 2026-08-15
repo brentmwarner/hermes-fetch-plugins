@@ -196,6 +196,30 @@ def _computer_runtime_module():
     return _load_sibling("fetch_plugin_computer_runtime_setup", "_computer_runtime.py")
 
 
+def _linux_computer_module():
+    path = Path(__file__).resolve().parent / "linux-computer" / "manage.py"
+    spec = importlib.util.spec_from_file_location(
+        "fetch_plugin_linux_computer_setup", path
+    )
+    if spec is None or spec.loader is None:
+        raise SetupError(f"Could not load the Fetch computer manager from {path}.")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _stop_managed_computer_container() -> None:
+    try:
+        linux_computer = _linux_computer_module()
+    except Exception:
+        return
+    try:
+        linux_computer.stop_container()
+    except linux_computer.ComputerError as exc:
+        raise SetupError(str(exc)) from exc
+
+
 def _relay_runtime_module():
     return _load_sibling("fetch_plugin_runtime_setup", "_runtime.py")
 
@@ -263,6 +287,7 @@ def _manual_gateway_adopted_configuration(fingerprint: str, pids: list[int]) -> 
 
 
 def disable_computer() -> None:
+    _stop_managed_computer_container()
     computer_runtime = _computer_runtime_module()
     if not computer_runtime.restart_computer_runtime():
         raise SetupError("Could not stop the Fetch computer bridge.")

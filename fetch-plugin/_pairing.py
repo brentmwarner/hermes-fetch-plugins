@@ -82,6 +82,50 @@ def _computer_runtime_module():
     return module
 
 
+def _linux_computer_module():
+    existing = sys.modules.get("fetch_plugin_linux_computer")
+    if existing is not None:
+        return existing
+    path = Path(__file__).resolve().parent / "linux-computer" / "manage.py"
+    spec = importlib.util.spec_from_file_location("fetch_plugin_linux_computer", path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _guide_linux_computer() -> str:
+    """Tell Linux users how to get the Fetch computer running after setup/update."""
+
+    if not sys.platform.startswith("linux"):
+        return "not-linux"
+    try:
+        linux_computer = _linux_computer_module()
+    except Exception:
+        return "unavailable"
+    if linux_computer is None:
+        return "unavailable"
+    from hermes_cli.cli_output import print_info, print_warning
+
+    def _print(message: str) -> None:
+        for line in str(message).splitlines() or [""]:
+            if line.strip():
+                print_info(line)
+            else:
+                print()
+
+    report = linux_computer.computer_readiness()
+    if report["state"] in {"ready", "configured"}:
+        if report.get("message"):
+            print_info(report["message"])
+        return report["state"]
+    print_warning("Fetch computer is not ready on this Linux host.")
+    print()
+    return linux_computer.guide_linux_computer(offer_bootstrap=True, printer=_print)
+
+
 def _inbox_module():
     """Load the Fetch inbox helper by file path."""
     existing = sys.modules.get("fetch_plugin_inbox")
@@ -408,6 +452,7 @@ def interactive_setup() -> None:
         _inbox_module().enable_delivery_for_future_starts()
         print_info("Fetch: already configured")
         if not prompt_yes_no("Reconfigure Fetch?", False):
+            _guide_linux_computer()
             return
         print()
 
@@ -499,6 +544,7 @@ def interactive_setup() -> None:
                 "      HERMES_FETCH_TUNNEL_ENABLED=1 hermes dashboard --no-open"
             )
         print()
+        _guide_linux_computer()
 
         return
 

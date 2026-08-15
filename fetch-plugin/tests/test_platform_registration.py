@@ -98,6 +98,72 @@ def test_fetch_is_connected_from_relay_pairing(monkeypatch):
     assert fetch._fetch_is_connected(config) is True
 
 
+def test_register_announces_linux_computer_when_not_ready(monkeypatch, capsys):
+    fetch = _load_module(
+        "fetch_plugin_linux_announce_test",
+        FETCH_PLUGIN_DIR / "__init__.py",
+    )
+    monkeypatch.setattr(fetch.sys, "platform", "linux")
+    monkeypatch.setattr(fetch.sys.stderr, "isatty", lambda: True)
+    monkeypatch.setattr(fetch.sys.stdout, "isatty", lambda: False)
+    monkeypatch.setattr(fetch, "_spawn_tunnel", lambda: None)
+    monkeypatch.setattr(
+        fetch._pairing,
+        "_linux_computer_module",
+        lambda: types.SimpleNamespace(
+            computer_readiness=lambda: {
+                "state": "engine-missing",
+                "message": (
+                    "requires Docker\n"
+                    "  sudo apt-get install -y docker.io\n"
+                    "  ~/.hermes/plugins/fetch/linux-computer/manage-computer.sh bootstrap"
+                ),
+            }
+        ),
+    )
+    ctx = types.SimpleNamespace(
+        register_hook=lambda *args, **kwargs: None,
+        register_platform=lambda **kwargs: None,
+    )
+
+    fetch.register(ctx)
+
+    err = capsys.readouterr().err
+    assert "requires Docker" in err
+    assert "Podman" not in err
+    assert "manage-computer.sh bootstrap" in err
+
+
+def test_register_stays_quiet_when_linux_computer_is_ready(monkeypatch, capsys):
+    fetch = _load_module(
+        "fetch_plugin_linux_announce_ready_test",
+        FETCH_PLUGIN_DIR / "__init__.py",
+    )
+    monkeypatch.setattr(fetch.sys, "platform", "linux")
+    monkeypatch.setattr(fetch.sys.stderr, "isatty", lambda: True)
+    monkeypatch.setattr(fetch, "_spawn_tunnel", lambda: None)
+    monkeypatch.setattr(
+        fetch._pairing,
+        "_linux_computer_module",
+        lambda: types.SimpleNamespace(
+            computer_readiness=lambda: {
+                "state": "ready",
+                "message": "Fetch computer is running.",
+            }
+        ),
+    )
+    ctx = types.SimpleNamespace(
+        register_hook=lambda *args, **kwargs: None,
+        register_platform=lambda **kwargs: None,
+    )
+
+    fetch.register(ctx)
+
+    err = capsys.readouterr().err
+    assert "manage-computer.sh bootstrap" not in err
+    assert "requires Docker" not in err
+
+
 def test_fetch_cards_skill_never_overwrites_custom_skill(tmp_path, monkeypatch):
     fetch = _load_module("fetch_plugin_skill_install_test", FETCH_PLUGIN_DIR / "__init__.py")
     target = tmp_path / "skills" / "fetch-cards"

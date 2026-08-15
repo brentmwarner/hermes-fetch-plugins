@@ -53,6 +53,8 @@ require_linger() {
 
 case "$action" in
   bootstrap)
+    printf 'Note: Docker is now the default Linux computer. This host XFCE path is opt-in.\n' >&2
+    printf 'Prefer: ../linux-computer/manage-computer.sh bootstrap\n' >&2
     install_dependencies
     sudo loginctl enable-linger "$(id -un)"
     exec "$0" install

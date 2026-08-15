@@ -59,6 +59,17 @@ hermes gateway restart      # (and restart `hermes dashboard` if running separat
 hermes setup                # choose Fetch, paste the Fetch setup code, then scan/paste the setup link
 ```
 
+On Linux, after a plugin install or `hermes plugins update`: install Docker if
+needed, then bootstrap the computer once. `hermes setup` (Fetch)
+prints the exact next steps and can start the container after one confirmation.
+After that, `unless-stopped` brings the computer back with the engine, and
+Fetch Watch just works.
+
+```bash
+# Linux, once per host:
+~/.hermes/plugins/fetch/linux-computer/manage-computer.sh bootstrap
+```
+
 Before `hermes setup`, open Fetch on the phone, sign in, and create a setup
 code. That code enrolls the agent into your Fetch account; the relay link shown
 afterward pairs this phone to the enrolled agent. No Apple account, no `.p8`, no
@@ -87,7 +98,7 @@ comes in through that reverse tunnel.
   `~/.hermes/.env` for this; **restart your own dashboard after setup** so it
   reloads `.env` and picks up the same token.
 
-### Computer view (Mac, Windows, Linux desktop, and Linux VPS)
+### Computer view (Mac, Windows, and Linux)
 
 When browser or desktop work reaches a step only the person should complete
 (MFA, CAPTCHA, private information, payment approval, or legal certification),
@@ -98,10 +109,13 @@ skipping it answers the existing clarify request so the paused agent can
 continue; no private input needs to be pasted into chat.
 
 Fetch can watch the computer Hermes is using and, after confirmation, hand
-control to the iPhone. The screen source is native to each host; Mac and Linux
-do not run a Linux container. The plugin connects only to a loopback VNC port,
-then carries the pixels and input over the existing authenticated outbound
-Fetch relay.
+control to the iPhone. On Linux the default screen is a portable Ubuntu
+container (Docker) that Hermes drives from the host. Mac and Windows
+keep their native desktops; the same Ubuntu image is an optional extra there,
+not a replacement for Xcode, Simulator, or real Windows apps. The plugin
+connects only to a loopback VNC port, then carries the pixels and input over
+the existing authenticated outbound Fetch relay. Do not build a second relay
+or expose VNC to the network.
 
 VNC transport authentication is completed on the host before any pixels are
 forwarded. Its dedicated password stays in the owner-only Hermes environment
@@ -148,7 +162,10 @@ the display off does not remove the shared framebuffer, but the Mac must remain
 awake. Enable **Wake for network access** and prevent automatic system sleep
 while on power if this Mac should remain reachable unattended. For isolation
 from personal apps and files, run Hermes and Screen Sharing in a dedicated
-macOS user account.
+macOS user account. Docker Desktop running the Ubuntu Fetch computer is an
+optional extra for a virtual Linux desktop; it is not a replacement for the
+real Mac. Xcode and Simulator cannot run in Ubuntu. iOS work stays on this
+Mac.
 
 #### Windows
 
@@ -174,12 +191,70 @@ awake for unattended use. For isolation from personal apps and files, use a
 dedicated Windows account. The plugin rejects non-loopback targets even if the
 VNC server is accidentally configured more broadly, but **Loopback Only**
 prevents any other program on the network from reaching UltraVNC directly.
+Docker Desktop running the Ubuntu Fetch computer is an optional extra, not a
+replacement for real Windows applications.
 
-#### Existing Linux desktop
+#### Linux (default): Fetch computer container
 
-The included service uses TigerVNC's `x0vncserver` to share the existing X11
-desktop—the same screen attached to the physical monitor. On Ubuntu, sign into
-an **Xorg** session, open a terminal in that desktop, and run:
+On Fedora, Ubuntu, other Linux desktops, and a VPS, the default computer is
+one Ubuntu container. Hermes stays on the host. The plugin starts TigerVNC +
+XFCE inside the container, maps RFB only to `127.0.0.1:5901`, and reuses the
+existing Fetch loopback bridge. Fedora Wayland is a first-class case: do not
+scrape the physical login session.
+
+Update the plugin, then (Linux) install Docker if needed, bootstrap
+once, and Fetch Watch just works. Setup fails closed if Docker is missing
+or the daemon is not running; it does not silently `apt`/`dnf` XFCE onto
+the host. `hermes setup`
+(Fetch) and plugin load print copy-pasteable next steps when the computer is
+not running:
+
+```bash
+~/.hermes/plugins/fetch/linux-computer/manage-computer.sh bootstrap
+```
+
+The bootstrap builds the image if needed, starts the `fetch-computer`
+container, waits until RFB answers on `127.0.0.1:5901`, persists
+`HERMES_FETCH_COMPUTER_TARGET=tcp://127.0.0.1:5901`,
+`HERMES_FETCH_COMPUTER_NAME=Fetch computer`, and
+`HERMES_FETCH_COMPUTER_KIND=Virtual Linux desktop`, then starts the existing
+bridge and fail-closes on `GET /v1/agents/computer/status` the same way
+`computer_setup.py` already does. On Linux it also sets `DISPLAY=:1` and
+`AGENT_BROWSER_HEADED=1` so Hermes `browser_*` / `computer_use` windows open
+on the virtual desktop. One Hermes install uses one computer container
+(display `:1`). Extra virtual displays can come later.
+
+TigerVNC runs at **1280×800** (Grok Bot’s desktop). The default backdrop is
+the Fetch brand landscape shipped at `linux-computer/branding/wallpaper.png`
+— a soft-focus view of rolling green hills, warm golden-hour light, and a
+pale sky. `hsetroot -cover` paints that image onto the framebuffer. Replace
+the PNG and rebuild the image to change the desktop background without a
+redesign.
+
+The VNC port is deliberately private. On Linux the container uses host
+networking so TigerVNC can bind `127.0.0.1:5901` with `-localhost`. On Docker
+Desktop the manager publishes only `127.0.0.1:5901`. Never publish VNC on
+`0.0.0.0` or open port 5901 in a firewall.
+
+Useful lifecycle commands:
+
+```bash
+./manage-computer.sh status
+./manage-computer.sh uninstall
+```
+
+Uninstall (and `computer_setup.py --disable`) stop and remove the container,
+terminate the Fetch computer bridge, and clear the persisted computer/display
+settings so later plugin starts do not re-advertise this host.
+
+#### Existing Xorg Linux desktop (opt-in)
+
+Only if you already run an **Xorg** session and want Fetch to scrape that
+physical monitor. Wayland users should use the container above. The included
+service uses TigerVNC's `x0vncserver` to share the existing X11 desktop.
+
+On Ubuntu, sign into an **Xorg** session, open a terminal in that desktop, and
+run:
 
 ```bash
 sudo apt update
@@ -195,60 +270,20 @@ only after the VNC server and relay uplink both answer readiness checks.
 
 The display can be powered off while the X11 session remains active. Disable
 automatic system suspend for unattended use. A disconnected display can cause
-some graphics drivers to remove the framebuffer; keep the display connected,
-use a display emulator, or use the virtual-desktop setup below. GNOME/KDE
-Wayland sessions are not part of this first release—choose Xorg at sign-in.
+some graphics drivers to remove the framebuffer; keep the display connected or
+use a display emulator.
 
 Lifecycle commands are `./manage-user-service.sh status` and
 `./manage-user-service.sh uninstall`. Uninstall stops the X11 VNC service,
 terminates the Fetch computer bridge, and removes the persisted computer
 target so later plugin starts do not re-advertise this desktop.
 
-#### Private virtual Linux desktop (recommended for VPS and Wayland PCs)
+#### Host virtual desktop without containers (opt-in)
 
-Fetch can show a dedicated 1920×1080 XFCE desktop even when Linux has no
-monitor. The screen is a virtual TigerVNC display, so Hermes and the phone see
-the same desktop while no physical display exists. Its framebuffer stays
-1920×1080 even when the machine running Fetch has a larger physical display.
-This is also the recommended mode on a Fedora or Ubuntu workstation using
-Wayland: it gives Hermes a private, predictable desktop without changing the
-person's physical login session.
-
-The included user service supports Ubuntu/Debian and Fedora and keeps the
-desktop available after disconnecting SSH or turning off the physical monitor.
-Run Hermes and the service as a dedicated, unprivileged Linux user when
-possible. That user's home directory is the boundary for the agent environment.
-After pairing Fetch, run the one-command bootstrap from the installed plugin:
-
-```bash
-cd ~/.hermes/plugins/fetch/linux-vps
-./manage-user-services.sh bootstrap
-```
-
-The bootstrap uses `apt` or `dnf` to install XFCE, D-Bus, and TigerVNC, enables
-login persistence, and installs the user services. `DISPLAY=:1` makes GUI
-programs launched by Hermes use the same virtual desktop that Fetch streams.
-It also enables Hermes' headed local-browser mode and restarts the Fetch-owned
-Hermes runtime so `browser_*` and `computer_use` actions appear on that display
-instead of in a headless session. Setup exits successfully only after the
-1920×1080 desktop and authenticated relay uplink both answer readiness checks.
-
-The VNC port is deliberately private: TigerVNC listens on `127.0.0.1:5901`.
-The VNC service uses no VNC password because it is unreachable off-host and the
-Fetch relay separately authenticates the paired agent and a short-lived viewer
-ticket. Never change it to `0.0.0.0` or open port 5901 in the VPS firewall.
-
-Useful lifecycle commands:
-
-```bash
-./manage-user-services.sh status
-./manage-user-services.sh uninstall
-```
-
-Uninstall stops and removes the user service, terminates the Fetch computer
-bridge, and removes the persisted computer/display settings so later plugin
-starts do not re-advertise this host. It leaves OS packages installed so it
-does not disturb other desktop workloads.
+`linux-vps/` still installs TigerVNC + XFCE on the host via `apt` or `dnf`.
+That is no longer the default Linux path. Use it only when you cannot run
+Docker. The container setup above is what Fedora Wayland and VPS
+hosts should run.
 
 ## Reconfigure or reset
 
@@ -277,8 +312,8 @@ All env vars are `HERMES_FETCH_*`; there is no separate inbox product.
 | `HERMES_FETCH_RELAY_REGISTRATION_TOKEN` | _(none)_ | Operator/private relay registration token. Public Fetch users should not need this. |
 | `HERMES_FETCH_TUNNEL_ENABLED` | auto after Fetch relay setup | Keep the agent-side reverse tunnel active for relay pairing. Set `0`/`false` only to force-disable it. |
 | `HERMES_FETCH_TUNNEL_DISABLE_DASHBOARD_AUTOSTART` | _(unset)_ | Opt out if you manage the local Hermes dashboard/API process yourself. |
-| `HERMES_FETCH_COMPUTER_TARGET` | _(unset)_ | Enable computer viewing with a loopback-only VNC target, normally `tcp://127.0.0.1:5900` for Mac/Windows/physical Linux or `tcp://127.0.0.1:5901` for virtual Linux. Fetch rejects LAN/public targets. |
-| `HERMES_FETCH_COMPUTER_NAME` | host name | Friendly computer name shown in the Fetch viewer. |
+| `HERMES_FETCH_COMPUTER_TARGET` | _(unset)_ | Enable computer viewing with a loopback-only VNC target, normally `tcp://127.0.0.1:5900` for Mac/Windows/physical Linux or `tcp://127.0.0.1:5901` for the Linux container / virtual Linux desktop. Fetch rejects LAN/public targets. |
+| `HERMES_FETCH_COMPUTER_NAME` | host name | Friendly computer name shown in the Fetch viewer. The Linux container setup saves `Fetch computer`. |
 | `HERMES_FETCH_COMPUTER_KIND` | inferred from OS | Secondary label such as `Mac desktop`, `Windows desktop`, `Linux desktop`, or `Virtual Linux desktop`. |
 | `HERMES_FETCH_COMPUTER_VNC_PASSWORD` | _(unset)_ | Dedicated VNC transport password saved by Mac/Windows computer setup. It is consumed only by the host-side loopback bridge and is never sent to the relay or phone. |
 | `HERMES_FETCH_COMPUTER_WS_URL` | _(unset)_ | Legacy loopback websockify target. Still accepted for compatibility; new setups should use `HERMES_FETCH_COMPUTER_TARGET`. |
