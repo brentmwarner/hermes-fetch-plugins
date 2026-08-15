@@ -353,7 +353,10 @@ async def _authenticate_local_vnc(
         response = _load_vnc_auth_module().challenge_response(password, challenge)
         await conn.send(response)
 
-    expects_result = security_type == _RFB_SECURITY_VNC_AUTH or minor >= 7
+    # RFC 6143 Appendix A.2: RFB 3.7 None skips SecurityResult and goes
+    # straight to ClientInit/ServerInit. VNC Authentication still sends it.
+    # RFB 3.8 always sends SecurityResult, including for None.
+    expects_result = security_type == _RFB_SECURITY_VNC_AUTH or minor >= 8
     if expects_result:
         result = int.from_bytes(await conn.readexactly(4), "big")
         if result != 0:
