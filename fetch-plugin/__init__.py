@@ -745,6 +745,10 @@ def _spawn_tunnel() -> None:
     computer_runtime_status = _computer_runtime.ensure_computer_runtime()
     if computer_runtime_status == "failed":
         log.warning("Fetch computer runtime could not start; check fetch-computer-runtime.log")
+    # The supervised user timer outlives every Hermes process (gateways only
+    # load the inbox adapter, so in-process keeper threads alone leave the
+    # agent unprotected). Armed on every paired pass through registration.
+    _runtime.ensure_keeper_units()
     if _runtime.ensure_relay_runtime() in {"started", "already-running"}:
         return
 

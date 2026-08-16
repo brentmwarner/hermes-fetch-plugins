@@ -8,10 +8,12 @@ process alive after `hermes setup` exits.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import os
 import random
+import shutil
 import signal
 import socket
 import subprocess
@@ -436,6 +438,7 @@ def start_runtime_keeper(
         _keeper_stop_event = stop
 
     def _tick_forever() -> None:
+        failing = False
         while not stop.wait(interval_s + random.uniform(0.0, max(0.0, jitter_s))):
             try:
                 if not should_run():
@@ -445,10 +448,20 @@ def start_runtime_keeper(
                 for ensure in extra_ensures:
                     if ensure() == "started":
                         log.info("Fetch keeper restarted a companion runtime; it was not running")
+                if failing:
+                    failing = False
+                    log.info("Fetch runtime keeper recovered; ticks are healthy again")
             except Exception:
-                log.debug("Fetch runtime keeper tick failed", exc_info=True)
+                # First failure of a streak is loud: a keeper that fails
+                # silently reads as "protected" while the agent stays offline.
+                if not failing:
+                    failing = True
+                    log.warning("Fetch runtime keeper tick failed", exc_info=True)
+                else:
+                    log.debug("Fetch runtime keeper tick failed", exc_info=True)
 
     threading.Thread(target=_tick_forever, name="fetch-runtime-keeper", daemon=True).start()
+    log.info("Fetch runtime keeper active (pid=%s, interval~%ss)", os.getpid(), int(interval_s))
     return True
 
 
@@ -458,6 +471,155 @@ def _stop_runtime_keeper_for_tests() -> None:
         if _keeper_stop_event is not None:
             _keeper_stop_event.set()
         _keeper_running = False
+
+
+def _sibling(module_name: str, filename: str):
+    """Load a sibling plugin module lazily, reusing an already-loaded copy.
+
+    Mirrors ``_computer_runtime._load_runtime_module`` so every caller shares
+    one module object (and therefore one keeper) per process.
+    """
+    existing = sys.modules.get(module_name)
+    if existing is not None:
+        return existing
+    path = Path(__file__).resolve().parent / filename
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def keeper_should_run() -> bool:
+    """The tunnel-autostart gate, evaluated fresh on every keeper tick.
+
+    Same decision as the package registration gate, but importable from any
+    host process (gateway adapter, timer tick) without touching the package
+    ``__init__``: an explicit HERMES_FETCH_TUNNEL_ENABLED wins; otherwise a
+    paired agent keeps its runtimes alive.
+    """
+    configured = os.environ.get(TUNNEL_ENABLED_ENV)
+    if configured is not None and configured.strip():
+        return truthy(configured)
+    try:
+        pairing = _sibling("fetch_plugin_pairing", "_pairing.py")
+        return bool(pairing.is_pairing_configured())
+    except Exception:
+        log.debug("Fetch keeper could not evaluate pairing state", exc_info=True)
+        return False
+
+
+def start_default_runtime_keeper() -> bool:
+    """Start the in-process keeper with the standard gate and companions.
+
+    The computer ensure is the keeper-scoped variant so a host whose
+    environment went stale after a disable/reconfigure elsewhere cannot
+    resurrect the old bridge.
+    """
+
+    def _ensure_computer() -> str:
+        computer = _sibling("fetch_plugin_computer_runtime", "_computer_runtime.py")
+        return computer.keeper_ensure_computer_runtime()
+
+    return start_runtime_keeper(
+        should_run=keeper_should_run,
+        extra_ensures=(_ensure_computer,),
+    )
+
+
+_KEEPER_UNIT_NAME = "fetch-runtime-keeper"
+_KEEPER_TICK_FILE = "keeper_tick.py"
+
+
+def _systemd_user_dir() -> Path:
+    config_home = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    base = Path(config_home) if config_home else Path.home() / ".config"
+    return base / "systemd" / "user"
+
+
+def _keeper_unit_texts() -> dict[str, str]:
+    tick_script = Path(__file__).resolve().parent / _KEEPER_TICK_FILE
+    service = (
+        "[Unit]\n"
+        "Description=Fetch runtime keeper (respawn relay/computer runtimes)\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        f"ExecStart={_child_python_executable()} {tick_script}\n"
+    )
+    timer = (
+        "[Unit]\n"
+        "Description=Run the Fetch runtime keeper every minute\n"
+        "\n"
+        "[Timer]\n"
+        "OnBootSec=90\n"
+        "OnUnitActiveSec=60\n"
+        "AccuracySec=10\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n"
+    )
+    return {
+        f"{_KEEPER_UNIT_NAME}.service": service,
+        f"{_KEEPER_UNIT_NAME}.timer": timer,
+    }
+
+
+def _systemctl_user(*args: str) -> bool:
+    try:
+        subprocess.run(
+            ["systemctl", "--user", *args],
+            check=True,
+            capture_output=True,
+            timeout=15.0,
+        )
+        return True
+    except Exception:
+        log.debug("systemctl --user %s failed", " ".join(args), exc_info=True)
+        return False
+
+
+def ensure_keeper_units() -> str:
+    """Install/refresh the supervised keeper: a systemd user timer.
+
+    In-process keepers die with their host process, and on some deployments no
+    long-lived process loads this module at all (gateways only load the inbox
+    adapter). A user-level timer survives every Hermes process, so a runtime
+    stopped by an interrupted reconfigure heals within a minute regardless of
+    which processes are running. Returns "installed", "unchanged",
+    "unsupported", or "failed".
+    """
+    if sys.platform != "linux" or shutil.which("systemctl") is None:
+        return "unsupported"
+    unit_dir = _systemd_user_dir()
+    try:
+        unit_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        log.debug("Fetch could not create systemd user unit dir", exc_info=True)
+        return "failed"
+    changed = False
+    for name, text in _keeper_unit_texts().items():
+        path = unit_dir / name
+        try:
+            if path.read_text(encoding="utf-8") == text:
+                continue
+        except OSError:
+            pass
+        try:
+            path.write_text(text, encoding="utf-8")
+            changed = True
+        except OSError:
+            log.debug("Fetch could not write %s", path, exc_info=True)
+            return "failed"
+    if changed and not _systemctl_user("daemon-reload"):
+        return "failed"
+    if not _systemctl_user("enable", "--now", f"{_KEEPER_UNIT_NAME}.timer"):
+        return "failed"
+    if changed:
+        log.info("Fetch supervised keeper timer installed (%s.timer)", _KEEPER_UNIT_NAME)
+        return "installed"
+    return "unchanged"
 
 
 def restart_relay_runtime_for_reconfigure() -> dict:

@@ -298,6 +298,10 @@ def disable_computer() -> None:
         os.environ.pop(key, None)
 
     relay_runtime = _relay_runtime_module()
+    # Arm the supervised keeper BEFORE tearing the runtime down: if this flow
+    # dies between the stop and the ensure below, the timer still restores the
+    # uplink within a minute instead of stranding every paired device.
+    relay_runtime.ensure_keeper_units()
     relay_handoff = relay_runtime.restart_relay_runtime_for_reconfigure()
     left_running = relay_handoff.get("left_running") or []
     if left_running:
@@ -493,6 +497,9 @@ def configure(
             raise SetupError(f"Could not start the Fetch computer bridge: {runtime_status}")
 
         relay_runtime = _relay_runtime_module()
+        # Arm the supervised keeper BEFORE the teardown (see disable_computer):
+        # an interrupted handoff must heal on its own.
+        relay_runtime.ensure_keeper_units()
         relay_handoff = relay_runtime.restart_relay_runtime_for_reconfigure()
         left_running = relay_handoff.get("left_running") or []
         fingerprint = _configuration_fingerprint(values)
