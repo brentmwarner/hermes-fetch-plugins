@@ -319,6 +319,13 @@ def test_keeper_ensure_skips_when_persisted_settings_diverge(tmp_path, monkeypat
     assert computer_runtime.keeper_ensure_computer_runtime() == "stale-config"
     assert calls == [1]
 
+    # A name that only lives in the environment is legitimate: setup leaves an
+    # omitted --name alone, so an empty persisted name expresses no opinion.
+    monkeypatch.setenv("HERMES_FETCH_COMPUTER_NAME", "Env Only Mac")
+    write_env("old-secret")
+    assert computer_runtime.keeper_ensure_computer_runtime() == "started"
+    assert calls == [1, 1]
+
 
 def test_keeper_ensure_runs_when_environment_matches_persisted(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HERMES_FETCH_STORE_HOME", str(tmp_path))

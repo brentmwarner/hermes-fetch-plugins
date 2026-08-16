@@ -48,6 +48,11 @@ _KEEPER_PERSISTED_ENVS = (
     "HERMES_FETCH_COMPUTER_KIND",
     VNC_PASSWORD_ENV,
 )
+# Setup leaves an omitted ``--name`` alone rather than scrubbing it the way an
+# empty VNC password is scrubbed, so a name can legitimately live only in the
+# process environment. An empty persisted value for these keys expresses no
+# opinion; a persisted value must still match.
+_KEEPER_ENV_ONLY_OK = ("HERMES_FETCH_COMPUTER_NAME",)
 
 
 def _child_environment(environment: dict[str, str] | None) -> dict[str, str]:
@@ -153,6 +158,8 @@ def keeper_ensure_computer_runtime() -> str:
     environment_path = _store_home() / ".env"
     for key in _KEEPER_PERSISTED_ENVS:
         persisted = _persisted_environment_value(environment_path, key).strip()
+        if not persisted and key in _KEEPER_ENV_ONLY_OK:
+            continue
         if os.environ.get(key, "").strip() != persisted:
             return "stale-config"
     return ensure_computer_runtime()
