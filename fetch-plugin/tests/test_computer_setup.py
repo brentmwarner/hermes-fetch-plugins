@@ -66,6 +66,7 @@ def test_remove_environment_keys_drops_computer_settings_and_keeps_other_lines(t
         "# keep\nOTHER=value\nHERMES_FETCH_COMPUTER_TARGET=tcp://127.0.0.1:5901\n"
         "export HERMES_FETCH_COMPUTER_KIND=Old\nHERMES_FETCH_TUNNEL_ENABLED=1\n"
         "DISPLAY=:1\nXAUTHORITY=/tmp/fetch.Xauthority\nAGENT_BROWSER_HEADED=1\n"
+        "BROWSER=/tmp/fetch-chrome\n"
         "WAYLAND_DISPLAY=\nDBUS_SESSION_BUS_ADDRESS=\n",
         encoding="utf-8",
     )
@@ -81,6 +82,7 @@ def test_remove_environment_keys_drops_computer_settings_and_keeps_other_lines(t
     assert "DISPLAY=" not in text
     assert "XAUTHORITY=" not in text
     assert "AGENT_BROWSER_HEADED" not in text
+    assert "BROWSER=" not in text
     for key in setup.VIRTUAL_DESKTOP_ENV_KEYS:
         assert key not in text
 
@@ -463,6 +465,67 @@ def test_configure_starts_dedicated_bridge_before_reporting_ready(tmp_path, monk
     for environment in runtime_environments:
         assert environment[setup.WAYLAND_DISPLAY_ENV] == ""
         assert environment[setup.XDG_SESSION_TYPE_ENV] == "x11"
+
+
+def test_container_setup_clears_host_x11_and_points_browser_at_docker_exec(
+    tmp_path, monkeypatch
+) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        'DISPLAY=":1"\nXAUTHORITY="/home/user/.Xauthority"\nBROWSER="google-chrome"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(setup.DISPLAY_ENV, ":0")
+    monkeypatch.setenv(setup.XAUTHORITY_ENV, "/home/user/.Xauthority")
+
+    class FakeRuntime:
+        def restart_computer_runtime(self):
+            return True
+
+        def ensure_computer_runtime(self, **kwargs):
+            return "started"
+
+    class FakeRelayRuntime:
+        def ensure_keeper_units(self):
+            return "unsupported"
+
+        def restart_relay_runtime_for_reconfigure(self):
+            return {"stopped": [], "left_running": []}
+
+        def ensure_relay_runtime(self, **kwargs):
+            return "started"
+
+    monkeypatch.setattr(setup, "probe_desktop", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        setup,
+        "_credentials",
+        lambda: {"relay_url": "https://relay", "agent_id": "agent", "agent_secret": "secret"},
+    )
+    monkeypatch.setattr(setup, "hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(setup, "_computer_runtime_module", lambda: FakeRuntime())
+    monkeypatch.setattr(setup, "_relay_runtime_module", lambda: FakeRelayRuntime())
+    monkeypatch.setattr(setup, "wait_for_relay", lambda *args, **kwargs: {"ok": True})
+
+    setup.configure(
+        target="tcp://127.0.0.1:5901",
+        kind="Virtual Linux desktop",
+        name="Fetch computer",
+        display="",
+        xauthority="",
+        headed_browser=True,
+        browser="/opt/fetch/linux-computer/fetch-computer-chrome.sh",
+        vnc_password="",
+        wait_seconds=5,
+        check_only=False,
+    )
+
+    saved = env_path.read_text(encoding="utf-8")
+    assert not any(line.startswith("DISPLAY=") for line in saved.splitlines())
+    assert not any(line.startswith("XAUTHORITY=") for line in saved.splitlines())
+    assert 'BROWSER="/opt/fetch/linux-computer/fetch-computer-chrome.sh"' in saved
+    assert 'AGENT_BROWSER_HEADED="1"' in saved
+    assert setup.DISPLAY_ENV not in setup.os.environ
+    assert setup.XAUTHORITY_ENV not in setup.os.environ
 
 
 def test_non_virtual_setup_restores_physical_session_for_all_later_runtimes(

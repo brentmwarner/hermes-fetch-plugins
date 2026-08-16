@@ -26,6 +26,7 @@ TUNNEL_ENV = "HERMES_FETCH_TUNNEL_ENABLED"
 DISPLAY_ENV = "DISPLAY"
 XAUTHORITY_ENV = "XAUTHORITY"
 BROWSER_HEADED_ENV = "AGENT_BROWSER_HEADED"
+BROWSER_ENV = "BROWSER"
 VNC_PASSWORD_ENV = "HERMES_FETCH_COMPUTER_VNC_PASSWORD"
 WAYLAND_DISPLAY_ENV = "WAYLAND_DISPLAY"
 SESSION_MANAGER_ENV = "SESSION_MANAGER"
@@ -56,6 +57,7 @@ COMPUTER_ENV_KEYS = (
     DISPLAY_ENV,
     XAUTHORITY_ENV,
     BROWSER_HEADED_ENV,
+    BROWSER_ENV,
     VNC_PASSWORD_ENV,
 )
 PERSISTED_COMPUTER_ENV_KEYS = COMPUTER_ENV_KEYS + VIRTUAL_DESKTOP_ENV_KEYS
@@ -446,6 +448,7 @@ def configure(
     display: str,
     xauthority: str,
     headed_browser: bool,
+    browser: str = "",
     vnc_password: str,
     wait_seconds: float,
     check_only: bool,
@@ -471,6 +474,8 @@ def configure(
             values[XAUTHORITY_ENV] = xauthority
         if headed_browser:
             values[BROWSER_HEADED_ENV] = "1"
+        if browser:
+            values[BROWSER_ENV] = browser
         if kind == "Virtual Linux desktop":
             values.update(VIRTUAL_DESKTOP_ENV_VALUES)
         if vnc_password:
@@ -481,6 +486,19 @@ def configure(
         )
         if kind != "Virtual Linux desktop":
             remove_environment_keys(environment_path, VIRTUAL_DESKTOP_ENV_KEYS)
+        stale_host_x11 = tuple(
+            key
+            for key, present in (
+                (DISPLAY_ENV, display),
+                (XAUTHORITY_ENV, xauthority),
+                (BROWSER_ENV, browser),
+            )
+            if not present
+        )
+        if stale_host_x11:
+            remove_environment_keys(environment_path, stale_host_x11)
+            for key in stale_host_x11:
+                os.environ.pop(key, None)
         if not vnc_password:
             remove_environment_keys(environment_path, (VNC_PASSWORD_ENV,))
             os.environ.pop(VNC_PASSWORD_ENV, None)
@@ -541,6 +559,11 @@ def _parser() -> argparse.ArgumentParser:
         help="Run Hermes' local browser visibly on the streamed desktop.",
     )
     parser.add_argument(
+        "--browser",
+        default="",
+        help="Host command that opens the headed browser on the Fetch desktop.",
+    )
+    parser.add_argument(
         "--ask-vnc-password",
         action="store_true",
         help="Securely prompt on this host for its dedicated VNC password.",
@@ -572,6 +595,7 @@ def main(argv: list[str] | None = None) -> int:
             display=args.display,
             xauthority=args.xauthority,
             headed_browser=args.headed_browser,
+            browser=args.browser,
             vnc_password=vnc_password,
             wait_seconds=args.wait_seconds,
             check_only=args.check_only,

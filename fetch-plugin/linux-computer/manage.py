@@ -10,6 +10,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 CONTAINER_NAME = "fetch-computer"
@@ -23,6 +24,8 @@ TARGET = f"tcp://{RFB_HOST}:{RFB_PORT}"
 KIND = "Virtual Linux desktop"
 NAME = "Fetch computer"
 TARGET_ENV = "HERMES_FETCH_COMPUTER_TARGET"
+CONTAINER_XAUTHORITY = "/home/fetch/.Xauthority"
+READY_MESSAGE = "Fetch computer is ready. Fetch Watch can use this desktop."
 
 
 class ComputerError(RuntimeError):
@@ -41,15 +44,19 @@ def runtime_dir() -> Path:
     return Path.home() / ".local" / "share" / "fetch-computer"
 
 
-def xauthority_path() -> Path:
-    return runtime_dir() / "Xauthority"
-
-
 def container_home_dir() -> Path:
     return runtime_dir() / "home"
 
 
-def uses_host_network(platform: str | None = None) -> bool:
+def gui_run_wrapper() -> Path:
+    return image_dir() / "fetch-computer-run.sh"
+
+
+def gui_chrome_wrapper() -> Path:
+    return image_dir() / "fetch-computer-chrome.sh"
+
+
+def is_linux_computer_host(platform: str | None = None) -> bool:
     return (platform or sys.platform).startswith("linux")
 
 
@@ -63,6 +70,40 @@ def selinux_enforcing() -> bool:
 
 def engine_binaries() -> list[str]:
     return [ENGINE] if shutil.which(ENGINE) else []
+
+
+def _command_text(args: list[str], *, timeout: float = 8.0) -> str:
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return f"{result.stdout or ''}\n{result.stderr or ''}"
+
+
+def docker_looks_like_podman(engine: str = ENGINE) -> bool:
+    """True when `docker` is Podman or a podman-docker shim."""
+
+    path = shutil.which(engine)
+    if path:
+        real = os.path.realpath(path)
+        if "podman" in real.lower():
+            return True
+        try:
+            head = Path(path).read_bytes()[:4096]
+        except OSError:
+            head = b""
+        if b"podman" in head.lower():
+            return True
+    blob = (
+        _command_text([engine, "--version"]) + "\n" + _command_text([engine, "info"])
+    ).lower()
+    return "podman" in blob
 
 
 def engine_daemon_ready(engine: str, *, timeout: float = 8.0) -> bool:
@@ -82,9 +123,33 @@ def bootstrap_command() -> str:
     return f"{image_dir() / 'manage-computer.sh'} bootstrap"
 
 
+def stop_command() -> str:
+    return f"{image_dir() / 'manage-computer.sh'} stop"
+
+
+def stop_and_retry_commands() -> str:
+    return f"  {stop_command()}\n  {bootstrap_command()}"
+
+
 def engine_missing_instructions() -> str:
     return (
         "Fetch computer setup requires Docker. "
+        "Install Docker, start it, then bootstrap once.\n"
+        "\n"
+        "  Ubuntu/Debian:\n"
+        "    sudo apt-get update && sudo apt-get install -y docker.io\n"
+        "    sudo systemctl enable --now docker\n"
+        "  Fedora:\n"
+        "    sudo dnf install -y moby-engine\n"
+        "    sudo systemctl enable --now docker\n"
+        "\n"
+        f"  Then run:\n    {bootstrap_command()}"
+    )
+
+
+def engine_shim_instructions() -> str:
+    return (
+        "Fetch computer setup requires real Docker, not Podman or podman-docker. "
         "Install Docker, start it, then bootstrap once.\n"
         "\n"
         "  Ubuntu/Debian:\n"
@@ -117,9 +182,44 @@ def container_missing_instructions() -> str:
     )
 
 
+def display_or_port_busy_instructions() -> str:
+    return (
+        f"Display {DISPLAY_NAME} or port {RFB_PORT} is already in use. "
+        "Stop the other computer, then run:\n"
+        f"{stop_and_retry_commands()}"
+    )
+
+
+def extra_container_instructions(names: list[str]) -> str:
+    listed = ", ".join(names)
+    return (
+        f"Another Fetch computer container is already running ({listed}). "
+        "Use one container named fetch-computer. Stop it, then run:\n"
+        f"{stop_and_retry_commands()}"
+    )
+
+
+def desktop_unhealthy_instructions() -> str:
+    return (
+        "The Fetch computer is running, but a desktop client inside the container "
+        "could not open the VNC X server. Stop it, then run:\n"
+        f"{stop_and_retry_commands()}"
+    )
+
+
+def rfb_down_instructions() -> str:
+    return (
+        f"The Fetch computer is running, but VNC is not answering on "
+        f"{RFB_HOST}:{RFB_PORT}. Stop it, then run:\n"
+        f"{stop_and_retry_commands()}"
+    )
+
+
 def detect_engine() -> str:
     if not engine_binaries():
         raise ComputerError(engine_missing_instructions())
+    if docker_looks_like_podman(ENGINE):
+        raise ComputerError(engine_shim_instructions())
     if not engine_daemon_ready(ENGINE):
         raise ComputerError(engine_not_running_instructions())
     return ENGINE
@@ -147,9 +247,7 @@ def reject_non_loopback_publish(args: list[str]) -> list[str]:
 def container_run_args(
     *,
     engine: str,
-    xauthority: str,
     home_dir: str,
-    host_network: bool,
     restart: str | None = "unless-stopped",
     selinux: bool = False,
     uid: int | None = None,
@@ -157,6 +255,11 @@ def container_run_args(
     image: str = IMAGE_NAME,
     name: str = CONTAINER_NAME,
 ) -> list[str]:
+    if name != CONTAINER_NAME:
+        raise ComputerError(
+            f"Refusing to start a second computer named {name}. "
+            f"The only computer container is {CONTAINER_NAME}."
+        )
     args = [engine, "run", "-d", "--name", name, "--init", "--shm-size", "2g"]
     if restart:
         args.extend(["--restart", restart])
@@ -164,19 +267,12 @@ def container_run_args(
         args.extend(["--security-opt", "label=disable"])
     if uid is not None and gid is not None:
         args.extend(["--user", f"{uid}:{gid}"])
-    if host_network:
-        args.extend(["--network", "host", "-e", "FETCH_VNC_LOCALHOST=1"])
-    else:
-        args.extend(
-            [
-                "-p",
-                f"{RFB_HOST}:{RFB_PORT}:{RFB_PORT}",
-                "-e",
-                "FETCH_VNC_LOCALHOST=0",
-            ]
-        )
     args.extend(
         [
+            "-p",
+            f"{RFB_HOST}:{RFB_PORT}:{RFB_PORT}",
+            "-e",
+            "FETCH_VNC_LOCALHOST=0",
             "-e",
             f"DISPLAY={DISPLAY_NAME}",
             "-e",
@@ -187,12 +283,8 @@ def container_run_args(
             "HOME=/home/fetch",
             "-v",
             f"{home_dir}:/home/fetch",
-            "-v",
-            f"{xauthority}:/home/fetch/.Xauthority",
         ]
     )
-    if host_network:
-        args.extend(["-v", "/tmp/.X11-unix:/tmp/.X11-unix"])
     args.append(image)
     return reject_non_loopback_publish(args)
 
@@ -214,6 +306,21 @@ def container_running(engine: str, name: str = CONTAINER_NAME) -> bool:
         check=False,
     )
     return result.returncode == 0 and result.stdout.strip().lower() == "true"
+
+
+def extra_computer_containers(engine: str) -> list[str]:
+    names: set[str] = set()
+    listed = _command_text(
+        [engine, "ps", "-a", "--filter", f"ancestor={IMAGE_NAME}", "--format", "{{.Names}}"]
+    )
+    names.update(line.strip() for line in listed.splitlines() if line.strip())
+    all_names = _command_text([engine, "ps", "-a", "--format", "{{.Names}}"])
+    for line in all_names.splitlines():
+        name = line.strip()
+        if name.startswith("fetch-computer") and name != CONTAINER_NAME:
+            names.add(name)
+    names.discard(CONTAINER_NAME)
+    return sorted(names)
 
 
 def hermes_env_path() -> Path:
@@ -279,30 +386,96 @@ def existing_loopback_desktop_ready() -> bool:
     return rfb_port_open(host, port)
 
 
+def container_exec_args(
+    engine: str,
+    *command: str,
+    name: str = CONTAINER_NAME,
+) -> list[str]:
+    return [
+        engine,
+        "exec",
+        "-e",
+        f"DISPLAY={DISPLAY_NAME}",
+        "-e",
+        f"XAUTHORITY={CONTAINER_XAUTHORITY}",
+        name,
+        *command,
+    ]
+
+
+def desktop_client_can_open(engine: str, name: str = CONTAINER_NAME) -> bool:
+    """True when a client inside the container can talk to the VNC X server."""
+
+    try:
+        result = subprocess.run(
+            container_exec_args(
+                engine,
+                "sh",
+                "-c",
+                "xdpyinfo >/dev/null && xset q >/dev/null && xsetroot -cursor_name left_ptr",
+                name=name,
+            ),
+            capture_output=True,
+            timeout=8,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def doctor_desktop(*, engine: str | None = None) -> dict[str, str]:
+    """Prove the managed container desktop works, or return the next fix."""
+
+    if engine is None:
+        binaries = engine_binaries()
+        if not binaries:
+            return {"state": "engine-missing", "message": engine_missing_instructions()}
+        if docker_looks_like_podman(ENGINE):
+            return {"state": "engine-shim", "message": engine_shim_instructions()}
+        if not engine_daemon_ready(ENGINE):
+            return {"state": "engine-not-running", "message": engine_not_running_instructions()}
+        engine = ENGINE
+    extras = extra_computer_containers(engine)
+    if extras:
+        return {"state": "extra-container", "engine": engine, "message": extra_container_instructions(extras)}
+    if not container_running(engine):
+        return {"state": "container-absent", "engine": engine, "message": container_missing_instructions()}
+    if not rfb_port_open():
+        return {"state": "rfb-down", "engine": engine, "message": rfb_down_instructions()}
+    if not desktop_client_can_open(engine):
+        return {
+            "state": "desktop-unhealthy",
+            "engine": engine,
+            "message": desktop_unhealthy_instructions(),
+        }
+    return {"state": "ready", "engine": engine, "message": READY_MESSAGE}
+
+
 def computer_readiness(*, platform: str | None = None) -> dict[str, str]:
-    if not uses_host_network(platform):
+    if not is_linux_computer_host(platform):
         return {"state": "not-linux", "message": ""}
     binaries = engine_binaries()
-    if binaries and engine_daemon_ready(ENGINE) and container_running(ENGINE):
-        return {
-            "state": "ready",
-            "engine": ENGINE,
-            "message": "Fetch computer is running. Fetch Watch can use this desktop.",
-        }
+    if (
+        binaries
+        and not docker_looks_like_podman(ENGINE)
+        and engine_daemon_ready(ENGINE)
+    ):
+        extras = extra_computer_containers(ENGINE)
+        if extras:
+            return {
+                "state": "extra-container",
+                "engine": ENGINE,
+                "message": extra_container_instructions(extras),
+            }
+        if container_running(ENGINE):
+            return doctor_desktop(engine=ENGINE)
     if existing_loopback_desktop_ready():
         return {
             "state": "ready",
             "message": "Fetch computer is already configured on this host.",
         }
-    if not binaries:
-        return {"state": "engine-missing", "message": engine_missing_instructions()}
-    if not engine_daemon_ready(ENGINE):
-        return {"state": "engine-not-running", "message": engine_not_running_instructions()}
-    return {
-        "state": "container-absent",
-        "engine": ENGINE,
-        "message": container_missing_instructions(),
-    }
+    return doctor_desktop()
 
 
 def guide_linux_computer(*, offer_bootstrap: bool = True, printer=print) -> str:
@@ -328,7 +501,7 @@ def guide_linux_computer(*, offer_bootstrap: bool = True, printer=print) -> str:
         printer(f"Fetch computer setup failed: {exc}")
         printer(f"Retry with:\n  {bootstrap_command()}")
         return "failed"
-    printer("Fetch computer is ready. Fetch Watch can use this desktop.")
+    printer(READY_MESSAGE)
     return "started"
 
 
@@ -351,70 +524,6 @@ def host_user_ids() -> tuple[int | None, int | None]:
         return None, None
 
 
-def x11_socket_path(display: str = DISPLAY_NAME) -> Path:
-    return Path("/tmp/.X11-unix") / f"X{str(display).lstrip(':')}"
-
-
-def x11_socket_present(display: str = DISPLAY_NAME) -> bool:
-    return x11_socket_path(display).exists()
-
-
-def x11_socket_listening(path: Path | None = None, display: str = DISPLAY_NAME) -> bool:
-    """True when an X server is actually accepting connections on the socket."""
-
-    socket_path = x11_socket_path(display) if path is None else path
-    if not socket_path.exists():
-        return False
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-            sock.settimeout(0.4)
-            sock.connect(os.fspath(socket_path))
-        return True
-    except OSError:
-        return False
-
-
-def remove_stale_x11_socket(display: str = DISPLAY_NAME) -> None:
-    path = x11_socket_path(display)
-    if not path.exists():
-        return
-    if x11_socket_listening(path):
-        raise ComputerError(
-            f"Display {DISPLAY_NAME} already has a live socket at {path}. "
-            "Stop the other X server or linux-vps desktop, then rerun this setup."
-        )
-    try:
-        path.unlink()
-    except OSError as exc:
-        raise ComputerError(
-            f"Could not remove the stale Fetch display socket at {path}: {exc}"
-        ) from exc
-
-
-def _xauth_record(family: int, address: bytes, number: bytes, cookie: bytes) -> bytes:
-    name = b"MIT-MAGIC-COOKIE-1"
-
-    def field(data: bytes) -> bytes:
-        return len(data).to_bytes(2, "big") + data
-
-    return family.to_bytes(2, "big") + field(address) + field(number) + field(name) + field(cookie)
-
-
-def write_xauthority_cookie(path: Path, display: str = DISPLAY_NAME, cookie: bytes | None = None) -> None:
-    payload_cookie = cookie if cookie is not None else os.urandom(16)
-    number = str(display).lstrip(":").encode("ascii")
-    records = [_xauth_record(0xFFFF, b"", number, payload_cookie)]
-    host = socket.gethostname().encode("ascii", "replace")
-    if host:
-        records.append(_xauth_record(256, host, number, payload_cookie))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"".join(records))
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
-
-
 def stop_container(*, name: str = CONTAINER_NAME) -> str:
     binaries = engine_binaries()
     if not binaries:
@@ -435,20 +544,7 @@ def stop_container(*, name: str = CONTAINER_NAME) -> str:
             raise ComputerError(
                 f"Could not stop the Fetch computer container: {detail or engine}"
             )
-    if uses_host_network():
-        path = x11_socket_path()
-        if path.exists() and not x11_socket_listening(path):
-            try:
-                path.unlink()
-            except OSError:
-                pass
     return "stopped" if saw_container else "absent"
-
-
-def ensure_xauthority(path: Path, display: str = DISPLAY_NAME) -> None:
-    """Write a cookie without host `xauth` so a bind-mount is never an empty file."""
-
-    write_xauthority_cookie(path, display=display)
 
 
 def build_image(engine: str) -> None:
@@ -460,25 +556,47 @@ def build_image(engine: str) -> None:
         raise ComputerError("Could not build the Fetch computer image.")
 
 
+def wait_for_container_desktop(engine: str, *, wait_seconds: float) -> None:
+    deadline = time.monotonic() + max(0.0, wait_seconds)
+    last = "container did not become ready"
+    while True:
+        if not container_running(engine):
+            last = "container is not running"
+        elif not rfb_port_open():
+            last = f"VNC is not answering on {RFB_HOST}:{RFB_PORT}"
+        elif not desktop_client_can_open(engine):
+            last = "desktop client could not open the VNC X server"
+        else:
+            return
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.25)
+    raise ComputerError(
+        f"The Fetch computer desktop did not become ready: {last}. "
+        f"Stop it, then run:\n{stop_and_retry_commands()}"
+    )
+
+
 def run_container(engine: str) -> None:
     runtime_dir().mkdir(parents=True, exist_ok=True)
     container_home_dir().mkdir(parents=True, exist_ok=True)
+    extras = extra_computer_containers(engine)
+    if extras:
+        raise ComputerError(extra_container_instructions(extras))
+    if (
+        container_running(engine)
+        and rfb_port_open()
+        and desktop_client_can_open(engine)
+    ):
+        return
     if container_exists(engine):
         stop_container()
     if rfb_port_open():
-        raise ComputerError(
-            f"Fetch computer port {RFB_PORT} is already in use on {RFB_HOST}. "
-            "Stop the other VNC or linux-vps desktop, then rerun this setup."
-        )
-    if uses_host_network():
-        remove_stale_x11_socket()
-    ensure_xauthority(xauthority_path())
+        raise ComputerError(display_or_port_busy_instructions())
     uid, gid = host_user_ids()
     args = container_run_args(
         engine=engine,
-        xauthority=str(xauthority_path()),
         home_dir=str(container_home_dir()),
-        host_network=uses_host_network(),
         restart="unless-stopped",
         selinux=selinux_enforcing(),
         uid=uid,
@@ -487,6 +605,8 @@ def run_container(engine: str) -> None:
     result = subprocess.run(args, check=False, capture_output=True, text=True)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
+        if "already in use" in detail.lower() or "address already in use" in detail.lower():
+            raise ComputerError(display_or_port_busy_instructions())
         raise ComputerError(f"Could not start the Fetch computer container: {detail}")
 
 
@@ -501,13 +621,11 @@ def _computer_setup_command(*, check_only: bool, wait_seconds: float) -> list[st
         "--name",
         NAME,
         "--headed-browser",
+        "--browser",
+        str(gui_chrome_wrapper()),
         "--wait-seconds",
         str(wait_seconds),
     ]
-    if uses_host_network():
-        command.extend(
-            ["--display", DISPLAY_NAME, "--xauthority", str(xauthority_path())]
-        )
     if check_only:
         command.append("--check-only")
     return command
@@ -526,6 +644,7 @@ def install(*, wait_seconds: float = 90.0) -> None:
     engine = detect_engine()
     build_image(engine)
     run_container(engine)
+    wait_for_container_desktop(engine, wait_seconds=wait_seconds)
     _run_computer_setup(check_only=False, wait_seconds=wait_seconds)
 
 
@@ -541,10 +660,15 @@ def uninstall() -> None:
 
 
 def status(*, wait_seconds: float = 5.0) -> None:
-    engine = detect_engine()
-    if not container_exists(engine):
-        raise ComputerError("The Fetch computer container is not running.")
-    _run_computer_setup(check_only=True, wait_seconds=wait_seconds)
+    report = computer_readiness()
+    if report["state"] == "not-linux":
+        print("Fetch computer container setup is Linux-only.")
+        return
+    if report["state"] != "ready":
+        raise ComputerError(report["message"])
+    if report.get("message") == READY_MESSAGE:
+        _run_computer_setup(check_only=True, wait_seconds=wait_seconds)
+    print(report["message"])
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -553,7 +677,7 @@ def _parser() -> argparse.ArgumentParser:
         "action",
         nargs="?",
         default="install",
-        choices=("bootstrap", "install", "uninstall", "status", "stop", "guide"),
+        choices=("bootstrap", "install", "uninstall", "status", "doctor", "stop", "guide"),
         help="bootstrap and install are the same: build/run the container, then wire Fetch.",
     )
     parser.add_argument("--wait-seconds", type=float, default=90.0)
@@ -566,10 +690,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.action in {"bootstrap", "install"}:
             install(wait_seconds=args.wait_seconds)
+            print(READY_MESSAGE)
         elif args.action == "uninstall":
             uninstall()
-        elif args.action == "status":
-            status()
+        elif args.action in {"status", "doctor"}:
+            status(wait_seconds=min(args.wait_seconds, 15.0) if args.action == "doctor" else 5.0)
         elif args.action == "stop":
             result = stop_container()
             print(f"Fetch computer container: {result}")

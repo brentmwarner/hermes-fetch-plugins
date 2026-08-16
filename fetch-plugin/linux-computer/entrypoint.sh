@@ -84,13 +84,13 @@ rm -f "$lock_path"
 mkdir -p /tmp/.X11-unix
 chmod 1777 /tmp/.X11-unix || true
 
+# The container owns the cookie. Never reuse a host-written Xauthority that
+# may not match TigerVNC; regenerate on every start so Chrome/VA.gov can open.
 touch "$xauthority"
 chmod 0600 "$xauthority" || true
-if ! xauth -f "$xauthority" nlist "$display_name" 2>/dev/null | grep -q .; then
-  xauth -f "$xauthority" remove "$display_name" 2>/dev/null || true
-  cookie="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
-  xauth -f "$xauthority" add "$display_name" MIT-MAGIC-COOKIE-1 "$cookie" || true
-fi
+xauth -f "$xauthority" remove "$display_name" 2>/dev/null || true
+cookie="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+xauth -f "$xauthority" add "$display_name" MIT-MAGIC-COOKIE-1 "$cookie"
 
 vnc_args=(
   "$display_name"
