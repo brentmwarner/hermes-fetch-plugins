@@ -23,6 +23,10 @@ log = logging.getLogger("fetch_plugin.runtime")
 
 DASHBOARD_HOST = "127.0.0.1"
 DASHBOARD_PORT = 9119
+# How often the autostarted runtime re-checks the dashboard and its own
+# ownership; long enough to stay idle-cheap, short enough that a dead
+# dashboard is re-served promptly.
+_CHILD_POLL_S = 5.0
 TUNNEL_ENABLED_ENV = "HERMES_FETCH_TUNNEL_ENABLED"
 AUTOSTART_RUNTIME_ENV = "HERMES_FETCH_TUNNEL_AUTOSTARTED_RUNTIME"
 DISABLE_AUTOSTART_ENV = "HERMES_FETCH_TUNNEL_DISABLE_DASHBOARD_AUTOSTART"
@@ -290,6 +294,7 @@ def _child_script() -> str:
     project_root = _hermes_project_root()
     project_root_text = str(project_root) if project_root is not None else ""
     return f"""
+import json
 import os
 import socket
 import sys
@@ -300,6 +305,8 @@ DASHBOARD_PORT = {DASHBOARD_PORT!r}
 TUNNEL_ENABLED_ENV = {TUNNEL_ENABLED_ENV!r}
 AUTOSTART_RUNTIME_ENV = {AUTOSTART_RUNTIME_ENV!r}
 PROJECT_ROOT = {project_root_text!r}
+PID_PATH = {str(_pid_path())!r}
+POLL_S = {_CHILD_POLL_S!r}
 
 
 def dashboard_listening():
@@ -308,6 +315,28 @@ def dashboard_listening():
             return True
     except OSError:
         return False
+
+
+def superseded():
+    # A missing or unreadable record is not supersession: at startup the
+    # spawner writes the record moments after this process boots.
+    try:
+        raw = open(PID_PATH, "r", encoding="utf-8").read().strip()
+    except OSError:
+        return False
+    if not raw:
+        return False
+    if raw.startswith("{{"):
+        try:
+            pid = int(json.loads(raw).get("pid"))
+        except (ValueError, TypeError):
+            return False
+    else:
+        try:
+            pid = int(raw)
+        except ValueError:
+            return False
+    return pid > 0 and pid != os.getpid()
 
 
 os.environ[AUTOSTART_RUNTIME_ENV] = "1"
@@ -327,12 +356,19 @@ os.environ[TUNNEL_ENABLED_ENV] = "1"
 from hermes_cli.plugins import discover_plugins
 discover_plugins()
 
-if dashboard_listening():
-    while True:
-        time.sleep(3600)
-else:
-    from hermes_cli.web_server import start_server
-    start_server(host=DASHBOARD_HOST, port=DASHBOARD_PORT, open_browser=False, allow_public=False)
+# Keep watching instead of deciding once: a dashboard that dies after this
+# process boots must be taken over, and a runtime that has been replaced in
+# the pid record must exit rather than sleep forever as a leaked child.
+while True:
+    if not dashboard_listening():
+        try:
+            from hermes_cli.web_server import start_server
+            start_server(host=DASHBOARD_HOST, port=DASHBOARD_PORT, open_browser=False, allow_public=False)
+        except Exception:
+            pass
+    time.sleep(POLL_S)
+    if superseded():
+        sys.exit(0)
 """
 
 

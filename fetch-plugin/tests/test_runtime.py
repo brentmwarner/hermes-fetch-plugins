@@ -50,7 +50,7 @@ def test_ensure_relay_runtime_starts_child_with_tunnel_env(tmp_path, monkeypatch
     assert args[:2] == ["/tmp/hermes-venv/bin/python", "-c"]
     assert "discover_plugins()" in args[2]
     assert "start_server(host=DASHBOARD_HOST" in args[2]
-    assert "time.sleep(3600)" in args[2]
+    assert "superseded()" in args[2]
     assert kwargs["env"][runtime.TUNNEL_ENABLED_ENV] == "1"
     assert kwargs["env"][runtime.AUTOSTART_RUNTIME_ENV] == "1"
     assert kwargs["env"]["PYTHONPATH"] == "/tmp/hermes-agent"
@@ -448,3 +448,85 @@ def test_ensure_relay_runtime_reaps_exited_child(tmp_path, monkeypatch) -> None:
         time.sleep(0.02)
     else:
         pytest.fail(f"runtime child pid {pid} was never reaped")
+
+
+def _stub_hermes_cli(root: Path, marker: Path) -> None:
+    pkg = root / "hermes_cli"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "env_loader.py").write_text(
+        "def load_hermes_dotenv():\n    pass\n", encoding="utf-8"
+    )
+    (pkg / "plugins.py").write_text(
+        "def discover_plugins():\n    pass\n", encoding="utf-8"
+    )
+    (pkg / "web_server.py").write_text(
+        "def start_server(**kwargs):\n"
+        f"    with open({str(marker)!r}, 'a', encoding='utf-8') as fh:\n"
+        "        fh.write('served\\n')\n",
+        encoding="utf-8",
+    )
+
+
+def _free_port_listener():
+    import socket
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    return listener, listener.getsockname()[1]
+
+
+def test_child_script_exits_when_superseded(tmp_path, monkeypatch) -> None:
+    marker = tmp_path / "served.txt"
+    stub_root = tmp_path / "proj"
+    _stub_hermes_cli(stub_root, marker)
+    listener, port = _free_port_listener()  # a live "dashboard"
+    monkeypatch.setattr(runtime, "_hermes_project_root", lambda: stub_root)
+    monkeypatch.setattr(runtime, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(runtime, "DASHBOARD_PORT", port)
+    monkeypatch.setattr(runtime, "_CHILD_POLL_S", 0.05)
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "fetch-relay-runtime.pid").write_text(
+        json.dumps({"pid": 999999, "role": "fetch-relay-runtime"}), encoding="utf-8"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", runtime._child_script()], timeout=10
+        )
+    finally:
+        listener.close()
+
+    assert result.returncode == 0  # exited instead of sleeping forever
+    assert not marker.exists()  # never fought the live dashboard for the port
+
+
+def test_child_script_takes_over_when_dashboard_is_down_then_yields(tmp_path, monkeypatch) -> None:
+    marker = tmp_path / "served.txt"
+    stub_root = tmp_path / "proj"
+    _stub_hermes_cli(stub_root, marker)
+    monkeypatch.setattr(runtime, "_hermes_project_root", lambda: stub_root)
+    monkeypatch.setattr(runtime, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(runtime, "DASHBOARD_PORT", 1)  # nothing listens on port 1
+    monkeypatch.setattr(runtime, "_CHILD_POLL_S", 0.05)
+    (tmp_path / "run").mkdir()
+
+    child = subprocess.Popen([sys.executable, "-c", runtime._child_script()])
+    try:
+        deadline = time.time() + 5.0
+        while time.time() < deadline and not marker.exists():
+            time.sleep(0.02)
+        assert marker.exists()  # dashboard was down: the child served it
+
+        # Replace it in the pid record; the child must exit, not linger.
+        (tmp_path / "run" / "fetch-relay-runtime.pid").write_text(
+            json.dumps({"pid": 999999, "role": "fetch-relay-runtime"}),
+            encoding="utf-8",
+        )
+        assert child.wait(timeout=5) == 0
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()

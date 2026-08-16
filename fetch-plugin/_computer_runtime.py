@@ -120,7 +120,7 @@ def _command_looks_like_computer_runtime(command: str | None) -> bool:
     return AUTOSTART_ENV.lower() in command.lower()
 
 
-def _active_pid(*, reclaim: bool) -> int | None:
+def _active_pid(*, reclaim: bool, signature_takeover: bool = False) -> int | None:
     runtime = _load_runtime_module()
     path = _pid_path()
     record = _read_record(path)
@@ -148,6 +148,12 @@ def _active_pid(*, reclaim: bool) -> int | None:
                 _unlink_pid(path)
             return None
     if not reclaim or record.get("signature") == _signature():
+        return pid
+    if not signature_takeover:
+        # An ambient caller (gateway hook, pairing) whose environment merely
+        # differs must not replace a live runtime: two configs alternately
+        # killing each other's bridge drops the computer channel on every
+        # swap. Only setup flows that pass an explicit environment may swap.
         return pid
     if not runtime._terminate_process(pid):
         return pid
@@ -212,7 +218,7 @@ def ensure_computer_runtime(*, environment: dict[str, str] | None = None) -> str
         return "disabled"
     if not _credentials_path().is_file():
         return "unpaired"
-    if _active_pid(reclaim=True) is not None:
+    if _active_pid(reclaim=True, signature_takeover=environment is not None) is not None:
         return "already-running"
 
     runtime = _load_runtime_module()

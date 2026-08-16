@@ -205,3 +205,48 @@ def test_ensure_spawns_reaper_for_child(tmp_path, monkeypatch) -> None:
 
     assert computer_runtime.ensure_computer_runtime() == "started"
     assert fake.reaped == [process]
+
+
+def test_ambient_ensure_defers_to_live_runtime_with_other_signature(tmp_path, monkeypatch) -> None:
+    # A gateway hook whose environment merely differs must not steal the
+    # bridge: two configs alternately killing each other's runtime drops the
+    # computer channel on every swap.
+    credentials = tmp_path / "push" / "fetch-relay.json"
+    credentials.parent.mkdir()
+    credentials.write_text("{}", encoding="utf-8")
+    fake = _fake_runtime(tmp_path)
+    monkeypatch.setenv(computer_runtime.TARGET_ENV, "tcp://127.0.0.1:5901")
+    monkeypatch.setenv("HERMES_FETCH_STORE_HOME", str(tmp_path))
+    monkeypatch.delenv(computer_runtime.AUTOSTART_ENV, raising=False)
+    monkeypatch.delenv(computer_runtime.DISABLE_AUTOSTART_ENV, raising=False)
+    monkeypatch.setattr(computer_runtime, "_load_runtime_module", lambda: fake)
+    monkeypatch.setattr(computer_runtime, "_credentials_path", lambda: credentials)
+    pid_path = _write_pid(tmp_path, signature="someone-elses-config")
+
+    assert computer_runtime.ensure_computer_runtime() == "already-running"
+    assert fake.terminated == []
+    assert pid_path.exists()
+
+
+def test_explicit_environment_ensure_replaces_mismatched_runtime(tmp_path, monkeypatch) -> None:
+    # Setup flows pass an explicit environment: that is an intentional
+    # reconfigure and may swap the running bridge.
+    credentials = tmp_path / "push" / "fetch-relay.json"
+    credentials.parent.mkdir()
+    credentials.write_text("{}", encoding="utf-8")
+    fake = _fake_runtime(tmp_path)
+    process = FakeProcess()
+    monkeypatch.setenv(computer_runtime.TARGET_ENV, "tcp://127.0.0.1:5901")
+    monkeypatch.setenv("HERMES_FETCH_STORE_HOME", str(tmp_path))
+    monkeypatch.delenv(computer_runtime.AUTOSTART_ENV, raising=False)
+    monkeypatch.delenv(computer_runtime.DISABLE_AUTOSTART_ENV, raising=False)
+    monkeypatch.setattr(computer_runtime, "_load_runtime_module", lambda: fake)
+    monkeypatch.setattr(computer_runtime, "_credentials_path", lambda: credentials)
+    monkeypatch.setattr(
+        computer_runtime.subprocess, "Popen", lambda args, **kwargs: process
+    )
+    _write_pid(tmp_path, signature="someone-elses-config")
+
+    assert computer_runtime.ensure_computer_runtime(environment={"DISPLAY": ":1"}) == "started"
+    assert fake.terminated == [4242]
+    assert fake.reaped == [process]
