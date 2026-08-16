@@ -98,6 +98,30 @@ def _is_gateway_control_notice(content: str) -> bool:
     return bool(_GATEWAY_NOTICE_RE.match(str(content or "")))
 
 
+def _start_runtime_keeper_best_effort() -> None:
+    """Host the runtime keeper in the gateway process.
+
+    Gateways load only this adapter — never the package registration that
+    normally starts the keeper — so without this hook no long-lived process
+    keeps the detached relay/computer runtimes alive (observed 2026-08-16: a
+    reconfigure lost its restart leg and the agent stayed offline for every
+    paired device until manual intervention). Idempotent per process; must
+    never block or fail the adapter connect.
+    """
+    try:
+        runtime = sys.modules.get("fetch_plugin_runtime")
+        if runtime is None:
+            path = Path(__file__).resolve().parent / "_runtime.py"
+            spec = importlib.util.spec_from_file_location("fetch_plugin_runtime", path)
+            assert spec is not None and spec.loader is not None
+            runtime = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = runtime
+            spec.loader.exec_module(runtime)
+        runtime.start_default_runtime_keeper()
+    except Exception:
+        logger.debug("Fetch inbox adapter could not start the runtime keeper", exc_info=True)
+
+
 class FetchInboxAdapter(BasePlatformAdapter):
     """Gateway adapter that routes outbound Fetch sends to Hermes sessions."""
 
@@ -106,6 +130,7 @@ class FetchInboxAdapter(BasePlatformAdapter):
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         self._mark_connected()
+        _start_runtime_keeper_best_effort()
         return True
 
     async def disconnect(self) -> None:

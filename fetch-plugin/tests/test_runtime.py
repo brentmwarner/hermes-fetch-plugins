@@ -655,3 +655,111 @@ def test_runtime_keeper_rejects_nonpositive_interval() -> None:
         runtime.start_runtime_keeper(should_run=lambda: True, interval_s=0.0)
     with pytest.raises(ValueError):
         runtime.start_runtime_keeper(should_run=lambda: True, interval_s=-5.0)
+
+
+def test_keeper_logs_active_on_start(monkeypatch, caplog) -> None:
+    monkeypatch.setattr(runtime, "_keeper_running", False)
+    monkeypatch.setattr(runtime, "ensure_relay_runtime", lambda: "already-running")
+    try:
+        with caplog.at_level("INFO", logger="fetch_plugin.runtime"):
+            assert runtime.start_runtime_keeper(should_run=lambda: False) is True
+        assert any("keeper active" in r.message for r in caplog.records)
+    finally:
+        runtime._stop_runtime_keeper_for_tests()
+
+
+def test_keeper_should_run_env_paths(monkeypatch) -> None:
+    monkeypatch.setenv(runtime.TUNNEL_ENABLED_ENV, "1")
+    assert runtime.keeper_should_run() is True
+
+    monkeypatch.setenv(runtime.TUNNEL_ENABLED_ENV, "0")
+    assert runtime.keeper_should_run() is False
+
+
+def test_keeper_should_run_falls_back_to_pairing(monkeypatch) -> None:
+    monkeypatch.delenv(runtime.TUNNEL_ENABLED_ENV, raising=False)
+
+    class FakePairing:
+        @staticmethod
+        def is_pairing_configured():
+            return True
+
+    monkeypatch.setattr(runtime, "_sibling", lambda name, filename: FakePairing)
+    assert runtime.keeper_should_run() is True
+
+    FakePairing.is_pairing_configured = staticmethod(lambda: False)
+    assert runtime.keeper_should_run() is False
+
+
+def test_start_default_runtime_keeper_wires_gate_and_computer(monkeypatch) -> None:
+    captured = {}
+
+    def fake_start(*, should_run, extra_ensures=()):
+        captured["should_run"] = should_run
+        captured["extra_ensures"] = extra_ensures
+        return True
+
+    class FakeComputer:
+        calls = []
+
+        @staticmethod
+        def keeper_ensure_computer_runtime():
+            FakeComputer.calls.append(1)
+            return "already-running"
+
+    monkeypatch.setattr(runtime, "start_runtime_keeper", fake_start)
+    monkeypatch.setattr(runtime, "_sibling", lambda name, filename: FakeComputer)
+
+    assert runtime.start_default_runtime_keeper() is True
+    assert captured["should_run"] is runtime.keeper_should_run
+    assert len(captured["extra_ensures"]) == 1
+    assert captured["extra_ensures"][0]() == "already-running"
+    assert FakeComputer.calls  # the companion ensure reaches the computer runtime
+
+
+def _keeper_units_test_env(monkeypatch, tmp_path):
+    monkeypatch.setattr(runtime.sys, "platform", "linux")
+    monkeypatch.setattr(runtime.shutil, "which", lambda name: "/usr/bin/systemctl")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setattr(runtime, "_child_python_executable", lambda: "/venv/bin/python")
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(list(args))
+
+        class Done:
+            returncode = 0
+
+        return Done()
+
+    monkeypatch.setattr(runtime.subprocess, "run", fake_run)
+    return calls
+
+
+def test_ensure_keeper_units_installs_then_unchanged(monkeypatch, tmp_path) -> None:
+    calls = _keeper_units_test_env(monkeypatch, tmp_path)
+
+    assert runtime.ensure_keeper_units() == "installed"
+    unit_dir = tmp_path / "config" / "systemd" / "user"
+    service = (unit_dir / "fetch-runtime-keeper.service").read_text(encoding="utf-8")
+    assert "keeper_tick.py" in service
+    assert "/venv/bin/python" in service
+    timer = (unit_dir / "fetch-runtime-keeper.timer").read_text(encoding="utf-8")
+    assert "OnUnitActiveSec=60" in timer
+    assert ["systemctl", "--user", "daemon-reload"] in calls
+    assert ["systemctl", "--user", "enable", "--now", "fetch-runtime-keeper.timer"] in calls
+
+    calls.clear()
+    assert runtime.ensure_keeper_units() == "unchanged"
+    # No content change: enable stays (idempotent) but no daemon-reload churn.
+    assert ["systemctl", "--user", "daemon-reload"] not in calls
+    assert ["systemctl", "--user", "enable", "--now", "fetch-runtime-keeper.timer"] in calls
+
+
+def test_ensure_keeper_units_unsupported_off_linux(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(runtime.sys, "platform", "darwin")
+    marker = tmp_path / "config"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(marker))
+
+    assert runtime.ensure_keeper_units() == "unsupported"
+    assert not marker.exists()  # never touches the filesystem when unsupported

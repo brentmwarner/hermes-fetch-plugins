@@ -630,3 +630,33 @@ def test_adapter_send_without_metadata_passes_no_job_id(monkeypatch):
     asyncio.run(adapter.send("default", "hello", metadata=None))
 
     assert calls[0]["cron_job_id"] is None
+
+
+def test_adapter_connect_starts_runtime_keeper(monkeypatch):
+    inbox = _load_inbox()
+    started = []
+    fake_runtime = types.SimpleNamespace(
+        start_default_runtime_keeper=lambda: started.append(1) or True
+    )
+    monkeypatch.setitem(sys.modules, "fetch_plugin_runtime", fake_runtime)
+    adapter = object.__new__(inbox.FetchInboxAdapter)
+    adapter._mark_connected = lambda: None
+
+    assert asyncio.run(adapter.connect()) is True
+    assert started  # gateways host the keeper via the adapter they actually load
+
+
+def test_adapter_connect_survives_keeper_failure(monkeypatch):
+    inbox = _load_inbox()
+
+    def boom():
+        raise RuntimeError("keeper exploded")
+
+    fake_runtime = types.SimpleNamespace(start_default_runtime_keeper=boom)
+    monkeypatch.setitem(sys.modules, "fetch_plugin_runtime", fake_runtime)
+    adapter = object.__new__(inbox.FetchInboxAdapter)
+    marks = []
+    adapter._mark_connected = lambda: marks.append("connected")
+
+    assert asyncio.run(adapter.connect(is_reconnect=True)) is True
+    assert marks == ["connected"]  # a broken keeper must never block the channel
