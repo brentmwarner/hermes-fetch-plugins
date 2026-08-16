@@ -80,6 +80,7 @@ def _is_zombie_ps(pid: int) -> bool:
             ["ps", "-o", "state=", "-p", str(pid)],
             stderr=subprocess.DEVNULL,
             text=True,
+            timeout=1.0,
         )
     except Exception:
         return False

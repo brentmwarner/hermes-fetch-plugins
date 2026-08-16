@@ -9,6 +9,7 @@ import time as _time
 from pathlib import Path
 
 import httpx
+import pytest
 
 # Load _tunnel.py by path the same way the plugin does.
 _p = Path(__file__).resolve().parent.parent / "_tunnel.py"
@@ -676,6 +677,7 @@ async def test_oversized_non_ascii_rest_resp_becomes_502(monkeypatch):
     assert "too large" in r["error"]
 
 
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX-only: zombies need fork/wait")
 def test_lock_process_alive_treats_zombie_child_as_dead() -> None:
     # A zombie still accepts signal 0; the owner-lock liveness check must not
     # count it as a live tunnel owner (the gateway-setup wedge).

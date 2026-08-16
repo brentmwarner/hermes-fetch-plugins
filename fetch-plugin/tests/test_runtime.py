@@ -398,6 +398,7 @@ def _wait_for_state_zombie(pid: int, timeout_s: float = 5.0) -> bool:
     return False
 
 
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX-only: zombies need fork/wait")
 def test_process_alive_treats_zombie_child_as_dead() -> None:
     pid = os.fork()
     if pid == 0:
