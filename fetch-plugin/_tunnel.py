@@ -99,14 +99,42 @@ def _is_textual(content_type: str) -> bool:
     return any(ct.startswith(p) for p in _TEXTUAL_PREFIXES)
 
 
+def _is_zombie(pid: int) -> bool:
+    """True when ``pid`` is terminated but unreaped.
+
+    Zombies still accept signal 0; treating one as a live owner lets a dead
+    tunnel runtime wedge the owner lock until manual cleanup.
+    """
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        return _is_zombie_ps(pid)
+    # The state field follows the parenthesised comm, which may contain spaces.
+    _, _, tail = stat.rpartition(")")
+    fields = tail.split()
+    return bool(fields) and fields[0] == "Z"
+
+
+def _is_zombie_ps(pid: int) -> bool:
+    try:
+        out = subprocess.check_output(
+            ["ps", "-o", "state=", "-p", str(pid)],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except Exception:
+        return False
+    return out.strip().upper().startswith("Z")
+
+
 def _process_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
-        return True
     except PermissionError:
-        return True
+        return not _is_zombie(pid)
     except OSError:
         return False
+    return not _is_zombie(pid)
 
 
 def _process_command(pid: int) -> str | None:

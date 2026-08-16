@@ -15,6 +15,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -52,14 +53,43 @@ def _pid_path() -> Path:
     return _runtime_dir() / _PID_FILE
 
 
+def _is_zombie(pid: int) -> bool:
+    """True when ``pid`` is terminated but unreaped.
+
+    Zombies still accept signal 0, so without this check a dead runtime whose
+    parent never called wait() keeps passing liveness probes and its stale
+    owner records are honored forever.
+    """
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        return _is_zombie_ps(pid)
+    # The state field follows the parenthesised comm, which may contain spaces.
+    _, _, tail = stat.rpartition(")")
+    fields = tail.split()
+    return bool(fields) and fields[0] == "Z"
+
+
+def _is_zombie_ps(pid: int) -> bool:
+    try:
+        out = subprocess.check_output(
+            ["ps", "-o", "state=", "-p", str(pid)],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except Exception:
+        return False
+    return out.strip().upper().startswith("Z")
+
+
 def _process_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
-        return True
     except PermissionError:
-        return True
+        return not _is_zombie(pid)
     except OSError:
         return False
+    return not _is_zombie(pid)
 
 
 def _process_command(pid: int) -> str | None:
@@ -366,6 +396,23 @@ def restart_relay_runtime_for_reconfigure() -> dict:
     return {"stopped": stopped, "left_running": left_running}
 
 
+def _spawn_reaper(process) -> None:
+    """Collect the child's exit status so it can never linger as a zombie.
+
+    The Popen handle is discarded by callers; in a long-lived spawner such as
+    ``hermes gateway setup`` an un-waited child zombifies when the runtime is
+    later killed, and the corpse then wedges the tunnel-owner lock.
+    """
+
+    def _reap() -> None:
+        try:
+            process.wait()
+        except Exception:
+            pass
+
+    threading.Thread(target=_reap, name="fetch-runtime-reaper", daemon=True).start()
+
+
 def ensure_relay_runtime(*, environment: dict[str, str] | None = None) -> str:
     """Start a long-lived headless relay runtime unless one is already running.
 
@@ -408,6 +455,7 @@ def ensure_relay_runtime(*, environment: dict[str, str] | None = None) -> str:
                 start_new_session=True,
                 close_fds=True,
             )
+        _spawn_reaper(process)
         _write_pid_record(_pid_path(), process.pid)
         log.info("Fetch relay runtime started in background pid=%s", process.pid)
         return "started"

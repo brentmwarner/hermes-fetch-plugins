@@ -1,8 +1,12 @@
 import importlib.util
 import json
 import os
+import subprocess
 import sys
+import time
 from pathlib import Path
+
+import pytest
 
 # Load _runtime.py by path the same way the plugin does.
 _p = Path(__file__).resolve().parent.parent / "_runtime.py"
@@ -14,6 +18,9 @@ _spec.loader.exec_module(runtime)
 
 class FakeProcess:
     pid = 4242
+
+    def wait(self, timeout=None):
+        return 0
 
 
 def test_ensure_relay_runtime_starts_child_with_tunnel_env(tmp_path, monkeypatch) -> None:
@@ -266,6 +273,7 @@ def test_active_runtime_pid_rejects_non_positive_legacy_pid(tmp_path, monkeypatc
 
 
 def test_ensure_relay_runtime_respects_autostart_sentinel(monkeypatch) -> None:
+    monkeypatch.delenv(runtime.DISABLE_AUTOSTART_ENV, raising=False)
     monkeypatch.setenv(runtime.AUTOSTART_RUNTIME_ENV, "1")
 
     assert runtime.ensure_relay_runtime() == "self"
@@ -375,3 +383,68 @@ def test_reconfigure_clears_dead_owner_locks(tmp_path, monkeypatch) -> None:
     assert result["stopped"] == []
     assert result["left_running"] == []
     assert not lock.exists()
+
+
+def _wait_for_state_zombie(pid: int, timeout_s: float = 5.0) -> bool:
+    """Poll ps (impl-independent) until ``pid`` shows as a zombie."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        out = subprocess.run(
+            ["ps", "-o", "state=", "-p", str(pid)], capture_output=True, text=True
+        ).stdout.strip()
+        if out.upper().startswith("Z"):
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_process_alive_treats_zombie_child_as_dead() -> None:
+    pid = os.fork()
+    if pid == 0:
+        os._exit(0)
+    try:
+        assert _wait_for_state_zombie(pid)
+        assert runtime._process_alive(pid) is False
+    finally:
+        os.waitpid(pid, 0)
+
+
+def test_terminate_process_succeeds_when_child_zombifies() -> None:
+    # The caller holds the Popen without waiting, so the SIGTERM'd child
+    # becomes a zombie of this very process - the gateway-setup geometry.
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert runtime._terminate_process(proc.pid, timeout_s=3.0) is True
+    finally:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        proc.wait()
+
+
+def test_ensure_relay_runtime_reaps_exited_child(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(runtime, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(runtime, "_active_runtime_pid", lambda **kwargs: None)
+    monkeypatch.setattr(runtime, "_child_pythonpath", lambda: "")
+    monkeypatch.setattr(runtime, "_child_python_executable", lambda: sys.executable)
+    monkeypatch.setattr(runtime, "_child_script", lambda: "raise SystemExit(0)")
+    monkeypatch.delenv(runtime.DISABLE_AUTOSTART_ENV, raising=False)
+    monkeypatch.delenv(runtime.AUTOSTART_RUNTIME_ENV, raising=False)
+
+    assert runtime.ensure_relay_runtime() == "started"
+    pid = json.loads(
+        (tmp_path / "run" / "fetch-relay-runtime.pid").read_text(encoding="utf-8")
+    )["pid"]
+
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return  # fully reaped: no zombie left behind
+        except PermissionError:
+            break  # pid reused by another user's process: reaped long ago
+        time.sleep(0.02)
+    else:
+        pytest.fail(f"runtime child pid {pid} was never reaped")

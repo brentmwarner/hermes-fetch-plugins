@@ -21,6 +21,7 @@ from pathlib import Path
 log = logging.getLogger("fetch_plugin.computer_runtime")
 
 AUTOSTART_ENV = "HERMES_FETCH_COMPUTER_AUTOSTARTED_RUNTIME"
+DISABLE_AUTOSTART_ENV = "HERMES_FETCH_COMPUTER_DISABLE_AUTOSTART"
 TARGET_ENV = "HERMES_FETCH_COMPUTER_TARGET"
 LEGACY_TARGET_ENV = "HERMES_FETCH_COMPUTER_WS_URL"
 VNC_PASSWORD_ENV = "HERMES_FETCH_COMPUTER_VNC_PASSWORD"
@@ -203,6 +204,8 @@ asyncio.run(main())
 
 
 def ensure_computer_runtime(*, environment: dict[str, str] | None = None) -> str:
+    if os.environ.get(DISABLE_AUTOSTART_ENV, "").strip().lower() in {"1", "true", "yes", "on"}:
+        return "disabled"
     if os.environ.get(AUTOSTART_ENV, "").strip() == "1":
         return "self"
     if not _target():
@@ -231,6 +234,7 @@ def ensure_computer_runtime(*, environment: dict[str, str] | None = None) -> str
                 start_new_session=True,
                 close_fds=True,
             )
+        runtime._spawn_reaper(process)
         record = {
             "pid": process.pid,
             "role": _PID_ROLE,
