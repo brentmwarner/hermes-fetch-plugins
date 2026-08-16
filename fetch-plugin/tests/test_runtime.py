@@ -451,7 +451,7 @@ def test_ensure_relay_runtime_reaps_exited_child(tmp_path, monkeypatch) -> None:
         pytest.fail(f"runtime child pid {pid} was never reaped")
 
 
-def _stub_hermes_cli(root: Path, marker: Path) -> None:
+def _stub_hermes_cli(root: Path, marker: Path, server_body: str | None = None) -> None:
     pkg = root / "hermes_cli"
     pkg.mkdir(parents=True)
     (pkg / "__init__.py").write_text("", encoding="utf-8")
@@ -461,10 +461,13 @@ def _stub_hermes_cli(root: Path, marker: Path) -> None:
     (pkg / "plugins.py").write_text(
         "def discover_plugins():\n    pass\n", encoding="utf-8"
     )
+    if server_body is None:
+        server_body = (
+            f"    with open({str(marker)!r}, 'a', encoding='utf-8') as fh:\n"
+            "        fh.write('served\\n')\n"
+        )
     (pkg / "web_server.py").write_text(
-        "def start_server(**kwargs):\n"
-        f"    with open({str(marker)!r}, 'a', encoding='utf-8') as fh:\n"
-        "        fh.write('served\\n')\n",
+        "def start_server(**kwargs):\n" + server_body,
         encoding="utf-8",
     )
 
@@ -531,3 +534,66 @@ def test_child_script_takes_over_when_dashboard_is_down_then_yields(tmp_path, mo
         if child.poll() is None:
             child.kill()
             child.wait()
+
+
+def test_child_script_yields_even_while_server_blocks(tmp_path, monkeypatch) -> None:
+    # In production start_server blocks in uvicorn.run, so the supersede
+    # watch must fire from its own thread — the main loop never comes back.
+    marker = tmp_path / "served.txt"
+    stub_root = tmp_path / "proj"
+    _stub_hermes_cli(
+        stub_root,
+        marker,
+        server_body=(
+            "    import time\n"
+            f"    with open({str(marker)!r}, 'a', encoding='utf-8') as fh:\n"
+            "        fh.write('served\\n')\n"
+            "    time.sleep(60)\n"
+        ),
+    )
+    monkeypatch.setattr(runtime, "_hermes_project_root", lambda: stub_root)
+    monkeypatch.setattr(runtime, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(runtime, "DASHBOARD_PORT", 1)  # nothing listens on port 1
+    monkeypatch.setattr(runtime, "_CHILD_POLL_S", 0.05)
+    (tmp_path / "run").mkdir()
+
+    child = subprocess.Popen([sys.executable, "-c", runtime._child_script()])
+    try:
+        deadline = time.time() + 5.0
+        while time.time() < deadline and not marker.exists():
+            time.sleep(0.02)
+        assert marker.exists()  # the child is now wedged inside "uvicorn"
+
+        (tmp_path / "run" / "fetch-relay-runtime.pid").write_text(
+            json.dumps({"pid": 999999, "role": "fetch-relay-runtime"}),
+            encoding="utf-8",
+        )
+        assert child.wait(timeout=5) == 0
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+
+
+def test_child_script_exits_when_server_keeps_failing(tmp_path, monkeypatch) -> None:
+    # A permanently broken start_server must not squat on the pid record
+    # forever as "already-running"; the child yields so a later
+    # ensure_relay_runtime() can boot a fresh interpreter.
+    marker = tmp_path / "served.txt"
+    stub_root = tmp_path / "proj"
+    _stub_hermes_cli(
+        stub_root, marker, server_body="    raise RuntimeError('boom')\n"
+    )
+    monkeypatch.setattr(runtime, "_hermes_project_root", lambda: stub_root)
+    monkeypatch.setattr(runtime, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(runtime, "DASHBOARD_PORT", 1)  # nothing listens on port 1
+    monkeypatch.setattr(runtime, "_CHILD_POLL_S", 0.05)
+    (tmp_path / "run").mkdir()
+
+    result = subprocess.run(
+        [sys.executable, "-c", runtime._child_script()],
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == 1  # gave the slot back instead of looping
+    assert b"RuntimeError" in result.stderr  # and said why in the log

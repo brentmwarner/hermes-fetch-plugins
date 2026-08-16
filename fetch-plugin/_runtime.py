@@ -299,7 +299,9 @@ import json
 import os
 import socket
 import sys
+import threading
 import time
+import traceback
 
 DASHBOARD_HOST = {DASHBOARD_HOST!r}
 DASHBOARD_PORT = {DASHBOARD_PORT!r}
@@ -308,6 +310,7 @@ AUTOSTART_RUNTIME_ENV = {AUTOSTART_RUNTIME_ENV!r}
 PROJECT_ROOT = {project_root_text!r}
 PID_PATH = {str(_pid_path())!r}
 POLL_S = {_CHILD_POLL_S!r}
+MAX_START_FAILURES = 5
 
 
 def dashboard_listening():
@@ -360,16 +363,38 @@ discover_plugins()
 # Keep watching instead of deciding once: a dashboard that dies after this
 # process boots must be taken over, and a runtime that has been replaced in
 # the pid record must exit rather than sleep forever as a leaked child.
+#
+# The supersede watch lives on a daemon thread because a successful takeover
+# blocks the main thread inside the dashboard server until it stops; the main
+# loop alone would never see the pid record change while serving.
+def watch_superseded():
+    while True:
+        time.sleep(POLL_S)
+        if superseded():
+            os._exit(0)
+
+
+threading.Thread(target=watch_superseded, daemon=True).start()
+
+consecutive_failures = 0
 while True:
-    if not dashboard_listening():
+    if dashboard_listening():
+        consecutive_failures = 0
+    else:
         try:
             from hermes_cli.web_server import start_server
             start_server(host=DASHBOARD_HOST, port=DASHBOARD_PORT, open_browser=False, allow_public=False)
+            consecutive_failures = 0
         except Exception:
-            pass
+            consecutive_failures += 1
+            traceback.print_exc()
+            if consecutive_failures >= MAX_START_FAILURES:
+                # A start that keeps failing will not heal inside this
+                # interpreter: exit so the pid slot frees and a later
+                # ensure_relay_runtime() boots a fresh process instead of
+                # this one squatting on the record as "already-running".
+                sys.exit(1)
     time.sleep(POLL_S)
-    if superseded():
-        sys.exit(0)
 """
 
 
