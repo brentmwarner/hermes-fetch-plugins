@@ -727,23 +727,25 @@ def _spawn_tunnel() -> None:
     if the legacy env flag was not persisted. The tunnel module + its
     `websockets` dep are imported lazily here, so an unpaired host is unaffected.
     """
+    # Every long-lived host keeps the detached runtimes alive: a reconfigure
+    # that stops them and loses its restart leg no longer strands the agent
+    # offline until manual intervention. Started ahead of the pairing gate so
+    # a host that loaded Fetch before first pairing still has keeper coverage
+    # the moment pairing appears; the should_run gate keeps unpaired and
+    # disabled hosts passive. The computer ensure is the keeper-scoped variant
+    # so a host whose environment went stale after a disable/reconfigure
+    # elsewhere cannot resurrect the old bridge.
+    _runtime.start_runtime_keeper(
+        should_run=_should_start_tunnel,
+        extra_ensures=(_computer_runtime.keeper_ensure_computer_runtime,),
+    )
     start_reason = _tunnel_start_reason()
     if start_reason is None:
         return
     computer_runtime_status = _computer_runtime.ensure_computer_runtime()
     if computer_runtime_status == "failed":
         log.warning("Fetch computer runtime could not start; check fetch-computer-runtime.log")
-    relay_runtime_status = _runtime.ensure_relay_runtime()
-    # Every long-lived host keeps the detached runtimes alive: a reconfigure
-    # that stops them and loses its restart leg no longer strands the agent
-    # offline until manual intervention. The computer ensure is the
-    # keeper-scoped variant so a host whose environment went stale after a
-    # disable/reconfigure elsewhere cannot resurrect the old bridge.
-    _runtime.start_runtime_keeper(
-        should_run=_should_start_tunnel,
-        extra_ensures=(_computer_runtime.keeper_ensure_computer_runtime,),
-    )
-    if relay_runtime_status in {"started", "already-running"}:
+    if _runtime.ensure_relay_runtime() in {"started", "already-running"}:
         return
 
     def _run() -> None:

@@ -205,3 +205,37 @@ def test_fetch_cards_skill_refreshes_plugin_managed_copy_on_update(tmp_path):
     # The refresh replaces the whole tree, so stale files are dropped.
     assert not (target / "stale_file.md").exists()
     assert (target / fetch._MANAGED_MARKER).is_file()
+
+
+def test_spawn_tunnel_starts_keeper_before_pairing_exists(monkeypatch):
+    # Bugbot: the should_run gate only helps if the keeper thread exists, so
+    # it must start ahead of the pairing gate — a gateway that loads Fetch
+    # before first pairing grows keeper coverage the moment pairing appears.
+    fetch = _load_module("fetch_plugin_keeper_wiring_test", FETCH_PLUGIN_DIR / "__init__.py")
+
+    started = []
+    monkeypatch.setattr(
+        fetch._runtime, "start_runtime_keeper", lambda **kwargs: started.append(kwargs) or True
+    )
+    relay_calls = []
+    monkeypatch.setattr(
+        fetch._runtime, "ensure_relay_runtime", lambda **kwargs: relay_calls.append(1) or "started"
+    )
+    computer_calls = []
+    monkeypatch.setattr(
+        fetch._computer_runtime,
+        "ensure_computer_runtime",
+        lambda **kwargs: computer_calls.append(1) or "disabled",
+    )
+    monkeypatch.setattr(fetch, "_tunnel_start_reason", lambda: None)
+
+    fetch._spawn_tunnel()
+
+    assert len(started) == 1
+    assert started[0]["should_run"] is fetch._should_start_tunnel
+    assert started[0]["extra_ensures"] == (
+        fetch._computer_runtime.keeper_ensure_computer_runtime,
+    )
+    # The unpaired host itself stays passive: no ensures ran inline.
+    assert relay_calls == []
+    assert computer_calls == []
