@@ -59,15 +59,18 @@ hermes gateway restart      # (and restart `hermes dashboard` if running separat
 hermes setup                # choose Fetch, paste the Fetch setup code, then scan/paste the setup link
 ```
 
-On Linux, after a plugin install or `hermes plugins update`: install Docker if
-needed, then bootstrap the computer once. `hermes setup` (Fetch)
-prints the exact next steps and can start the container after one confirmation.
-After that, `unless-stopped` brings the computer back with the engine, and
-Fetch Watch just works.
+On Linux, Mac, and Windows, after a plugin install or `hermes plugins update`:
+install Docker if needed (Docker Desktop on Mac/Windows), then bootstrap the
+computer once. `hermes setup` (Fetch) prints the exact next steps and can start
+the container after one confirmation. After that, `unless-stopped` brings the
+computer back with the engine, and Fetch Watch just works.
 
 ```bash
-# Linux, once per host:
+# Linux, macOS, and Windows (Git Bash), once per host:
 ~/.hermes/plugins/fetch/linux-computer/manage-computer.sh bootstrap
+
+# Windows (PowerShell) alternative:
+python ~/.hermes/plugins/fetch/linux-computer/manage.py bootstrap
 ```
 
 Before `hermes setup`, open Fetch on the phone, sign in, and create a setup
@@ -109,13 +112,14 @@ skipping it answers the existing clarify request so the paused agent can
 continue; no private input needs to be pasted into chat.
 
 Fetch can watch the computer Hermes is using and, after confirmation, hand
-control to the iPhone. On Linux the default screen is a portable Ubuntu
-container (Docker) that Hermes drives from the host. Mac and Windows
-keep their native desktops; the same Ubuntu image is an optional extra there,
-not a replacement for Xcode, Simulator, or real Windows apps. The plugin
-connects only to a loopback VNC port, then carries the pixels and input over
-the existing authenticated outbound Fetch relay. Do not build a second relay
-or expose VNC to the network.
+control to the iPhone. The default screen on Linux, Mac, and Windows is one
+portable Ubuntu `fetch-computer` container (Docker) that Hermes drives from the
+host. Watch and Take over show that 1280×800 branded desktop. Host desktop
+sharing (macOS Screen Sharing, Windows UltraVNC, physical Xorg) is opt-in for
+host-only work such as Xcode, iOS Simulator, a file that only exists on the
+Mac, or a real Windows app. The plugin connects only to a loopback VNC port,
+then carries the pixels and input over the existing authenticated outbound
+Fetch relay. Do not build a second relay or expose VNC to the network.
 
 VNC transport authentication is completed on the host before any pixels are
 forwarded. Its dedicated password stays in the owner-only Hermes environment
@@ -141,75 +145,23 @@ phone can send input. The MVP cannot pause a separate Hermes process or turn
 started from another client, so do not run two computer-controlling Hermes
 sessions against the same desktop.
 
-#### Mac
+#### Default: Fetch computer container (Linux, Mac, and Windows)
 
-Use macOS's built-in Screen Sharing server:
+On Fedora, Ubuntu, other Linux desktops, a VPS, macOS, and Windows, the default
+computer is one Ubuntu `fetch-computer` container. Hermes stays on the host.
+The plugin starts TigerVNC + XFCE inside the container, maps RFB only to
+`127.0.0.1:5901`, and reuses the existing Fetch loopback bridge. Fedora Wayland
+is a first-class case: do not scrape the physical login session.
 
-1. Open **System Settings → General → Sharing** and turn on **Screen Sharing**.
-2. Open its info panel, allow only the intended macOS account, enable **VNC
-   viewers may control screen with password**, and set a dedicated password.
-3. Pair Fetch with `hermes setup`, then configure and verify the complete path:
-
-   ```bash
-   cd <plugin-checkout>/fetch-plugin/macos
-   ./check-computer.sh
-   ```
-
-The check prompts once on the Mac for that dedicated VNC password, verifies it
-against the loopback Screen Sharing service, and saves it in the owner-only
-Hermes environment file. It is not the user's macOS account password. Turning
-the display off does not remove the shared framebuffer, but the Mac must remain
-awake. Enable **Wake for network access** and prevent automatic system sleep
-while on power if this Mac should remain reachable unattended. For isolation
-from personal apps and files, run Hermes and Screen Sharing in a dedicated
-macOS user account. Docker Desktop running the Ubuntu Fetch computer is an
-optional extra for a virtual Linux desktop; it is not a replacement for the
-real Mac. Xcode and Simulator cannot run in Ubuntu. iOS work stays on this
-Mac.
-
-#### Windows
-
-Use UltraVNC Server to share the signed-in Windows desktop without a container:
-
-1. Install **UltraVNC Server** and open its **Admin Properties**.
-2. Enable **Accept Socket Connections**, **Allow Loopback Connections**, and
-   **Loopback Only**. Use display `0` / port `5900`, turn off the Java/HTTP
-   viewer and file transfer, and set a dedicated VNC password.
-3. Restart the UltraVNC Server service, pair Fetch with `hermes setup`, then
-   configure and verify the complete path from
-   PowerShell:
-
-   ```powershell
-   cd <plugin-checkout>\fetch-plugin\windows
-   .\check-computer.ps1
-   ```
-
-The check prompts once on the PC for that dedicated UltraVNC password, verifies
-it against the loopback server, and saves it in the owner-only Hermes
-environment file. It is not the user's Windows account password. Keep the PC
-awake for unattended use. For isolation from personal apps and files, use a
-dedicated Windows account. The plugin rejects non-loopback targets even if the
-VNC server is accidentally configured more broadly, but **Loopback Only**
-prevents any other program on the network from reaching UltraVNC directly.
-Docker Desktop running the Ubuntu Fetch computer is an optional extra, not a
-replacement for real Windows applications.
-
-#### Linux (default): Fetch computer container
-
-On Fedora, Ubuntu, other Linux desktops, and a VPS, the default computer is
-one Ubuntu container. Hermes stays on the host. The plugin starts TigerVNC +
-XFCE inside the container, maps RFB only to `127.0.0.1:5901`, and reuses the
-existing Fetch loopback bridge. Fedora Wayland is a first-class case: do not
-scrape the physical login session.
-
-Update the plugin, then (Linux) install real Docker if needed, bootstrap
-once, and Fetch Watch just works. Setup fails closed if Docker is missing,
-the daemon is not running, or `docker` is a Podman / `podman-docker` shim;
-it does not silently `apt`/`dnf` XFCE onto the host. `hermes setup`
-(Fetch) and plugin load print one ready line or the next copy-pasteable
-fix. Doctor proves Docker is real, `fetch-computer` is running, RFB
-answers on `127.0.0.1:5901`, and a desktop client inside the container
-can open the VNC X server:
+Update the plugin, then install real Docker if needed (Docker Desktop on
+Mac/Windows), bootstrap once, and Fetch Watch just works. Setup fails closed if
+Docker is missing, the daemon is not running, or `docker` is a Podman /
+`podman-docker` shim; it does not silently `apt`/`dnf` XFCE onto the host.
+`hermes setup` (Fetch) and plugin load print one ready line or the next
+copy-pasteable fix — Docker Desktop install + bootstrap on Mac/Windows, and
+`docker.io` / `moby-engine` + `systemctl` on Linux. Doctor proves Docker is
+real, `fetch-computer` is running, RFB answers on `127.0.0.1:5901`, and a
+desktop client inside the container can open the VNC X server:
 
 ```bash
 ~/.hermes/plugins/fetch/linux-computer/manage-computer.sh bootstrap
@@ -259,6 +211,62 @@ Useful lifecycle commands:
 Uninstall (and `computer_setup.py --disable`) stop and remove the container,
 terminate the Fetch computer bridge, and clear the persisted computer/display
 settings so later plugin starts do not re-advertise this host.
+
+#### Mac host desktop (opt-in)
+
+Use this only when the task needs the real Mac — Xcode, iOS Simulator, or a
+file that only exists on the Mac. Xcode and Simulator cannot run in Ubuntu.
+The default computer is the Ubuntu `fetch-computer` container above.
+
+Use macOS's built-in Screen Sharing server:
+
+1. Open **System Settings → General → Sharing** and turn on **Screen Sharing**.
+2. Open its info panel, allow only the intended macOS account, enable **VNC
+   viewers may control screen with password**, and set a dedicated password.
+3. Pair Fetch with `hermes setup`, then configure and verify the complete path:
+
+   ```bash
+   cd <plugin-checkout>/fetch-plugin/macos
+   ./check-computer.sh
+   ```
+
+The check prompts once on the Mac for that dedicated VNC password, verifies it
+against the loopback Screen Sharing service, and saves it in the owner-only
+Hermes environment file. It is not the user's macOS account password. Turning
+the display off does not remove the shared framebuffer, but the Mac must remain
+awake. Enable **Wake for network access** and prevent automatic system sleep
+while on power if this Mac should remain reachable unattended. For isolation
+from personal apps and files, run Hermes and Screen Sharing in a dedicated
+macOS user account.
+
+#### Windows host desktop (opt-in)
+
+Use this only when the task needs a real Windows application or a file that
+only exists on the PC. The default computer is the Ubuntu `fetch-computer`
+container above.
+
+Use UltraVNC Server to share the signed-in Windows desktop:
+
+1. Install **UltraVNC Server** and open its **Admin Properties**.
+2. Enable **Accept Socket Connections**, **Allow Loopback Connections**, and
+   **Loopback Only**. Use display `0` / port `5900`, turn off the Java/HTTP
+   viewer and file transfer, and set a dedicated VNC password.
+3. Restart the UltraVNC Server service, pair Fetch with `hermes setup`, then
+   configure and verify the complete path from
+   PowerShell:
+
+   ```powershell
+   cd <plugin-checkout>\fetch-plugin\windows
+   .\check-computer.ps1
+   ```
+
+The check prompts once on the PC for that dedicated UltraVNC password, verifies
+it against the loopback server, and saves it in the owner-only Hermes
+environment file. It is not the user's Windows account password. Keep the PC
+awake for unattended use. For isolation from personal apps and files, use a
+dedicated Windows account. The plugin rejects non-loopback targets even if the
+VNC server is accidentally configured more broadly, but **Loopback Only**
+prevents any other program on the network from reaching UltraVNC directly.
 
 #### Existing Xorg Linux desktop (opt-in)
 
@@ -325,8 +333,8 @@ All env vars are `HERMES_FETCH_*`; there is no separate inbox product.
 | `HERMES_FETCH_RELAY_REGISTRATION_TOKEN` | _(none)_ | Operator/private relay registration token. Public Fetch users should not need this. |
 | `HERMES_FETCH_TUNNEL_ENABLED` | auto after Fetch relay setup | Keep the agent-side reverse tunnel active for relay pairing. Set `0`/`false` only to force-disable it. |
 | `HERMES_FETCH_TUNNEL_DISABLE_DASHBOARD_AUTOSTART` | _(unset)_ | Opt out if you manage the local Hermes dashboard/API process yourself. |
-| `HERMES_FETCH_COMPUTER_TARGET` | _(unset)_ | Enable computer viewing with a loopback-only VNC target, normally `tcp://127.0.0.1:5900` for Mac/Windows/physical Linux or `tcp://127.0.0.1:5901` for the Linux container / virtual Linux desktop. Fetch rejects LAN/public targets. |
-| `HERMES_FETCH_COMPUTER_NAME` | host name | Friendly computer name shown in the Fetch viewer. The Linux container setup saves `Fetch computer`. |
+| `HERMES_FETCH_COMPUTER_TARGET` | _(unset)_ | Enable computer viewing with a loopback-only VNC target, normally `tcp://127.0.0.1:5901` for the default Ubuntu container. Opt-in host desktops (Mac Screen Sharing, UltraVNC, physical Xorg) use `tcp://127.0.0.1:5900`. Fetch rejects LAN/public targets. |
+| `HERMES_FETCH_COMPUTER_NAME` | host name | Friendly computer name shown in the Fetch viewer. The container setup saves `Fetch computer`. |
 | `HERMES_FETCH_COMPUTER_KIND` | inferred from OS | Secondary label such as `Mac desktop`, `Windows desktop`, `Linux desktop`, or `Virtual Linux desktop`. |
 | `HERMES_FETCH_COMPUTER_VNC_PASSWORD` | _(unset)_ | Dedicated VNC transport password saved by Mac/Windows computer setup. It is consumed only by the host-side loopback bridge and is never sent to the relay or phone. |
 | `HERMES_FETCH_COMPUTER_WS_URL` | _(unset)_ | Legacy loopback websockify target. Still accepted for compatibility; new setups should use `HERMES_FETCH_COMPUTER_TARGET`. |

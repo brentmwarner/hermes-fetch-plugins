@@ -1,4 +1,4 @@
-# Linux convenience file. Prefer ./manage-computer.sh bootstrap so Docker
+# Convenience file. Prefer ./manage-computer.sh bootstrap so Docker
 # detection, loopback-only VNC, and Fetch env persistence stay correct.
 # The container owns its X server. Do not mount the host /tmp/.X11-unix or
 # use host networking. Publish VNC only on 127.0.0.1:5901.

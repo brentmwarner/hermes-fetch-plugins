@@ -6,6 +6,9 @@ if [ "$(uname -s)" != "Darwin" ]; then
   exit 1
 fi
 
+printf 'This is the opt-in Mac host desktop. Use it only when the task needs the real Mac (Xcode, Simulator, or a file that only exists here).\n'
+printf 'The default Fetch computer is the Ubuntu fetch-computer container.\n'
+
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 python3 "${script_dir}/../computer_setup.py" \
   --target tcp://127.0.0.1:5900 \

@@ -96,11 +96,9 @@ def _linux_computer_module():
     return module
 
 
-def _guide_linux_computer() -> str:
-    """Tell Linux users how to get the Fetch computer running after setup/update."""
+def _guide_computer() -> str:
+    """Tell users how to get the Fetch computer running after setup/update."""
 
-    if not sys.platform.startswith("linux"):
-        return "not-linux"
     try:
         linux_computer = _linux_computer_module()
     except Exception:
@@ -121,9 +119,9 @@ def _guide_linux_computer() -> str:
         if report.get("message"):
             print_info(report["message"])
         return report["state"]
-    print_warning("Fetch computer is not ready on this Linux host.")
+    print_warning("Fetch computer is not ready on this host.")
     print()
-    return linux_computer.guide_linux_computer(offer_bootstrap=True, printer=_print)
+    return linux_computer.guide_computer(offer_bootstrap=True, printer=_print)
 
 
 def _inbox_module():
@@ -452,7 +450,7 @@ def interactive_setup() -> None:
         _inbox_module().enable_delivery_for_future_starts()
         print_info("Fetch: already configured")
         if not prompt_yes_no("Reconfigure Fetch?", False):
-            _guide_linux_computer()
+            _guide_computer()
             return
         print()
 
@@ -544,7 +542,7 @@ def interactive_setup() -> None:
                 "      HERMES_FETCH_TUNNEL_ENABLED=1 hermes dashboard --no-open"
             )
         print()
-        _guide_linux_computer()
+        _guide_computer()
 
         return
 

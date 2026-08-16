@@ -98,7 +98,7 @@ def test_fetch_is_connected_from_relay_pairing(monkeypatch):
     assert fetch._fetch_is_connected(config) is True
 
 
-def test_register_announces_linux_computer_when_not_ready(monkeypatch, capsys):
+def test_register_announces_computer_when_not_ready(monkeypatch, capsys):
     fetch = _load_module(
         "fetch_plugin_linux_announce_test",
         FETCH_PLUGIN_DIR / "__init__.py",
@@ -134,12 +134,49 @@ def test_register_announces_linux_computer_when_not_ready(monkeypatch, capsys):
     assert "manage-computer.sh bootstrap" in err
 
 
-def test_register_stays_quiet_when_linux_computer_is_ready(monkeypatch, capsys):
+def test_register_announces_docker_desktop_on_macos(monkeypatch, capsys):
+    fetch = _load_module(
+        "fetch_plugin_macos_announce_test",
+        FETCH_PLUGIN_DIR / "__init__.py",
+    )
+    monkeypatch.setattr(fetch.sys, "platform", "darwin")
+    monkeypatch.setattr(fetch.sys.stderr, "isatty", lambda: True)
+    monkeypatch.setattr(fetch.sys.stdout, "isatty", lambda: False)
+    monkeypatch.setattr(fetch, "_spawn_tunnel", lambda: None)
+    monkeypatch.setattr(
+        fetch._pairing,
+        "_linux_computer_module",
+        lambda: types.SimpleNamespace(
+            computer_readiness=lambda: {
+                "state": "engine-missing",
+                "message": (
+                    "requires Docker\n"
+                    "  Install Docker Desktop for Mac\n"
+                    "  ~/.hermes/plugins/fetch/linux-computer/manage-computer.sh bootstrap"
+                ),
+            }
+        ),
+    )
+    ctx = types.SimpleNamespace(
+        register_hook=lambda *args, **kwargs: None,
+        register_platform=lambda **kwargs: None,
+    )
+
+    fetch.register(ctx)
+
+    err = capsys.readouterr().err
+    assert "requires Docker" in err
+    assert "Docker Desktop for Mac" in err
+    assert "systemctl" not in err
+    assert "manage-computer.sh bootstrap" in err
+
+
+def test_register_stays_quiet_when_computer_is_ready(monkeypatch, capsys):
     fetch = _load_module(
         "fetch_plugin_linux_announce_ready_test",
         FETCH_PLUGIN_DIR / "__init__.py",
     )
-    monkeypatch.setattr(fetch.sys, "platform", "linux")
+    monkeypatch.setattr(fetch.sys, "platform", "darwin")
     monkeypatch.setattr(fetch.sys.stderr, "isatty", lambda: True)
     monkeypatch.setattr(fetch, "_spawn_tunnel", lambda: None)
     monkeypatch.setattr(

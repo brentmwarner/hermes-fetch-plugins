@@ -5,6 +5,9 @@ if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
     exit 1
 }
 
+Write-Output "This is the opt-in Windows host desktop. Use it only when the task needs a real Windows app or a file that only exists on this PC."
+Write-Output "The default Fetch computer is the Ubuntu fetch-computer container."
+
 $setup = Join-Path (Split-Path -Parent $PSScriptRoot) "computer_setup.py"
 $setupArguments = @(
     $setup,

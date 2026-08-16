@@ -56,8 +56,29 @@ def gui_chrome_wrapper() -> Path:
     return image_dir() / "fetch-computer-chrome.sh"
 
 
-def is_linux_computer_host(platform: str | None = None) -> bool:
-    return (platform or sys.platform).startswith("linux")
+def normalized_platform(platform: str | None = None) -> str:
+    value = (platform or sys.platform or "").lower()
+    if value.startswith("linux"):
+        return "linux"
+    if value.startswith("darwin"):
+        return "darwin"
+    if value.startswith("win"):
+        return "win32"
+    return value
+
+
+def is_native_linux_host(platform: str | None = None) -> bool:
+    """True on a real Linux kernel. Docker Desktop for Mac/Windows is a Linux VM."""
+
+    return normalized_platform(platform) == "linux"
+
+
+def is_macos_host(platform: str | None = None) -> bool:
+    return normalized_platform(platform) == "darwin"
+
+
+def is_windows_host(platform: str | None = None) -> bool:
+    return normalized_platform(platform) == "win32"
 
 
 def selinux_enforcing() -> bool:
@@ -119,109 +140,155 @@ def engine_daemon_ready(engine: str, *, timeout: float = 8.0) -> bool:
     return result.returncode == 0
 
 
-def bootstrap_command() -> str:
+def bootstrap_command(*, platform: str | None = None) -> str:
+    if is_windows_host(platform):
+        return f'python "{image_dir() / "manage.py"}" bootstrap'
     return f"{image_dir() / 'manage-computer.sh'} bootstrap"
 
 
-def stop_command() -> str:
+def stop_command(*, platform: str | None = None) -> str:
+    if is_windows_host(platform):
+        return f'python "{image_dir() / "manage.py"}" stop'
     return f"{image_dir() / 'manage-computer.sh'} stop"
 
 
-def stop_and_retry_commands() -> str:
-    return f"  {stop_command()}\n  {bootstrap_command()}"
+def stop_and_retry_commands(*, platform: str | None = None) -> str:
+    return f"  {stop_command(platform=platform)}\n  {bootstrap_command(platform=platform)}"
 
 
-def engine_missing_instructions() -> str:
+def _linux_engine_install_steps() -> str:
+    return (
+        "  Ubuntu/Debian:\n"
+        "    sudo apt-get update && sudo apt-get install -y docker.io\n"
+        "    sudo systemctl enable --now docker\n"
+        "  Fedora:\n"
+        "    sudo dnf install -y moby-engine\n"
+        "    sudo systemctl enable --now docker\n"
+    )
+
+
+def _macos_engine_install_steps() -> str:
+    return (
+        "  macOS:\n"
+        "    Install Docker Desktop for Mac (Apple Silicon or Intel, matching this Mac).\n"
+        "    https://docs.docker.com/desktop/setup/install/mac-install/\n"
+        "    Open Docker Desktop and wait until `docker info` works.\n"
+    )
+
+
+def _windows_engine_install_steps() -> str:
+    return (
+        "  Windows:\n"
+        "    Install Docker Desktop for Windows.\n"
+        "    https://docs.docker.com/desktop/setup/install/windows-install/\n"
+        "    Start Docker Desktop and wait until `docker info` works.\n"
+        "    Then run `python manage.py bootstrap` (or `manage-computer.sh bootstrap`).\n"
+    )
+
+
+def engine_install_steps(*, platform: str | None = None) -> str:
+    host = normalized_platform(platform)
+    if host == "darwin":
+        return _macos_engine_install_steps()
+    if host == "win32":
+        return _windows_engine_install_steps()
+    return _linux_engine_install_steps()
+
+
+def engine_missing_instructions(*, platform: str | None = None) -> str:
     return (
         "Fetch computer setup requires Docker. "
         "Install Docker, start it, then bootstrap once.\n"
         "\n"
-        "  Ubuntu/Debian:\n"
-        "    sudo apt-get update && sudo apt-get install -y docker.io\n"
-        "    sudo systemctl enable --now docker\n"
-        "  Fedora:\n"
-        "    sudo dnf install -y moby-engine\n"
-        "    sudo systemctl enable --now docker\n"
+        f"{engine_install_steps(platform=platform)}"
         "\n"
-        f"  Then run:\n    {bootstrap_command()}"
+        f"  Then run:\n    {bootstrap_command(platform=platform)}"
     )
 
 
-def engine_shim_instructions() -> str:
+def engine_shim_instructions(*, platform: str | None = None) -> str:
     return (
         "Fetch computer setup requires real Docker, not Podman or podman-docker. "
         "Install Docker, start it, then bootstrap once.\n"
         "\n"
-        "  Ubuntu/Debian:\n"
-        "    sudo apt-get update && sudo apt-get install -y docker.io\n"
-        "    sudo systemctl enable --now docker\n"
-        "  Fedora:\n"
-        "    sudo dnf install -y moby-engine\n"
-        "    sudo systemctl enable --now docker\n"
+        f"{engine_install_steps(platform=platform)}"
         "\n"
-        f"  Then run:\n    {bootstrap_command()}"
+        f"  Then run:\n    {bootstrap_command(platform=platform)}"
     )
 
 
-def engine_not_running_instructions() -> str:
+def engine_not_running_instructions(*, platform: str | None = None) -> str:
+    if is_macos_host(platform):
+        start_step = (
+            "  Open Docker Desktop and wait until `docker info` works.\n"
+        )
+        lead = "Docker is installed, but Docker Desktop is not running.\n"
+    elif is_windows_host(platform):
+        start_step = (
+            "  Start Docker Desktop and wait until `docker info` works.\n"
+        )
+        lead = "Docker is installed, but Docker Desktop is not running.\n"
+    else:
+        start_step = "  sudo systemctl start docker\n"
+        lead = "Docker is installed, but the daemon is not running.\n"
     return (
-        "Docker is installed, but the daemon is not running.\n"
+        f"{lead}"
         "\n"
-        "  sudo systemctl start docker\n"
+        f"{start_step}"
         "\n"
-        f"  Then run:\n    {bootstrap_command()}"
+        f"  Then run:\n    {bootstrap_command(platform=platform)}"
     )
 
 
-def container_missing_instructions() -> str:
+def container_missing_instructions(*, platform: str | None = None) -> str:
     return (
         "The Fetch computer container is not running. Start it once; after that "
         "the engine restart policy (`unless-stopped`) brings it back automatically.\n"
         "\n"
-        f"  {bootstrap_command()}"
+        f"  {bootstrap_command(platform=platform)}"
     )
 
 
-def display_or_port_busy_instructions() -> str:
+def display_or_port_busy_instructions(*, platform: str | None = None) -> str:
     return (
         f"Display {DISPLAY_NAME} or port {RFB_PORT} is already in use. "
         "Stop the other computer, then run:\n"
-        f"{stop_and_retry_commands()}"
+        f"{stop_and_retry_commands(platform=platform)}"
     )
 
 
-def extra_container_instructions(names: list[str]) -> str:
+def extra_container_instructions(names: list[str], *, platform: str | None = None) -> str:
     listed = ", ".join(names)
     return (
         f"Another Fetch computer container is already running ({listed}). "
         "Use one container named fetch-computer. Stop it, then run:\n"
-        f"{stop_and_retry_commands()}"
+        f"{stop_and_retry_commands(platform=platform)}"
     )
 
 
-def desktop_unhealthy_instructions() -> str:
+def desktop_unhealthy_instructions(*, platform: str | None = None) -> str:
     return (
         "The Fetch computer is running, but a desktop client inside the container "
         "could not open the VNC X server. Stop it, then run:\n"
-        f"{stop_and_retry_commands()}"
+        f"{stop_and_retry_commands(platform=platform)}"
     )
 
 
-def rfb_down_instructions() -> str:
+def rfb_down_instructions(*, platform: str | None = None) -> str:
     return (
         f"The Fetch computer is running, but VNC is not answering on "
         f"{RFB_HOST}:{RFB_PORT}. Stop it, then run:\n"
-        f"{stop_and_retry_commands()}"
+        f"{stop_and_retry_commands(platform=platform)}"
     )
 
 
-def detect_engine() -> str:
+def detect_engine(*, platform: str | None = None) -> str:
     if not engine_binaries():
-        raise ComputerError(engine_missing_instructions())
+        raise ComputerError(engine_missing_instructions(platform=platform))
     if docker_looks_like_podman(ENGINE):
-        raise ComputerError(engine_shim_instructions())
+        raise ComputerError(engine_shim_instructions(platform=platform))
     if not engine_daemon_ready(ENGINE):
-        raise ComputerError(engine_not_running_instructions())
+        raise ComputerError(engine_not_running_instructions(platform=platform))
     return ENGINE
 
 
@@ -374,7 +441,12 @@ def parse_tcp_target(target: str) -> tuple[str, int] | None:
 
 
 def existing_loopback_desktop_ready() -> bool:
-    """True when linux-vps / linux-desktop (or any persisted target) already answers."""
+    """True when an opt-in host desktop already answers.
+
+    Mac Screen Sharing, Windows UltraVNC, linux-desktop, and linux-vps persist a
+    loopback target. Leave those setups alone so bootstrap does not clobber them.
+    New hosts with no target default to the fetch-computer container.
+    """
 
     target = configured_computer_target()
     if not target:
@@ -424,37 +496,56 @@ def desktop_client_can_open(engine: str, name: str = CONTAINER_NAME) -> bool:
     return result.returncode == 0
 
 
-def doctor_desktop(*, engine: str | None = None) -> dict[str, str]:
+def doctor_desktop(*, engine: str | None = None, platform: str | None = None) -> dict[str, str]:
     """Prove the managed container desktop works, or return the next fix."""
 
     if engine is None:
         binaries = engine_binaries()
         if not binaries:
-            return {"state": "engine-missing", "message": engine_missing_instructions()}
+            return {
+                "state": "engine-missing",
+                "message": engine_missing_instructions(platform=platform),
+            }
         if docker_looks_like_podman(ENGINE):
-            return {"state": "engine-shim", "message": engine_shim_instructions()}
+            return {
+                "state": "engine-shim",
+                "message": engine_shim_instructions(platform=platform),
+            }
         if not engine_daemon_ready(ENGINE):
-            return {"state": "engine-not-running", "message": engine_not_running_instructions()}
+            return {
+                "state": "engine-not-running",
+                "message": engine_not_running_instructions(platform=platform),
+            }
         engine = ENGINE
     extras = extra_computer_containers(engine)
     if extras:
-        return {"state": "extra-container", "engine": engine, "message": extra_container_instructions(extras)}
+        return {
+            "state": "extra-container",
+            "engine": engine,
+            "message": extra_container_instructions(extras, platform=platform),
+        }
     if not container_running(engine):
-        return {"state": "container-absent", "engine": engine, "message": container_missing_instructions()}
+        return {
+            "state": "container-absent",
+            "engine": engine,
+            "message": container_missing_instructions(platform=platform),
+        }
     if not rfb_port_open():
-        return {"state": "rfb-down", "engine": engine, "message": rfb_down_instructions()}
+        return {
+            "state": "rfb-down",
+            "engine": engine,
+            "message": rfb_down_instructions(platform=platform),
+        }
     if not desktop_client_can_open(engine):
         return {
             "state": "desktop-unhealthy",
             "engine": engine,
-            "message": desktop_unhealthy_instructions(),
+            "message": desktop_unhealthy_instructions(platform=platform),
         }
     return {"state": "ready", "engine": engine, "message": READY_MESSAGE}
 
 
 def computer_readiness(*, platform: str | None = None) -> dict[str, str]:
-    if not is_linux_computer_host(platform):
-        return {"state": "not-linux", "message": ""}
     binaries = engine_binaries()
     if (
         binaries
@@ -466,23 +557,23 @@ def computer_readiness(*, platform: str | None = None) -> dict[str, str]:
             return {
                 "state": "extra-container",
                 "engine": ENGINE,
-                "message": extra_container_instructions(extras),
+                "message": extra_container_instructions(extras, platform=platform),
             }
         if container_running(ENGINE):
-            return doctor_desktop(engine=ENGINE)
+            return doctor_desktop(engine=ENGINE, platform=platform)
     if existing_loopback_desktop_ready():
         return {
             "state": "ready",
             "message": "Fetch computer is already configured on this host.",
         }
-    return doctor_desktop()
+    return doctor_desktop(platform=platform)
 
 
-def guide_linux_computer(*, offer_bootstrap: bool = True, printer=print) -> str:
+def guide_computer(*, offer_bootstrap: bool = True, printer=print) -> str:
     """Print copy-pasteable next steps and optionally start the container."""
 
     report = computer_readiness()
-    if report["state"] in {"not-linux", "configured"}:
+    if report["state"] == "configured":
         return report["state"]
     printer(report["message"])
     if report["state"] != "container-absent" or not offer_bootstrap:
@@ -522,6 +613,19 @@ def host_user_ids() -> tuple[int | None, int | None]:
         return int(getuid()), int(getgid())
     except (OSError, TypeError, ValueError):
         return None, None
+
+
+def linux_volume_ownership(*, platform: str | None = None) -> tuple[int | None, int | None, bool]:
+    """Host uid/gid and SELinux only apply on real Linux.
+
+    Docker Desktop for Mac/Windows runs a Linux VM. Passing the host uid there
+    would steal /home/fetch from the image's ``fetch`` user.
+    """
+
+    if not is_native_linux_host(platform):
+        return None, None, False
+    uid, gid = host_user_ids()
+    return uid, gid, selinux_enforcing()
 
 
 def container_needs_recreate(engine: str, name: str = CONTAINER_NAME) -> bool:
@@ -628,12 +732,12 @@ def run_container(engine: str) -> None:
         stop_container()
     if rfb_port_open():
         raise ComputerError(display_or_port_busy_instructions())
-    uid, gid = host_user_ids()
+    uid, gid, selinux = linux_volume_ownership()
     args = container_run_args(
         engine=engine,
         home_dir=str(container_home_dir()),
         restart="unless-stopped",
-        selinux=selinux_enforcing(),
+        selinux=selinux,
         uid=uid,
         gid=gid,
     )
@@ -696,9 +800,6 @@ def uninstall() -> None:
 
 def status(*, wait_seconds: float = 5.0) -> None:
     report = computer_readiness()
-    if report["state"] == "not-linux":
-        print("Fetch computer container setup is Linux-only.")
-        return
     if report["state"] != "ready":
         raise ComputerError(report["message"])
     if report.get("message") == READY_MESSAGE:
@@ -734,8 +835,8 @@ def main(argv: list[str] | None = None) -> int:
             result = stop_container()
             print(f"Fetch computer container: {result}")
         elif args.action == "guide":
-            state = guide_linux_computer(offer_bootstrap=False)
-            return 0 if state in {"ready", "not-linux"} else 1
+            state = guide_computer(offer_bootstrap=False)
+            return 0 if state == "ready" else 1
     except ComputerError as exc:
         print(f"Fetch computer setup failed: {exc}", file=sys.stderr)
         return 1

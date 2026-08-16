@@ -218,11 +218,16 @@ def test_native_mac_and_windows_helpers_keep_loopback_screen_sharing() -> None:
     plugin_dir = Path(__file__).resolve().parent.parent
     macos = (plugin_dir / "macos" / "check-computer.sh").read_text(encoding="utf-8")
     windows = (plugin_dir / "windows" / "check-computer.ps1").read_text(encoding="utf-8")
+    readme = (plugin_dir / "README.md").read_text(encoding="utf-8")
 
     assert "tcp://127.0.0.1:5900" in macos
     assert '--kind "Mac desktop"' in macos
+    assert "opt-in" in macos
     assert "tcp://127.0.0.1:5900" in windows
     assert "Windows desktop" in windows
+    assert "opt-in" in windows
+    assert "Mac host desktop (opt-in)" in readme
+    assert "Windows host desktop (opt-in)" in readme
 
 
 def test_linux_service_scripts_use_xdg_config_home_and_disable_on_uninstall() -> None:

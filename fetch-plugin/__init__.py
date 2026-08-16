@@ -100,6 +100,10 @@ _FETCH_ATTACHMENT_HINT = (
 )
 
 _FETCH_COMPUTER_HANDOFF_HINT = (
+    "The default computer is the Fetch Ubuntu container. Drive browser and "
+    "desktop work there. Use the host only when the task truly needs it "
+    "(Xcode, Simulator, host filesystem, native Windows app). Say so, then "
+    "use host tools. Do not imply every Mac agent lives on the host desktop. "
     "Fetch shows the same desktop the person is watching. Keep browser and "
     "computer work on that visible desktop: do not intentionally target a "
     "hidden or minimized window or another virtual desktop/Space. Use native "
@@ -798,20 +802,18 @@ def _spawn_tunnel() -> None:
     log.info("Fetch reverse-tunnel client starting (%s)", start_reason)
 
 
-def _announce_linux_computer_if_needed() -> None:
-    """After a plugin update, tell Linux hosts how to start the computer."""
+def _announce_computer_if_needed() -> None:
+    """After a plugin update, tell hosts how to start the computer."""
 
-    if not sys.platform.startswith("linux"):
-        return
     try:
         linux_computer = _pairing._linux_computer_module()
         if linux_computer is None:
             return
         report = linux_computer.computer_readiness()
     except Exception:
-        log.debug("Fetch could not check the Linux computer container", exc_info=True)
+        log.debug("Fetch could not check the computer container", exc_info=True)
         return
-    if report.get("state") in {"ready", "configured", "not-linux", ""}:
+    if report.get("state") in {"ready", "configured", ""}:
         return
     message = str(report.get("message") or "").strip()
     if not message:
@@ -932,6 +934,6 @@ def register(ctx) -> None:
 
     # Reverse tunnel: hold an outbound channel to the relay (gated, default off).
     _spawn_tunnel()
-    _announce_linux_computer_if_needed()
+    _announce_computer_if_needed()
 
     log.info("Fetch plugin registered (push hooks + pairing + reverse tunnel)")

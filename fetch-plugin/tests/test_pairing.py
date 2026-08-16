@@ -411,7 +411,7 @@ def test_interactive_setup_guides_linux_computer_after_pairing(
         lambda: _online_pairing("https://tryfetchapp.com/setup?agent=a1&pairing=p1"),
     )
     monkeypatch.setattr(
-        pairing, "_guide_linux_computer", lambda: calls.append("guide") or "ready"
+        pairing, "_guide_computer", lambda: calls.append("guide") or "ready"
     )
 
     pairing.interactive_setup()
@@ -427,7 +427,7 @@ def test_interactive_setup_guides_linux_computer_when_reconfigure_is_declined(
     monkeypatch.setattr(pairing, "is_pairing_configured", lambda: True)
     monkeypatch.setattr(pairing, "_inbox_module", lambda: _FakeInbox())
     monkeypatch.setattr(
-        pairing, "_guide_linux_computer", lambda: calls.append("guide") or "engine-missing"
+        pairing, "_guide_computer", lambda: calls.append("guide") or "engine-missing"
     )
 
     import hermes_cli.cli_output as cli_output
@@ -460,7 +460,7 @@ def test_interactive_setup_skips_linux_guide_when_tunnel_is_not_ready(
         },
     )
     monkeypatch.setattr(
-        pairing, "_guide_linux_computer", lambda: calls.append("guide") or "ready"
+        pairing, "_guide_computer", lambda: calls.append("guide") or "ready"
     )
 
     pairing.interactive_setup()
@@ -468,13 +468,34 @@ def test_interactive_setup_skips_linux_guide_when_tunnel_is_not_ready(
     assert calls == []
 
 
-def test_guide_linux_computer_is_silent_off_linux(monkeypatch) -> None:
+def test_guide_computer_prints_docker_desktop_steps_on_macos(monkeypatch, capsys) -> None:
+    class FakeComputer:
+        @staticmethod
+        def computer_readiness():
+            return {
+                "state": "engine-missing",
+                "message": "requires Docker\n  Install Docker Desktop for Mac",
+            }
+
+        @staticmethod
+        def guide_computer(*, offer_bootstrap=True, printer=print):
+            printer("requires Docker")
+            printer("  Install Docker Desktop for Mac")
+            printer("  ~/.hermes/plugins/fetch/linux-computer/manage-computer.sh bootstrap")
+            return "engine-missing"
+
     monkeypatch.setattr(pairing.sys, "platform", "darwin")
+    monkeypatch.setattr(pairing, "_linux_computer_module", lambda: FakeComputer())
 
-    assert pairing._guide_linux_computer() == "not-linux"
+    assert pairing._guide_computer() == "engine-missing"
+    out = capsys.readouterr().out
+    assert "requires Docker" in out
+    assert "Docker Desktop for Mac" in out
+    assert "systemctl" not in out
+    assert "manage-computer.sh bootstrap" in out
 
 
-def test_guide_linux_computer_prints_engine_missing_steps(monkeypatch, capsys) -> None:
+def test_guide_computer_prints_engine_missing_steps(monkeypatch, capsys) -> None:
     class FakeLinuxComputer:
         @staticmethod
         def computer_readiness():
@@ -484,7 +505,7 @@ def test_guide_linux_computer_prints_engine_missing_steps(monkeypatch, capsys) -
             }
 
         @staticmethod
-        def guide_linux_computer(*, offer_bootstrap=True, printer=print):
+        def guide_computer(*, offer_bootstrap=True, printer=print):
             printer("requires Docker")
             printer("  sudo apt-get install -y docker.io")
             printer("  ~/.hermes/plugins/fetch/linux-computer/manage-computer.sh bootstrap")
@@ -493,7 +514,7 @@ def test_guide_linux_computer_prints_engine_missing_steps(monkeypatch, capsys) -
     monkeypatch.setattr(pairing.sys, "platform", "linux")
     monkeypatch.setattr(pairing, "_linux_computer_module", lambda: FakeLinuxComputer())
 
-    assert pairing._guide_linux_computer() == "engine-missing"
+    assert pairing._guide_computer() == "engine-missing"
     out = capsys.readouterr().out
     assert "requires Docker" in out
     assert "Podman" not in out
@@ -501,7 +522,7 @@ def test_guide_linux_computer_prints_engine_missing_steps(monkeypatch, capsys) -
     assert "manage-computer.sh bootstrap" in out
 
 
-def test_guide_linux_computer_is_quiet_when_opt_in_desktop_is_ready(monkeypatch, capsys) -> None:
+def test_guide_computer_is_quiet_when_opt_in_desktop_is_ready(monkeypatch, capsys) -> None:
     class FakeLinuxComputer:
         @staticmethod
         def computer_readiness():
@@ -511,13 +532,13 @@ def test_guide_linux_computer_is_quiet_when_opt_in_desktop_is_ready(monkeypatch,
             }
 
         @staticmethod
-        def guide_linux_computer(*, offer_bootstrap=True, printer=print):
+        def guide_computer(*, offer_bootstrap=True, printer=print):
             raise AssertionError("opt-in desktops must not be steered into bootstrap")
 
-    monkeypatch.setattr(pairing.sys, "platform", "linux")
+    monkeypatch.setattr(pairing.sys, "platform", "darwin")
     monkeypatch.setattr(pairing, "_linux_computer_module", lambda: FakeLinuxComputer())
 
-    assert pairing._guide_linux_computer() == "ready"
+    assert pairing._guide_computer() == "ready"
     out = capsys.readouterr().out
     assert "already configured" in out
     assert "not ready" not in out

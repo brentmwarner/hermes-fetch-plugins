@@ -69,6 +69,10 @@ def test_hint_documents_computer_handoff(registered_platform):
     assert '["I\'m done", "Skip"]' in hint
     assert "current real desktop frame" in hint
     assert "Do not ask the person to paste passwords" in hint
+    assert "default computer is the Fetch Ubuntu container" in hint
+    assert "Xcode" in hint
+    assert "Simulator" in hint
+    assert "Do not imply every Mac agent lives on the host desktop" in hint
 
 
 def test_hint_documents_card_fence_syntax(registered_platform):
