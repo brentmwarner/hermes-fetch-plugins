@@ -2,11 +2,14 @@ import asyncio
 import base64
 import importlib.util
 import json
+import os
+import subprocess
 import sys
 import time as _time
 from pathlib import Path
 
 import httpx
+import pytest
 
 # Load _tunnel.py by path the same way the plugin does.
 _p = Path(__file__).resolve().parent.parent / "_tunnel.py"
@@ -672,3 +675,26 @@ async def test_oversized_non_ascii_rest_resp_becomes_502(monkeypatch):
     r = ws.sent[0]
     assert r["status"] == 502
     assert "too large" in r["error"]
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX-only: zombies need fork/wait")
+def test_lock_process_alive_treats_zombie_child_as_dead() -> None:
+    # A zombie still accepts signal 0; the owner-lock liveness check must not
+    # count it as a live tunnel owner (the gateway-setup wedge).
+    pid = os.fork()
+    if pid == 0:
+        os._exit(0)
+    try:
+        deadline = _time.time() + 5.0
+        while _time.time() < deadline:
+            out = subprocess.run(
+                ["ps", "-o", "state=", "-p", str(pid)], capture_output=True, text=True
+            ).stdout.strip()
+            if out.upper().startswith("Z"):
+                break
+            _time.sleep(0.02)
+        else:
+            raise AssertionError("child never became a zombie")
+        assert tunnel._process_alive(pid) is False
+    finally:
+        os.waitpid(pid, 0)

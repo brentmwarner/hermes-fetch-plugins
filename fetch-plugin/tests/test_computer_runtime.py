@@ -17,6 +17,7 @@ class FakeProcess:
 
 def _fake_runtime(tmp_path, *, command=None, terminate=True):
     terminated = []
+    reaped = []
     owned_command = f"python -c {computer_runtime.AUTOSTART_ENV}"
 
     def _terminate(pid):
@@ -34,7 +35,9 @@ def _fake_runtime(tmp_path, *, command=None, terminate=True):
         _process_alive=lambda pid: True,
         _process_command=_command,
         _terminate_process=_terminate,
+        _spawn_reaper=lambda process: reaped.append(process),
         terminated=terminated,
+        reaped=reaped,
     )
     return runtime
 
@@ -65,6 +68,7 @@ def test_ensure_starts_dedicated_computer_process(tmp_path, monkeypatch) -> None
     monkeypatch.setenv(computer_runtime.TARGET_ENV, "tcp://127.0.0.1:5901")
     monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
     monkeypatch.delenv(computer_runtime.AUTOSTART_ENV, raising=False)
+    monkeypatch.delenv(computer_runtime.DISABLE_AUTOSTART_ENV, raising=False)
     monkeypatch.setattr(computer_runtime, "_load_runtime_module", lambda: _fake_runtime(tmp_path))
     monkeypatch.setattr(computer_runtime, "_credentials_path", lambda: credentials)
     monkeypatch.setattr(computer_runtime, "_active_pid", lambda **kwargs: None)
@@ -93,6 +97,7 @@ def test_ensure_computer_runtime_uses_explicit_child_environment(tmp_path, monke
     calls = []
     monkeypatch.setenv(computer_runtime.TARGET_ENV, "tcp://127.0.0.1:5901")
     monkeypatch.delenv(computer_runtime.AUTOSTART_ENV, raising=False)
+    monkeypatch.delenv(computer_runtime.DISABLE_AUTOSTART_ENV, raising=False)
     monkeypatch.setattr(computer_runtime, "_load_runtime_module", lambda: _fake_runtime(tmp_path))
     monkeypatch.setattr(computer_runtime, "_credentials_path", lambda: credentials)
     monkeypatch.setattr(computer_runtime, "_active_pid", lambda **kwargs: None)
@@ -111,6 +116,7 @@ def test_ensure_computer_runtime_uses_explicit_child_environment(tmp_path, monke
 def test_ensure_does_not_start_before_pairing(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv(computer_runtime.TARGET_ENV, "tcp://127.0.0.1:5901")
     monkeypatch.delenv(computer_runtime.AUTOSTART_ENV, raising=False)
+    monkeypatch.delenv(computer_runtime.DISABLE_AUTOSTART_ENV, raising=False)
     monkeypatch.setattr(computer_runtime, "_credentials_path", lambda: tmp_path / "missing.json")
 
     assert computer_runtime.ensure_computer_runtime() == "unpaired"
@@ -171,3 +177,76 @@ def test_restart_terminates_owned_computer_runtime(tmp_path, monkeypatch) -> Non
     assert computer_runtime.restart_computer_runtime() is True
     assert runtime.terminated == [4242]
     assert not pid_path.exists()
+
+
+def test_ensure_respects_disable_env(monkeypatch) -> None:
+    monkeypatch.delenv(computer_runtime.AUTOSTART_ENV, raising=False)
+    monkeypatch.setenv(computer_runtime.DISABLE_AUTOSTART_ENV, "1")
+    monkeypatch.setenv(computer_runtime.TARGET_ENV, "tcp://127.0.0.1:5901")
+
+    assert computer_runtime.ensure_computer_runtime() == "disabled"
+
+
+def test_ensure_spawns_reaper_for_child(tmp_path, monkeypatch) -> None:
+    credentials = tmp_path / "push" / "fetch-relay.json"
+    credentials.parent.mkdir()
+    credentials.write_text("{}", encoding="utf-8")
+    fake = _fake_runtime(tmp_path)
+    process = FakeProcess()
+    monkeypatch.setenv(computer_runtime.TARGET_ENV, "tcp://127.0.0.1:5901")
+    monkeypatch.delenv(computer_runtime.AUTOSTART_ENV, raising=False)
+    monkeypatch.delenv(computer_runtime.DISABLE_AUTOSTART_ENV, raising=False)
+    monkeypatch.setattr(computer_runtime, "_load_runtime_module", lambda: fake)
+    monkeypatch.setattr(computer_runtime, "_credentials_path", lambda: credentials)
+    monkeypatch.setattr(computer_runtime, "_active_pid", lambda **kwargs: None)
+    monkeypatch.setattr(
+        computer_runtime.subprocess, "Popen", lambda args, **kwargs: process
+    )
+
+    assert computer_runtime.ensure_computer_runtime() == "started"
+    assert fake.reaped == [process]
+
+
+def test_ambient_ensure_defers_to_live_runtime_with_other_signature(tmp_path, monkeypatch) -> None:
+    # A gateway hook whose environment merely differs must not steal the
+    # bridge: two configs alternately killing each other's runtime drops the
+    # computer channel on every swap.
+    credentials = tmp_path / "push" / "fetch-relay.json"
+    credentials.parent.mkdir()
+    credentials.write_text("{}", encoding="utf-8")
+    fake = _fake_runtime(tmp_path)
+    monkeypatch.setenv(computer_runtime.TARGET_ENV, "tcp://127.0.0.1:5901")
+    monkeypatch.setenv("HERMES_FETCH_STORE_HOME", str(tmp_path))
+    monkeypatch.delenv(computer_runtime.AUTOSTART_ENV, raising=False)
+    monkeypatch.delenv(computer_runtime.DISABLE_AUTOSTART_ENV, raising=False)
+    monkeypatch.setattr(computer_runtime, "_load_runtime_module", lambda: fake)
+    monkeypatch.setattr(computer_runtime, "_credentials_path", lambda: credentials)
+    pid_path = _write_pid(tmp_path, signature="someone-elses-config")
+
+    assert computer_runtime.ensure_computer_runtime() == "already-running"
+    assert fake.terminated == []
+    assert pid_path.exists()
+
+
+def test_explicit_environment_ensure_replaces_mismatched_runtime(tmp_path, monkeypatch) -> None:
+    # Setup flows pass an explicit environment: that is an intentional
+    # reconfigure and may swap the running bridge.
+    credentials = tmp_path / "push" / "fetch-relay.json"
+    credentials.parent.mkdir()
+    credentials.write_text("{}", encoding="utf-8")
+    fake = _fake_runtime(tmp_path)
+    process = FakeProcess()
+    monkeypatch.setenv(computer_runtime.TARGET_ENV, "tcp://127.0.0.1:5901")
+    monkeypatch.setenv("HERMES_FETCH_STORE_HOME", str(tmp_path))
+    monkeypatch.delenv(computer_runtime.AUTOSTART_ENV, raising=False)
+    monkeypatch.delenv(computer_runtime.DISABLE_AUTOSTART_ENV, raising=False)
+    monkeypatch.setattr(computer_runtime, "_load_runtime_module", lambda: fake)
+    monkeypatch.setattr(computer_runtime, "_credentials_path", lambda: credentials)
+    monkeypatch.setattr(
+        computer_runtime.subprocess, "Popen", lambda args, **kwargs: process
+    )
+    _write_pid(tmp_path, signature="someone-elses-config")
+
+    assert computer_runtime.ensure_computer_runtime(environment={"DISPLAY": ":1"}) == "started"
+    assert fake.terminated == [4242]
+    assert fake.reaped == [process]

@@ -15,6 +15,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -22,6 +23,10 @@ log = logging.getLogger("fetch_plugin.runtime")
 
 DASHBOARD_HOST = "127.0.0.1"
 DASHBOARD_PORT = 9119
+# How often the autostarted runtime re-checks the dashboard and its own
+# ownership; long enough to stay idle-cheap, short enough that a dead
+# dashboard is re-served promptly.
+_CHILD_POLL_S = 5.0
 TUNNEL_ENABLED_ENV = "HERMES_FETCH_TUNNEL_ENABLED"
 AUTOSTART_RUNTIME_ENV = "HERMES_FETCH_TUNNEL_AUTOSTARTED_RUNTIME"
 DISABLE_AUTOSTART_ENV = "HERMES_FETCH_TUNNEL_DISABLE_DASHBOARD_AUTOSTART"
@@ -52,14 +57,44 @@ def _pid_path() -> Path:
     return _runtime_dir() / _PID_FILE
 
 
+def _is_zombie(pid: int) -> bool:
+    """True when ``pid`` is terminated but unreaped.
+
+    Zombies still accept signal 0, so without this check a dead runtime whose
+    parent never called wait() keeps passing liveness probes and its stale
+    owner records are honored forever.
+    """
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        return _is_zombie_ps(pid)
+    # The state field follows the parenthesised comm, which may contain spaces.
+    _, _, tail = stat.rpartition(")")
+    fields = tail.split()
+    return bool(fields) and fields[0] == "Z"
+
+
+def _is_zombie_ps(pid: int) -> bool:
+    try:
+        out = subprocess.check_output(
+            ["ps", "-o", "state=", "-p", str(pid)],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=1.0,
+        )
+    except Exception:
+        return False
+    return out.strip().upper().startswith("Z")
+
+
 def _process_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
-        return True
     except PermissionError:
-        return True
+        return not _is_zombie(pid)
     except OSError:
         return False
+    return not _is_zombie(pid)
 
 
 def _process_command(pid: int) -> str | None:
@@ -260,16 +295,22 @@ def _child_script() -> str:
     project_root = _hermes_project_root()
     project_root_text = str(project_root) if project_root is not None else ""
     return f"""
+import json
 import os
 import socket
 import sys
+import threading
 import time
+import traceback
 
 DASHBOARD_HOST = {DASHBOARD_HOST!r}
 DASHBOARD_PORT = {DASHBOARD_PORT!r}
 TUNNEL_ENABLED_ENV = {TUNNEL_ENABLED_ENV!r}
 AUTOSTART_RUNTIME_ENV = {AUTOSTART_RUNTIME_ENV!r}
 PROJECT_ROOT = {project_root_text!r}
+PID_PATH = {str(_pid_path())!r}
+POLL_S = {_CHILD_POLL_S!r}
+MAX_START_FAILURES = 5
 
 
 def dashboard_listening():
@@ -278,6 +319,28 @@ def dashboard_listening():
             return True
     except OSError:
         return False
+
+
+def superseded():
+    # A missing or unreadable record is not supersession: at startup the
+    # spawner writes the record moments after this process boots.
+    try:
+        raw = open(PID_PATH, "r", encoding="utf-8").read().strip()
+    except OSError:
+        return False
+    if not raw:
+        return False
+    if raw.startswith("{{"):
+        try:
+            pid = int(json.loads(raw).get("pid"))
+        except (ValueError, TypeError):
+            return False
+    else:
+        try:
+            pid = int(raw)
+        except ValueError:
+            return False
+    return pid > 0 and pid != os.getpid()
 
 
 os.environ[AUTOSTART_RUNTIME_ENV] = "1"
@@ -297,12 +360,41 @@ os.environ[TUNNEL_ENABLED_ENV] = "1"
 from hermes_cli.plugins import discover_plugins
 discover_plugins()
 
-if dashboard_listening():
+# Keep watching instead of deciding once: a dashboard that dies after this
+# process boots must be taken over, and a runtime that has been replaced in
+# the pid record must exit rather than sleep forever as a leaked child.
+#
+# The supersede watch lives on a daemon thread because a successful takeover
+# blocks the main thread inside the dashboard server until it stops; the main
+# loop alone would never see the pid record change while serving.
+def watch_superseded():
     while True:
-        time.sleep(3600)
-else:
-    from hermes_cli.web_server import start_server
-    start_server(host=DASHBOARD_HOST, port=DASHBOARD_PORT, open_browser=False, allow_public=False)
+        time.sleep(POLL_S)
+        if superseded():
+            os._exit(0)
+
+
+threading.Thread(target=watch_superseded, daemon=True).start()
+
+consecutive_failures = 0
+while True:
+    if dashboard_listening():
+        consecutive_failures = 0
+    else:
+        try:
+            from hermes_cli.web_server import start_server
+            start_server(host=DASHBOARD_HOST, port=DASHBOARD_PORT, open_browser=False, allow_public=False)
+            consecutive_failures = 0
+        except Exception:
+            consecutive_failures += 1
+            traceback.print_exc()
+            if consecutive_failures >= MAX_START_FAILURES:
+                # A start that keeps failing will not heal inside this
+                # interpreter: exit so the pid slot frees and a later
+                # ensure_relay_runtime() boots a fresh process instead of
+                # this one squatting on the record as "already-running".
+                sys.exit(1)
+    time.sleep(POLL_S)
 """
 
 
@@ -366,6 +458,23 @@ def restart_relay_runtime_for_reconfigure() -> dict:
     return {"stopped": stopped, "left_running": left_running}
 
 
+def _spawn_reaper(process) -> None:
+    """Collect the child's exit status so it can never linger as a zombie.
+
+    The Popen handle is discarded by callers; in a long-lived spawner such as
+    ``hermes gateway setup`` an un-waited child zombifies when the runtime is
+    later killed, and the corpse then wedges the tunnel-owner lock.
+    """
+
+    def _reap() -> None:
+        try:
+            process.wait()
+        except Exception:
+            pass
+
+    threading.Thread(target=_reap, name="fetch-runtime-reaper", daemon=True).start()
+
+
 def ensure_relay_runtime(*, environment: dict[str, str] | None = None) -> str:
     """Start a long-lived headless relay runtime unless one is already running.
 
@@ -408,6 +517,7 @@ def ensure_relay_runtime(*, environment: dict[str, str] | None = None) -> str:
                 start_new_session=True,
                 close_fds=True,
             )
+        _spawn_reaper(process)
         _write_pid_record(_pid_path(), process.pid)
         log.info("Fetch relay runtime started in background pid=%s", process.pid)
         return "started"
