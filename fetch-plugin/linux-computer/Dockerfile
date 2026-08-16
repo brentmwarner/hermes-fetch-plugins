@@ -9,11 +9,14 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        adwaita-icon-theme \
         ca-certificates \
         curl \
         dbus-x11 \
         fonts-dejavu-core \
+        gnome-themes-extra \
         hsetroot \
+        librsvg2-bin \
         openssl \
         thunar \
         tigervnc-standalone-server \
@@ -54,11 +57,21 @@ RUN if id ubuntu >/dev/null 2>&1; then \
     && (dbus-uuidgen --ensure=/etc/machine-id || true)
 
 COPY branding/wallpaper.png /usr/share/fetch/wallpaper.png
+COPY branding/fetch_logo.svg /usr/share/fetch/fetch_logo.svg
 COPY xfce-config/ /usr/share/fetch/skel/config/
 COPY entrypoint.sh /usr/local/bin/fetch-computer-entrypoint
 
-RUN chmod 0755 /usr/local/bin/fetch-computer-entrypoint \
+# Official Fetch F-mark is monochrome black. Recolor to near-white and rasterize
+# for the XFCE panel; keep the SVG path geometry unchanged.
+RUN sed 's/fill="black"/fill="#f7f7f8"/g' /usr/share/fetch/fetch_logo.svg \
+      > /tmp/fetch_logo_white.svg \
+    && rsvg-convert -w 256 -h 256 /tmp/fetch_logo_white.svg \
+      -o /usr/share/fetch/fetch_logo.png \
+    && rm -f /tmp/fetch_logo_white.svg \
+    && chmod 0755 /usr/local/bin/fetch-computer-entrypoint \
     && chmod 0644 /usr/share/fetch/wallpaper.png \
+      /usr/share/fetch/fetch_logo.svg \
+      /usr/share/fetch/fetch_logo.png \
     && chown -R fetch:fetch /home/fetch /usr/share/fetch \
     && if [ -x /usr/bin/google-chrome ]; then \
          printf '%s\n' \

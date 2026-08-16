@@ -20,9 +20,42 @@ export LC_ALL="${LC_ALL:-C.UTF-8}"
 
 mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$(dirname -- "$xauthority")"
 chmod 0700 "$XDG_RUNTIME_DIR" || true
-if [[ -d /usr/share/fetch/skel/config ]]; then
+
+# First boot copies the full skel without clobbering a persisted home.
+# Branding chrome is then re-applied every start so a rebuild + restart
+# picks up the glass panel / Fetch mark without wiping unrelated user files.
+apply_fetch_branding() {
+  local skel="/usr/share/fetch/skel/config"
+  [[ -d "$skel" ]] || return 0
   mkdir -p "$HOME/.config"
-  cp -an /usr/share/fetch/skel/config/. "$HOME/.config/" 2>/dev/null || true
+  cp -an "$skel/." "$HOME/.config/" 2>/dev/null || true
+
+  local rel dest
+  for rel in \
+    gtk-3.0/gtk.css \
+    gtk-3.0/settings.ini \
+    gtk-4.0/settings.ini \
+    xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml \
+    xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml \
+    xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml \
+    xfce4/xfconf/xfce-perchannel-xml/xsettings.xml
+  do
+    if [[ -f "$skel/$rel" ]]; then
+      dest="$HOME/.config/$rel"
+      mkdir -p "$(dirname -- "$dest")"
+      cp -a "$skel/$rel" "$dest"
+    fi
+  done
+}
+apply_fetch_branding
+
+# xfwm4 compositor is required for real XFCE panel alpha. Shadows stay off so
+# TigerVNC painting stays stable. If a rebuild ever hits a compositor/VNC
+# conflict, set FETCH_COMPOSITOR=0: gtk.css then reads as a solid dark glass
+# bar (no wallpaper bleed) instead of a broken framebuffer.
+if [[ "${FETCH_COMPOSITOR:-1}" != "1" ]]; then
+  sed -i 's/name="use_compositing" type="bool" value="true"/name="use_compositing" type="bool" value="false"/' \
+    "$HOME/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml" 2>/dev/null || true
 fi
 
 if command -v Xtigervnc >/dev/null 2>&1; then
@@ -130,6 +163,10 @@ unset DBUS_SESSION_BUS_ADDRESS DESKTOP_SESSION GDK_BACKEND QT_QPA_PLATFORM \
 DISPLAY="$display_name" XAUTHORITY="$xauthority" dbus-run-session -- startxfce4 &
 desktop_pid=$!
 
+xfconf() {
+  DISPLAY="$display_name" XAUTHORITY="$xauthority" xfconf-query "$@"
+}
+
 paint_wallpaper() {
   [[ -f "$wallpaper" ]] || return 0
   if command -v hsetroot >/dev/null 2>&1; then
@@ -138,10 +175,16 @@ paint_wallpaper() {
   if command -v xfconf-query >/dev/null 2>&1; then
     while read -r prop; do
       [[ -n "$prop" ]] || continue
-      DISPLAY="$display_name" XAUTHORITY="$xauthority" \
-        xfconf-query -c xfce4-desktop -p "$prop" -n -t string -s "$wallpaper" || true
-    done < <(DISPLAY="$display_name" XAUTHORITY="$xauthority" \
-      xfconf-query -c xfce4-desktop -l 2>/dev/null | grep last-image || true)
+      xfconf -c xfce4-desktop -p "$prop" -n -t string -s "$wallpaper" || true
+    done < <(xfconf -c xfce4-desktop -l 2>/dev/null | grep last-image || true)
+    xfconf -c xfce4-desktop -p /desktop-icons/style -n -t int -s 0 || true
+    xfconf -c xsettings -p /Net/ThemeName -n -t string -s Adwaita-dark || true
+    xfconf -c xsettings -p /Net/IconThemeName -n -t string -s Adwaita || true
+    if [[ "${FETCH_COMPOSITOR:-1}" == "1" ]]; then
+      xfconf -c xfwm4 -p /general/use_compositing -n -t bool -s true || true
+    else
+      xfconf -c xfwm4 -p /general/use_compositing -n -t bool -s false || true
+    fi
   fi
 }
 

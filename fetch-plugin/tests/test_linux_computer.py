@@ -220,6 +220,81 @@ def test_image_keeps_branded_wallpaper_and_loopback_vnc() -> None:
     assert "0.0.0.0" not in compose_code
 
 
+def test_image_brands_glass_panel_with_official_fetch_mark() -> None:
+    computer_dir = PLUGIN_DIR / "linux-computer"
+    dockerfile = (computer_dir / "Dockerfile").read_text(encoding="utf-8")
+    entrypoint = (computer_dir / "entrypoint.sh").read_text(encoding="utf-8")
+    dockerignore = (computer_dir / ".dockerignore").read_text(encoding="utf-8")
+    svg = (computer_dir / "branding" / "fetch_logo.svg").read_text(encoding="utf-8")
+    panel = (
+        computer_dir
+        / "xfce-config"
+        / "xfce4"
+        / "xfconf"
+        / "xfce-perchannel-xml"
+        / "xfce4-panel.xml"
+    ).read_text(encoding="utf-8")
+    desktop = (
+        computer_dir
+        / "xfce-config"
+        / "xfce4"
+        / "xfconf"
+        / "xfce-perchannel-xml"
+        / "xfce4-desktop.xml"
+    ).read_text(encoding="utf-8")
+    xfwm4 = (
+        computer_dir / "xfce-config" / "xfce4" / "xfconf" / "xfce-perchannel-xml" / "xfwm4.xml"
+    ).read_text(encoding="utf-8")
+    xsettings = (
+        computer_dir
+        / "xfce-config"
+        / "xfce4"
+        / "xfconf"
+        / "xfce-perchannel-xml"
+        / "xsettings.xml"
+    ).read_text(encoding="utf-8")
+    gtk_css = (computer_dir / "xfce-config" / "gtk-3.0" / "gtk.css").read_text(encoding="utf-8")
+    gtk_settings = (computer_dir / "xfce-config" / "gtk-3.0" / "settings.ini").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'viewBox="0 0 672 672"' in svg
+    assert svg.count("<path") == 3
+    assert "M108.456 0.548885" in svg
+    assert "M97.6103 232.062" in svg
+    assert "M104.386 462.877" in svg
+    assert 'fill="black"' in svg
+    assert "branding/fetch_logo.svg" in dockerfile
+    assert "rsvg-convert" in dockerfile
+    assert 'fill="#f7f7f8"' in dockerfile
+    assert "/usr/share/fetch/fetch_logo.png" in dockerfile
+    assert "!branding/fetch_logo.svg" in dockerignore
+    assert "applicationsmenu" in panel
+    assert "show-button-title" in panel and "false" in panel
+    assert "/usr/share/fetch/fetch_logo.png" in panel
+    assert "Applications" not in panel
+    assert "Ubuntu" not in panel
+    assert "indicator" not in panel
+    assert "tasklist" in panel
+    assert "systray" in panel
+    assert "clock" in panel
+    assert 'name="size" type="uint" value="30"' in panel
+    assert ".xfce4-panel" in gtk_css
+    assert "rgba(16, 18, 24, 0.40)" in gtk_css
+    assert "Adwaita-dark" in xsettings
+    assert "Adwaita-dark" in gtk_settings
+    assert 'name="use_compositing" type="bool" value="true"' in xfwm4
+    assert 'name="style" type="int" value="0"' in desktop
+    assert "apply_fetch_branding" in entrypoint
+    assert "cp -an" in entrypoint
+    assert "xfce4-panel.xml" in entrypoint
+    assert "gtk.css" in entrypoint
+    assert "xfwm4.xml" in entrypoint
+    assert "xsettings.xml" in entrypoint
+    assert "FETCH_COMPOSITOR" in entrypoint
+    assert "startxfce4" in entrypoint
+
+
 def test_readme_makes_the_container_the_default_linux_computer() -> None:
     readme = (PLUGIN_DIR / "README.md").read_text(encoding="utf-8")
 
@@ -232,6 +307,7 @@ def test_readme_makes_the_container_the_default_linux_computer() -> None:
     assert "Xcode and Simulator cannot run in Ubuntu" in readme
     assert "optional extra" in readme
     assert "branding/wallpaper.png" in readme
+    assert "branding/fetch_logo.svg" in readme
     assert "1280×800" in readme or "1280x800" in readme
     assert "hermes plugins update" in readme
     assert "bootstrap" in readme
