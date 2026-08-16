@@ -306,8 +306,8 @@ def test_readme_makes_the_container_the_default_linux_computer() -> None:
     assert "linux-desktop" in readme
     assert "Xcode and Simulator cannot run in Ubuntu" in readme
     assert "optional extra" in readme
-    assert "branding/wallpaper.png" in readme
-    assert "branding/fetch_logo.svg" in readme
+    assert "linux-computer/branding/wallpaper.png" in readme
+    assert "linux-computer/branding/fetch_logo.svg" in readme
     assert "1280×800" in readme or "1280x800" in readme
     assert "hermes plugins update" in readme
     assert "bootstrap" in readme

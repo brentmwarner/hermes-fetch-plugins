@@ -43,7 +43,7 @@ apply_fetch_branding() {
     if [[ -f "$skel/$rel" ]]; then
       dest="$HOME/.config/$rel"
       mkdir -p "$(dirname -- "$dest")"
-      cp -a "$skel/$rel" "$dest"
+      cp -a "$skel/$rel" "$dest" || true
     fi
   done
 }
