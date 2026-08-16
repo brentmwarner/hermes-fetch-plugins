@@ -425,6 +425,8 @@ def start_runtime_keeper(
     double-spawned runtime child exits on its own once the pid record names
     its sibling. Returns False when this process already has a keeper.
     """
+    if not interval_s > 0.0:  # also rejects NaN
+        raise ValueError("interval_s must be a positive number of seconds")
     global _keeper_running, _keeper_stop_event
     with _keeper_lock:
         if _keeper_running:

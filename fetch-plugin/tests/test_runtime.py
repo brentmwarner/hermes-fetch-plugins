@@ -647,3 +647,11 @@ def test_runtime_keeper_respects_should_run_gate(monkeypatch) -> None:
         assert calls
     finally:
         runtime._stop_runtime_keeper_for_tests()
+
+
+def test_runtime_keeper_rejects_nonpositive_interval() -> None:
+    # A zero or negative interval would tight-loop the keeper thread.
+    with pytest.raises(ValueError):
+        runtime.start_runtime_keeper(should_run=lambda: True, interval_s=0.0)
+    with pytest.raises(ValueError):
+        runtime.start_runtime_keeper(should_run=lambda: True, interval_s=-5.0)

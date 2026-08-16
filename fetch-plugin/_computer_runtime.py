@@ -78,14 +78,68 @@ def _pid_path() -> Path:
     return _runtime_dir() / _PID_FILE
 
 
-def _credentials_path() -> Path:
+def _store_home() -> Path:
     store_home = os.environ.get("HERMES_FETCH_STORE_HOME", "").strip()
-    home = Path(os.path.expanduser(store_home)) if store_home else _load_runtime_module()._hermes_home()
-    return home / "push" / "fetch-relay.json"
+    if store_home:
+        return Path(os.path.expanduser(store_home))
+    return _load_runtime_module()._hermes_home()
+
+
+def _credentials_path() -> Path:
+    return _store_home() / "push" / "fetch-relay.json"
 
 
 def _target() -> str:
     return os.environ.get(TARGET_ENV, os.environ.get(LEGACY_TARGET_ENV, "")).strip()
+
+
+def _persisted_environment_value(path: Path, key: str) -> str:
+    """Read ``key`` from the persisted Hermes ``.env`` (last assignment wins).
+
+    Mirrors the parsing computer setup uses when it persists configuration:
+    an optional ``export `` prefix and a JSON- or shell-quoted value.
+    """
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    for line in reversed(lines):
+        stripped = line.strip()
+        candidate = stripped[7:].lstrip() if stripped.startswith("export ") else stripped
+        name, separator, value = candidate.partition("=")
+        if not separator or name.strip() != key:
+            continue
+        try:
+            decoded = json.loads(value)
+            return decoded if isinstance(decoded, str) else ""
+        except (TypeError, ValueError):
+            return value.strip().strip("'\"")
+    return ""
+
+
+def _persisted_target() -> str:
+    path = _store_home() / ".env"
+    for key in (TARGET_ENV, LEGACY_TARGET_ENV):
+        value = _persisted_environment_value(path, key).strip()
+        if value:
+            return value
+    return ""
+
+
+def keeper_ensure_computer_runtime() -> str:
+    """Ambient ensure for the runtime keeper: defer to persisted configuration.
+
+    A keeper thread can outlive a disable or reconfigure performed in another
+    process, leaving a stale ``HERMES_FETCH_COMPUTER_TARGET`` in this process's
+    environment. Respawning from that value would resurrect a bridge the user
+    just disabled, or fight a newly configured one. Only ensure when this
+    process's target still matches the persisted Hermes configuration; a stale
+    host stays passive and leaves the bridge to the process that owns the
+    current configuration.
+    """
+    if _target() != _persisted_target():
+        return "stale-config"
+    return ensure_computer_runtime()
 
 
 def _signature() -> str:

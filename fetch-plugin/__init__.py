@@ -736,10 +736,12 @@ def _spawn_tunnel() -> None:
     relay_runtime_status = _runtime.ensure_relay_runtime()
     # Every long-lived host keeps the detached runtimes alive: a reconfigure
     # that stops them and loses its restart leg no longer strands the agent
-    # offline until manual intervention.
+    # offline until manual intervention. The computer ensure is the
+    # keeper-scoped variant so a host whose environment went stale after a
+    # disable/reconfigure elsewhere cannot resurrect the old bridge.
     _runtime.start_runtime_keeper(
         should_run=_should_start_tunnel,
-        extra_ensures=(_computer_runtime.ensure_computer_runtime,),
+        extra_ensures=(_computer_runtime.keeper_ensure_computer_runtime,),
     )
     if relay_runtime_status in {"started", "already-running"}:
         return
