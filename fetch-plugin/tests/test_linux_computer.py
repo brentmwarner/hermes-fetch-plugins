@@ -15,6 +15,7 @@ _spec.loader.exec_module(manage)
 
 def test_detect_engine_uses_ready_docker(monkeypatch) -> None:
     monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
+    monkeypatch.setattr(manage, "docker_looks_like_podman", lambda engine=manage.ENGINE: False)
     monkeypatch.setattr(manage, "engine_daemon_ready", lambda engine: engine == "docker")
 
     assert manage.detect_engine() == "docker"
@@ -38,18 +39,65 @@ def test_detect_engine_fails_when_docker_is_missing(monkeypatch) -> None:
 
 def test_detect_engine_fails_when_installed_engine_is_not_running(monkeypatch) -> None:
     monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
+    monkeypatch.setattr(manage, "docker_looks_like_podman", lambda engine=manage.ENGINE: False)
     monkeypatch.setattr(manage, "engine_daemon_ready", lambda _engine: False)
 
     with pytest.raises(manage.ComputerError, match="not running"):
         manage.detect_engine()
 
 
+def test_detect_engine_rejects_podman_version(monkeypatch) -> None:
+    monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
+    monkeypatch.setattr(manage, "docker_looks_like_podman", lambda engine=manage.ENGINE: True)
+
+    with pytest.raises(manage.ComputerError, match="not Podman or podman-docker"):
+        manage.detect_engine()
+
+
+def test_docker_looks_like_podman_reads_version_and_info(monkeypatch) -> None:
+    def fake_command(args, **_kwargs):
+        joined = " ".join(args)
+        if args[-1] == "--version":
+            return "podman version 5.0.0"
+        if args[-1] == "info":
+            return "host:\n  os: linux\n"
+        return ""
+
+    monkeypatch.setattr(manage, "_command_text", fake_command)
+    monkeypatch.setattr(manage.shutil, "which", lambda _name: "/usr/bin/docker")
+    monkeypatch.setattr(manage.os.path, "realpath", lambda path: path)
+    monkeypatch.setattr(manage.Path, "read_bytes", lambda self: b"#!/bin/sh\nexec docker.real \"$@\"\n")
+
+    assert manage.docker_looks_like_podman("docker") is True
+
+
+def test_docker_looks_like_podman_accepts_real_docker(monkeypatch) -> None:
+    monkeypatch.setattr(manage.shutil, "which", lambda _name: "/usr/bin/docker")
+    monkeypatch.setattr(manage.os.path, "realpath", lambda path: "/usr/bin/docker")
+    monkeypatch.setattr(manage.Path, "read_bytes", lambda self: b"\x7fELF")
+    monkeypatch.setattr(
+        manage,
+        "_command_text",
+        lambda args, **_kwargs: "Docker version 27.0.0, build abc\nServer Version: 27.0.0",
+    )
+
+    assert manage.docker_looks_like_podman("docker") is False
+
+
+def test_docker_looks_like_podman_rejects_podman_docker_shim(tmp_path, monkeypatch) -> None:
+    shim = tmp_path / "docker"
+    shim.write_text("#!/bin/sh\nexec /usr/bin/podman \"$@\"\n", encoding="utf-8")
+    monkeypatch.setattr(manage.shutil, "which", lambda _name: str(shim))
+    monkeypatch.setattr(manage.os.path, "realpath", lambda path: str(shim))
+    monkeypatch.setattr(manage, "_command_text", lambda *_args, **_kwargs: "Docker version 27.0.0")
+
+    assert manage.docker_looks_like_podman("docker") is True
+
+
 def test_linux_run_args_omit_user_when_ids_are_missing() -> None:
     args = manage.container_run_args(
         engine="docker",
-        xauthority="/tmp/fetch.Xauthority",
         home_dir="/tmp/fetch-home",
-        host_network=False,
         uid=None,
         gid=None,
     )
@@ -64,45 +112,36 @@ def test_host_user_ids_return_none_without_getuid(monkeypatch) -> None:
     assert manage.host_user_ids() == (None, None)
 
 
-def test_linux_run_args_use_host_network_and_never_publish_vnc() -> None:
+def test_linux_run_args_publish_loopback_and_never_share_host_x11() -> None:
     args = manage.container_run_args(
         engine="docker",
-        xauthority="/tmp/fetch.Xauthority",
         home_dir="/tmp/fetch-home",
-        host_network=True,
         uid=1000,
         gid=1000,
     )
 
     assert args[:4] == ["docker", "run", "-d", "--name"]
     assert manage.CONTAINER_NAME in args
-    assert "--network" in args and "host" in args
-    assert "FETCH_VNC_LOCALHOST=1" in args
+    assert "--network" not in args
+    assert "host" not in args
+    assert "FETCH_VNC_LOCALHOST=0" in args
     assert "FETCH_GEOMETRY=1280x800" in args
-    assert "-p" not in args
-    assert "--publish" not in args
+    assert "-p" in args
+    assert f"{manage.RFB_HOST}:{manage.RFB_PORT}:{manage.RFB_PORT}" in args
     assert "0.0.0.0" not in " ".join(args)
-    assert "/tmp/.X11-unix:/tmp/.X11-unix" in args
+    assert "/tmp/.X11-unix" not in " ".join(args)
+    assert ".Xauthority" not in " ".join(args)
     assert "--user" in args
     assert "--userns=keep-id" not in args
 
 
-def test_desktop_run_args_publish_only_loopback() -> None:
-    args = manage.container_run_args(
-        engine="docker",
-        xauthority="/tmp/fetch.Xauthority",
-        home_dir="/tmp/fetch-home",
-        host_network=False,
-        uid=501,
-        gid=20,
-    )
-
-    assert "-p" in args
-    assert f"{manage.RFB_HOST}:{manage.RFB_PORT}:{manage.RFB_PORT}" in args
-    assert "FETCH_VNC_LOCALHOST=0" in args
-    assert "--network" not in args
-    assert "0.0.0.0" not in " ".join(args)
-    assert "/tmp/.X11-unix:/tmp/.X11-unix" not in args
+def test_container_run_args_refuse_a_second_name() -> None:
+    with pytest.raises(manage.ComputerError, match="fetch-computer"):
+        manage.container_run_args(
+            engine="docker",
+            home_dir="/tmp/fetch-home",
+            name="fetch-computer-coder",
+        )
 
 
 def test_reject_non_loopback_publish() -> None:
@@ -130,18 +169,43 @@ def test_stop_container_removes_a_running_container(monkeypatch) -> None:
         return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
+    monkeypatch.setattr(manage, "extra_computer_containers", lambda _engine: [])
     monkeypatch.setattr(manage, "container_exists", lambda engine, name=manage.CONTAINER_NAME: True)
-    monkeypatch.setattr(manage, "uses_host_network", lambda: False)
     monkeypatch.setattr(manage.subprocess, "run", fake_run)
 
     assert manage.stop_container() == "stopped"
     assert calls == [["docker", "rm", "-f", manage.CONTAINER_NAME]]
 
 
+def test_stop_container_removes_extra_fetch_computer_names(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(list(command))
+        return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    def fake_exists(engine, name=manage.CONTAINER_NAME) -> bool:
+        return name in {manage.CONTAINER_NAME, "fetch-computer-coder"}
+
+    monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
+    monkeypatch.setattr(
+        manage,
+        "extra_computer_containers",
+        lambda _engine: ["fetch-computer-coder"],
+    )
+    monkeypatch.setattr(manage, "container_exists", fake_exists)
+    monkeypatch.setattr(manage.subprocess, "run", fake_run)
+
+    assert manage.stop_container() == "stopped"
+    assert calls == [
+        ["docker", "rm", "-f", manage.CONTAINER_NAME],
+        ["docker", "rm", "-f", "fetch-computer-coder"],
+    ]
+
+
 def test_stop_container_reports_absent_when_no_container(monkeypatch) -> None:
     monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
     monkeypatch.setattr(manage, "container_exists", lambda engine, name=manage.CONTAINER_NAME: False)
-    monkeypatch.setattr(manage, "uses_host_network", lambda: False)
 
     assert manage.stop_container() == "absent"
 
@@ -174,6 +238,10 @@ def test_computer_setup_command_uses_fetch_loopback_contract() -> None:
     assert command[command.index("--kind") + 1] == "Virtual Linux desktop"
     assert command[command.index("--name") + 1] == "Fetch computer"
     assert "--headed-browser" in command
+    assert "--browser" in command
+    assert command[command.index("--browser") + 1].endswith("fetch-computer-chrome.sh")
+    assert "--display" not in command
+    assert "--xauthority" not in command
 
 
 def test_manager_does_not_install_host_xfce() -> None:
@@ -192,6 +260,7 @@ def test_image_keeps_branded_wallpaper_and_loopback_vnc() -> None:
     entrypoint = (computer_dir / "entrypoint.sh").read_text(encoding="utf-8")
     compose = (computer_dir / "docker-compose.yml").read_text(encoding="utf-8")
     wallpaper = computer_dir / "branding" / "wallpaper.png"
+    runner = (computer_dir / "fetch-computer-run.sh").read_text(encoding="utf-8")
 
     assert wallpaper.is_file()
     assert wallpaper.stat().st_size > 10_000
@@ -199,6 +268,7 @@ def test_image_keeps_branded_wallpaper_and_loopback_vnc() -> None:
     assert "FROM ubuntu:24.04" in dockerfile
     assert "FETCH_GEOMETRY=1280x800" in dockerfile
     assert "tigervnc-standalone-server" in dockerfile
+    assert "x11-utils" in dockerfile
     assert "xfce4" in dockerfile
     assert "EXPOSE" not in dockerfile
     assert "if [ -x /usr/bin/google-chrome ]" in dockerfile
@@ -212,19 +282,29 @@ def test_image_keeps_branded_wallpaper_and_loopback_vnc() -> None:
     assert 'rm -f "$socket_path"' in entrypoint
     assert "hsetroot -cover" in entrypoint
     assert "startxfce4" in entrypoint
-    assert "network_mode: host" in compose
+    assert "The container owns the cookie" in entrypoint
+    assert "network_mode:" not in compose
+    assert "127.0.0.1:5901:5901" in compose
     compose_code = "\n".join(
         line for line in compose.splitlines() if not line.lstrip().startswith("#")
     )
-    assert "ports:" not in compose_code
+    assert "/tmp/.X11-unix" not in compose_code
+    assert "Xauthority" not in compose_code
     assert "0.0.0.0" not in compose_code
+    assert "docker exec" in runner
+    assert "fetch-computer" in runner
+    assert 'DISPLAY=":1"' in runner
+    assert 'XAUTHORITY="/home/fetch/.Xauthority"' in runner
+    assert "${DISPLAY" not in runner
+    assert "-v" not in runner
+    assert "--mount" not in runner
 
 
 def test_readme_makes_the_container_the_default_linux_computer() -> None:
     readme = (PLUGIN_DIR / "README.md").read_text(encoding="utf-8")
 
     assert "linux-computer" in readme
-    assert "install Docker if needed" in readme
+    assert "install real Docker if needed" in readme
     assert "Fedora Wayland" in readme
     assert "scrape the physical login session" in readme
     assert "Xorg" in readme
@@ -236,6 +316,9 @@ def test_readme_makes_the_container_the_default_linux_computer() -> None:
     assert "hermes plugins update" in readme
     assert "bootstrap" in readme
     assert "Fetch Watch just works" in readme
+    assert "host networking" in readme
+    assert "/tmp/.X11-unix" in readme
+    assert "manage-computer.sh doctor" in readme
 
 
 def test_bootstrap_command_points_at_the_installed_manager() -> None:
@@ -253,7 +336,7 @@ def test_computer_readiness_is_not_linux_on_macos() -> None:
 
 
 def test_computer_readiness_reports_engine_missing(monkeypatch) -> None:
-    monkeypatch.setattr(manage, "uses_host_network", lambda platform=None: True)
+    monkeypatch.setattr(manage, "is_linux_computer_host", lambda platform=None: True)
     monkeypatch.setattr(manage, "engine_binaries", lambda: [])
     monkeypatch.setattr(manage, "existing_loopback_desktop_ready", lambda: False)
 
@@ -265,9 +348,25 @@ def test_computer_readiness_reports_engine_missing(monkeypatch) -> None:
     assert "manage-computer.sh bootstrap" in report["message"]
 
 
-def test_computer_readiness_reports_engine_not_running(monkeypatch) -> None:
-    monkeypatch.setattr(manage, "uses_host_network", lambda platform=None: True)
+def test_computer_readiness_reports_engine_shim(monkeypatch) -> None:
+    monkeypatch.setattr(manage, "is_linux_computer_host", lambda platform=None: True)
     monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
+    monkeypatch.setattr(manage, "docker_looks_like_podman", lambda engine=manage.ENGINE: True)
+    monkeypatch.setattr(manage, "existing_loopback_desktop_ready", lambda: False)
+
+    report = manage.computer_readiness()
+
+    assert report["state"] == "engine-shim"
+    assert "not Podman or podman-docker" in report["message"]
+    assert "sudo apt-get install -y docker.io" in report["message"]
+    assert "sudo dnf install -y moby-engine" in report["message"]
+    assert "manage-computer.sh bootstrap" in report["message"]
+
+
+def test_computer_readiness_reports_engine_not_running(monkeypatch) -> None:
+    monkeypatch.setattr(manage, "is_linux_computer_host", lambda platform=None: True)
+    monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
+    monkeypatch.setattr(manage, "docker_looks_like_podman", lambda engine=manage.ENGINE: False)
     monkeypatch.setattr(manage, "engine_daemon_ready", lambda _engine: False)
     monkeypatch.setattr(manage, "existing_loopback_desktop_ready", lambda: False)
 
@@ -279,9 +378,11 @@ def test_computer_readiness_reports_engine_not_running(monkeypatch) -> None:
 
 
 def test_computer_readiness_reports_container_absent(monkeypatch) -> None:
-    monkeypatch.setattr(manage, "uses_host_network", lambda platform=None: True)
+    monkeypatch.setattr(manage, "is_linux_computer_host", lambda platform=None: True)
     monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
+    monkeypatch.setattr(manage, "docker_looks_like_podman", lambda engine=manage.ENGINE: False)
     monkeypatch.setattr(manage, "engine_daemon_ready", lambda engine: engine == "docker")
+    monkeypatch.setattr(manage, "extra_computer_containers", lambda engine: [])
     monkeypatch.setattr(manage, "container_running", lambda engine, name=manage.CONTAINER_NAME: False)
     monkeypatch.setattr(manage, "existing_loopback_desktop_ready", lambda: False)
 
@@ -293,16 +394,56 @@ def test_computer_readiness_reports_container_absent(monkeypatch) -> None:
     assert "manage-computer.sh bootstrap" in report["message"]
 
 
-def test_computer_readiness_reports_ready(monkeypatch) -> None:
-    monkeypatch.setattr(manage, "uses_host_network", lambda platform=None: True)
+def test_computer_readiness_requires_rfb_and_matching_xauthority(monkeypatch) -> None:
+    monkeypatch.setattr(manage, "is_linux_computer_host", lambda platform=None: True)
     monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
+    monkeypatch.setattr(manage, "docker_looks_like_podman", lambda engine=manage.ENGINE: False)
     monkeypatch.setattr(manage, "engine_daemon_ready", lambda engine: engine == "docker")
+    monkeypatch.setattr(manage, "extra_computer_containers", lambda engine: [])
     monkeypatch.setattr(manage, "container_running", lambda engine, name=manage.CONTAINER_NAME: True)
+    monkeypatch.setattr(manage, "existing_loopback_desktop_ready", lambda: False)
+    monkeypatch.setattr(manage, "rfb_port_open", lambda *args, **kwargs: False)
+
+    report = manage.computer_readiness()
+
+    assert report["state"] == "rfb-down"
+    assert "127.0.0.1:5901" in report["message"]
+    assert "manage-computer.sh stop" in report["message"]
+    assert "manage-computer.sh bootstrap" in report["message"]
+
+
+def test_computer_readiness_reports_desktop_unhealthy(monkeypatch) -> None:
+    monkeypatch.setattr(manage, "is_linux_computer_host", lambda platform=None: True)
+    monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
+    monkeypatch.setattr(manage, "docker_looks_like_podman", lambda engine=manage.ENGINE: False)
+    monkeypatch.setattr(manage, "engine_daemon_ready", lambda engine: engine == "docker")
+    monkeypatch.setattr(manage, "extra_computer_containers", lambda engine: [])
+    monkeypatch.setattr(manage, "container_running", lambda engine, name=manage.CONTAINER_NAME: True)
+    monkeypatch.setattr(manage, "existing_loopback_desktop_ready", lambda: False)
+    monkeypatch.setattr(manage, "rfb_port_open", lambda *args, **kwargs: True)
+    monkeypatch.setattr(manage, "desktop_client_can_open", lambda engine, name=manage.CONTAINER_NAME: False)
+
+    report = manage.computer_readiness()
+
+    assert report["state"] == "desktop-unhealthy"
+    assert "desktop client" in report["message"]
+    assert "manage-computer.sh stop" in report["message"]
+
+
+def test_computer_readiness_reports_ready(monkeypatch) -> None:
+    monkeypatch.setattr(manage, "is_linux_computer_host", lambda platform=None: True)
+    monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
+    monkeypatch.setattr(manage, "docker_looks_like_podman", lambda engine=manage.ENGINE: False)
+    monkeypatch.setattr(manage, "engine_daemon_ready", lambda engine: engine == "docker")
+    monkeypatch.setattr(manage, "extra_computer_containers", lambda engine: [])
+    monkeypatch.setattr(manage, "container_running", lambda engine, name=manage.CONTAINER_NAME: True)
+    monkeypatch.setattr(manage, "rfb_port_open", lambda *args, **kwargs: True)
+    monkeypatch.setattr(manage, "desktop_client_can_open", lambda engine, name=manage.CONTAINER_NAME: True)
 
     report = manage.computer_readiness()
 
     assert report["state"] == "ready"
-    assert "running" in report["message"]
+    assert report["message"] == manage.READY_MESSAGE
 
 
 def test_guide_prints_copy_pasteable_bootstrap_and_does_not_auto_start(monkeypatch) -> None:
@@ -348,125 +489,112 @@ def test_compose_sets_grok_bot_geometry() -> None:
     assert "1920x1080" not in compose
 
 
-def test_fetch_computer_path_never_mentions_podman() -> None:
-    paths = (
-        PLUGIN_DIR / "linux-computer" / "manage.py",
+def test_fetch_computer_path_mentions_podman_only_to_reject_it() -> None:
+    manage_text = (PLUGIN_DIR / "linux-computer" / "manage.py").read_text(encoding="utf-8")
+    assert "podman-docker" in manage_text
+    assert "not Podman or podman-docker" in manage_text
+    assert 'ENGINE = "podman"' not in manage_text
+    assert "podman run" not in manage_text
+
+    silent_paths = (
         PLUGIN_DIR / "linux-computer" / "docker-compose.yml",
         PLUGIN_DIR / "linux-computer" / "entrypoint.sh",
         PLUGIN_DIR / "linux-computer" / "Dockerfile",
-        PLUGIN_DIR / "README.md",
         PLUGIN_DIR / "linux-vps" / "manage-user-services.sh",
     )
-    for path in paths:
+    for path in silent_paths:
         text = path.read_text(encoding="utf-8")
         assert "podman" not in text.lower(), f"{path} still mentions Podman"
 
 
-def test_ensure_xauthority_writes_cookie_without_host_xauth(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(manage.shutil, "which", lambda _name: None)
-    path = tmp_path / "Xauthority"
-
-    manage.ensure_xauthority(path, display=":1")
-
-    data = path.read_bytes()
-    assert b"MIT-MAGIC-COOKIE-1" in data
-    assert len(data) > 32
-    assert path.stat().st_mode & 0o777 == 0o600
-
-
-def test_run_container_does_not_rotate_cookie_when_port_is_taken(tmp_path, monkeypatch) -> None:
-    called: list[str] = []
+def test_run_container_does_not_start_when_port_is_taken(tmp_path, monkeypatch) -> None:
+    started: list[list[str]] = []
     monkeypatch.setattr(manage, "runtime_dir", lambda: tmp_path)
     monkeypatch.setattr(manage, "container_home_dir", lambda: tmp_path / "home")
+    monkeypatch.setattr(manage, "extra_computer_containers", lambda _engine: [])
+    monkeypatch.setattr(manage, "container_running", lambda _engine, name=manage.CONTAINER_NAME: False)
     monkeypatch.setattr(manage, "container_exists", lambda _engine: False)
     monkeypatch.setattr(manage, "rfb_port_open", lambda *args, **kwargs: True)
     monkeypatch.setattr(
-        manage, "ensure_xauthority", lambda *args, **kwargs: called.append("xauth")
+        manage.subprocess,
+        "run",
+        lambda args, **_kwargs: started.append(list(args))
+        or type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
     )
 
     with pytest.raises(manage.ComputerError, match="already in use"):
         manage.run_container("docker")
 
-    assert called == []
+    assert started == []
 
 
-def test_run_container_refuses_live_x11_socket(tmp_path, monkeypatch) -> None:
-    called: list[str] = []
-
-    def refuse(_display=manage.DISPLAY_NAME) -> None:
-        raise manage.ComputerError(
-            f"Display {manage.DISPLAY_NAME} already has a live socket at /tmp/.X11-unix/X1."
-        )
-
+def test_run_container_refuses_a_second_named_computer(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(manage, "runtime_dir", lambda: tmp_path)
     monkeypatch.setattr(manage, "container_home_dir", lambda: tmp_path / "home")
-    monkeypatch.setattr(manage, "container_exists", lambda _engine: False)
-    monkeypatch.setattr(manage, "rfb_port_open", lambda *args, **kwargs: False)
-    monkeypatch.setattr(manage, "uses_host_network", lambda: True)
-    monkeypatch.setattr(manage, "remove_stale_x11_socket", refuse)
     monkeypatch.setattr(
-        manage, "ensure_xauthority", lambda *args, **kwargs: called.append("xauth")
+        manage, "extra_computer_containers", lambda _engine: ["fetch-computer-coder"]
     )
 
-    with pytest.raises(manage.ComputerError, match="live socket"):
+    with pytest.raises(manage.ComputerError, match="fetch-computer-coder"):
         manage.run_container("docker")
 
-    assert called == []
+
+def test_run_container_reuses_a_healthy_single_container(tmp_path, monkeypatch) -> None:
+    started: list[list[str]] = []
+    monkeypatch.setattr(manage, "runtime_dir", lambda: tmp_path)
+    monkeypatch.setattr(manage, "container_home_dir", lambda: tmp_path / "home")
+    monkeypatch.setattr(manage, "extra_computer_containers", lambda _engine: [])
+    monkeypatch.setattr(manage, "container_running", lambda _engine, name=manage.CONTAINER_NAME: True)
+    monkeypatch.setattr(manage, "rfb_port_open", lambda *args, **kwargs: True)
+    monkeypatch.setattr(manage, "desktop_client_can_open", lambda _engine, name=manage.CONTAINER_NAME: True)
+    monkeypatch.setattr(manage, "container_needs_recreate", lambda _engine, name=manage.CONTAINER_NAME: False)
+    monkeypatch.setattr(
+        manage.subprocess,
+        "run",
+        lambda args, **_kwargs: started.append(list(args))
+        or type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+    )
+
+    manage.run_container("docker")
+
+    assert started == []
 
 
-def test_remove_stale_x11_socket_unlinks_orphans(tmp_path, monkeypatch) -> None:
-    socket_file = tmp_path / "X1"
-    socket_file.write_text("stale", encoding="utf-8")
-    monkeypatch.setattr(manage, "x11_socket_path", lambda display=manage.DISPLAY_NAME: socket_file)
-    monkeypatch.setattr(manage, "x11_socket_listening", lambda path=None, display=manage.DISPLAY_NAME: False)
+def test_run_container_recreates_a_legacy_host_network_container(tmp_path, monkeypatch) -> None:
+    started: list[list[str]] = []
+    monkeypatch.setattr(manage, "runtime_dir", lambda: tmp_path)
+    monkeypatch.setattr(manage, "container_home_dir", lambda: tmp_path / "home")
+    monkeypatch.setattr(manage, "extra_computer_containers", lambda _engine: [])
+    monkeypatch.setattr(manage, "container_running", lambda _engine, name=manage.CONTAINER_NAME: True)
+    monkeypatch.setattr(manage, "rfb_port_open", lambda *args, **kwargs: False)
+    monkeypatch.setattr(manage, "desktop_client_can_open", lambda _engine, name=manage.CONTAINER_NAME: True)
+    monkeypatch.setattr(manage, "container_needs_recreate", lambda _engine, name=manage.CONTAINER_NAME: True)
+    monkeypatch.setattr(manage, "container_exists", lambda _engine, name=manage.CONTAINER_NAME: True)
+    monkeypatch.setattr(manage, "stop_container", lambda **kwargs: "stopped")
+    monkeypatch.setattr(manage, "selinux_enforcing", lambda: False)
+    monkeypatch.setattr(manage, "host_user_ids", lambda: (1000, 1000))
 
-    manage.remove_stale_x11_socket()
+    def fake_run(args, **_kwargs):
+        started.append(list(args))
+        return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
-    assert not socket_file.exists()
+    monkeypatch.setattr(manage.subprocess, "run", fake_run)
 
+    manage.run_container("docker")
 
-def test_remove_stale_x11_socket_keeps_live_sockets(tmp_path, monkeypatch) -> None:
-    socket_file = tmp_path / "X1"
-    socket_file.write_text("live", encoding="utf-8")
-    monkeypatch.setattr(manage, "x11_socket_path", lambda display=manage.DISPLAY_NAME: socket_file)
-    monkeypatch.setattr(manage, "x11_socket_listening", lambda path=None, display=manage.DISPLAY_NAME: True)
-
-    with pytest.raises(manage.ComputerError, match="live socket"):
-        manage.remove_stale_x11_socket()
-
-    assert socket_file.exists()
-
-
-def test_x11_socket_listening_detects_accepting_server(tmp_path) -> None:
-    socket_file = tmp_path / "X1"
-    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(str(socket_file))
-    server.listen(1)
-    try:
-        assert manage.x11_socket_listening(socket_file) is True
-    finally:
-        server.close()
-        socket_file.unlink(missing_ok=True)
-
-
-def test_x11_socket_listening_is_false_for_orphan_file(tmp_path) -> None:
-    socket_file = tmp_path / "X1"
-    socket_file.write_text("orphan", encoding="utf-8")
-
-    assert manage.x11_socket_listening(socket_file) is False
+    assert started[0][:3] == ["docker", "run", "-d"]
 
 
 def test_run_container_omits_user_when_ids_unavailable(tmp_path, monkeypatch) -> None:
     captured: dict[str, list[str]] = {}
     monkeypatch.setattr(manage, "runtime_dir", lambda: tmp_path)
     monkeypatch.setattr(manage, "container_home_dir", lambda: tmp_path / "home")
-    monkeypatch.setattr(manage, "xauthority_path", lambda: tmp_path / "Xauthority")
+    monkeypatch.setattr(manage, "extra_computer_containers", lambda _engine: [])
     monkeypatch.setattr(manage, "container_exists", lambda _engine: False)
+    monkeypatch.setattr(manage, "container_running", lambda _engine, name=manage.CONTAINER_NAME: False)
     monkeypatch.setattr(manage, "rfb_port_open", lambda *args, **kwargs: False)
-    monkeypatch.setattr(manage, "uses_host_network", lambda: False)
     monkeypatch.setattr(manage, "selinux_enforcing", lambda: False)
     monkeypatch.setattr(manage, "host_user_ids", lambda: (None, None))
-    monkeypatch.setattr(manage, "ensure_xauthority", lambda *args, **kwargs: None)
 
     def fake_run(args, **_kwargs):
         captured["args"] = list(args)
@@ -477,10 +605,12 @@ def test_run_container_omits_user_when_ids_unavailable(tmp_path, monkeypatch) ->
     manage.run_container("docker")
 
     assert "--user" not in captured["args"]
+    assert "/tmp/.X11-unix" not in captured["args"]
+    assert "--network" not in captured["args"]
 
 
 def test_computer_readiness_treats_working_opt_in_desktop_as_ready(monkeypatch) -> None:
-    monkeypatch.setattr(manage, "uses_host_network", lambda platform=None: True)
+    monkeypatch.setattr(manage, "is_linux_computer_host", lambda platform=None: True)
     monkeypatch.setattr(manage, "engine_binaries", lambda: [])
     monkeypatch.setattr(manage, "container_running", lambda *args, **kwargs: False)
     monkeypatch.setattr(
@@ -508,3 +638,13 @@ def test_configured_computer_target_reads_persisted_env(tmp_path, monkeypatch) -
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
     assert manage.configured_computer_target() == "tcp://127.0.0.1:5900"
+
+
+def test_container_exec_args_point_at_the_container_desktop() -> None:
+    args = manage.container_exec_args("docker", "xdpyinfo")
+
+    assert args[:2] == ["docker", "exec"]
+    assert "DISPLAY=:1" in args
+    assert "XAUTHORITY=/home/fetch/.Xauthority" in args
+    assert manage.CONTAINER_NAME in args
+    assert args[-1] == "xdpyinfo"

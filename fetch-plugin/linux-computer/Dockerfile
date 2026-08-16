@@ -17,6 +17,7 @@ RUN apt-get update \
         openssl \
         thunar \
         tigervnc-standalone-server \
+        x11-utils \
         x11-xserver-utils \
         xauth \
         xfce4 \
@@ -29,8 +30,8 @@ RUN apt-get update \
         /etc/xdg/autostart/xfce4-tips-autostart.desktop \
     && rm -rf /var/lib/apt/lists/*
 
-# Interactive desktop browser. Hermes browser_* still runs on the host and
-# paints into DISPLAY=:1; this is for Take over / Watch on the virtual desktop.
+# Interactive desktop browser. Hermes stays on the host and docker-execs
+# fetch-chrome so headed browser_* / computer_use windows open here.
 RUN arch="$(dpkg --print-architecture)" \
     && apt-get update \
     && if [ "$arch" = "amd64" ] \
