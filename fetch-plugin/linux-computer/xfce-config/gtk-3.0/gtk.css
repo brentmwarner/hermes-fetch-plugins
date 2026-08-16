@@ -1,0 +1,45 @@
+/* Fetch glass panel. Wallpaper shows through a thin dark bar. */
+.xfce4-panel.background,
+.xfce4-panel {
+  background-color: rgba(16, 18, 24, 0.40);
+  background-image: none;
+  border: none;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+  color: #f4f4f5;
+  box-shadow: none;
+}
+
+.xfce4-panel button,
+.xfce4-panel .flat,
+.xfce4-panel .tasklist button {
+  background-color: transparent;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+  color: #f4f4f5;
+  outline: none;
+}
+
+.xfce4-panel button:hover,
+.xfce4-panel .tasklist button:hover {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
+.xfce4-panel button:checked,
+.xfce4-panel button:active,
+.xfce4-panel .tasklist button:checked,
+.xfce4-panel .tasklist button:active {
+  background-color: rgba(255, 255, 255, 0.12);
+}
+
+.xfce4-panel .separator,
+.xfce4-panel separator {
+  background: transparent;
+  border: none;
+  min-width: 1px;
+}
+
+.xfce4-panel .clock-digital-time,
+.xfce4-panel .clock {
+  color: #f4f4f5;
+}

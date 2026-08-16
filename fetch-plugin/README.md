@@ -231,8 +231,10 @@ second container on `:1`.
 TigerVNC runs at **1280×800** (Grok Bot’s desktop). The default backdrop is
 the Fetch brand landscape shipped at `linux-computer/branding/wallpaper.png`
 — a soft-focus view of rolling green hills, warm golden-hour light, and a
-pale sky. `hsetroot -cover` paints that image onto the framebuffer. Replace
-the PNG and rebuild the image to change the desktop background without a
+pale sky. `hsetroot -cover` paints that image onto the framebuffer. A thin
+glass top bar uses the official Fetch F-mark (`linux-computer/branding/fetch_logo.svg`) on
+the left instead of stock Ubuntu/Applications chrome. Replace the wallpaper
+PNG and rebuild the image to change the desktop background without a
 redesign.
 
 The VNC port is deliberately private. The container owns its X server,
