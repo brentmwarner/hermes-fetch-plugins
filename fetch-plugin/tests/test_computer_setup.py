@@ -107,6 +107,9 @@ def test_disable_computer_stops_bridge_and_clears_persisted_target(tmp_path, mon
             return True
 
     class FakeRelayRuntime:
+        def ensure_keeper_units(self):
+            return "unsupported"
+
         def restart_relay_runtime_for_reconfigure(self):
             calls.append("restart-relay")
             return {"stopped": [42], "left_running": []}
@@ -152,6 +155,9 @@ def test_disable_computer_stops_container_before_clearing_env(tmp_path, monkeypa
             return True
 
     class FakeRelayRuntime:
+        def ensure_keeper_units(self):
+            return "unsupported"
+
         def restart_relay_runtime_for_reconfigure(self):
             return {"stopped": [1], "left_running": []}
 
@@ -383,6 +389,9 @@ def test_configure_starts_dedicated_bridge_before_reporting_ready(tmp_path, monk
             return "started"
 
     class FakeRelayRuntime:
+        def ensure_keeper_units(self):
+            return "unsupported"
+
         def restart_relay_runtime_for_reconfigure(self):
             calls.append("restart-relay")
             return {"stopped": [42], "left_running": []}
@@ -484,6 +493,9 @@ def test_non_virtual_setup_restores_physical_session_for_all_later_runtimes(
             return "started"
 
     class FakeRelayRuntime:
+        def ensure_keeper_units(self):
+            return "unsupported"
+
         def restart_relay_runtime_for_reconfigure(self):
             return {"stopped": [], "left_running": []}
 
@@ -565,6 +577,9 @@ def test_configure_requires_a_managed_runtime_to_adopt_the_visible_display(
             return "started"
 
     class FakeRelayRuntime:
+        def ensure_keeper_units(self):
+            return "unsupported"
+
         def restart_relay_runtime_for_reconfigure(self):
             return {"stopped": [], "left_running": [42]}
 
@@ -604,6 +619,9 @@ def test_configure_accepts_a_restarted_manual_gateway(tmp_path, monkeypatch) -> 
             return "started"
 
     class FakeRelayRuntime:
+        def ensure_keeper_units(self):
+            return "unsupported"
+
         def restart_relay_runtime_for_reconfigure(self):
             return {"stopped": [], "left_running": owner_pids.pop(0)}
 
@@ -652,6 +670,9 @@ def test_disable_computer_requires_manual_gateway_restart(tmp_path, monkeypatch)
             return True
 
     class FakeRelayRuntime:
+        def ensure_keeper_units(self):
+            return "unsupported"
+
         def restart_relay_runtime_for_reconfigure(self):
             return {"stopped": [], "left_running": owner_pids.pop(0)}
 
