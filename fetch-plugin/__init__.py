@@ -733,7 +733,15 @@ def _spawn_tunnel() -> None:
     computer_runtime_status = _computer_runtime.ensure_computer_runtime()
     if computer_runtime_status == "failed":
         log.warning("Fetch computer runtime could not start; check fetch-computer-runtime.log")
-    if _runtime.ensure_relay_runtime() in {"started", "already-running"}:
+    relay_runtime_status = _runtime.ensure_relay_runtime()
+    # Every long-lived host keeps the detached runtimes alive: a reconfigure
+    # that stops them and loses its restart leg no longer strands the agent
+    # offline until manual intervention.
+    _runtime.start_runtime_keeper(
+        should_run=_should_start_tunnel,
+        extra_ensures=(_computer_runtime.ensure_computer_runtime,),
+    )
+    if relay_runtime_status in {"started", "already-running"}:
         return
 
     def _run() -> None:

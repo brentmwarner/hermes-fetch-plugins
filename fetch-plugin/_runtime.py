@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import signal
 import socket
 import subprocess
@@ -396,6 +397,65 @@ while True:
                 sys.exit(1)
     time.sleep(POLL_S)
 """
+
+
+_keeper_lock = threading.Lock()
+_keeper_running = False
+_keeper_stop_event: threading.Event | None = None
+
+
+def start_runtime_keeper(
+    *,
+    should_run,
+    extra_ensures=(),
+    interval_s: float = 60.0,
+    jitter_s: float = 10.0,
+) -> bool:
+    """Keep the detached runtimes alive for the life of this process.
+
+    Reconfigure flows stop the relay runtime and normally restart it, but the
+    restart leg can be lost: the stopping process is killed mid-flow, errors
+    out, or never gets to run its follow-up ensure. Without a keeper the agent
+    then stays offline for every paired device until something happens to call
+    ``ensure_relay_runtime()`` again. Each long-lived host process ticks this
+    keeper instead, so a stopped runtime is respawned within about a minute.
+
+    Ticks are cheap while healthy (a pid-file read). Concurrent keepers in
+    several processes are safe: the ensures are pid-file guarded and a
+    double-spawned runtime child exits on its own once the pid record names
+    its sibling. Returns False when this process already has a keeper.
+    """
+    global _keeper_running, _keeper_stop_event
+    with _keeper_lock:
+        if _keeper_running:
+            return False
+        _keeper_running = True
+        stop = threading.Event()
+        _keeper_stop_event = stop
+
+    def _tick_forever() -> None:
+        while not stop.wait(interval_s + random.uniform(0.0, max(0.0, jitter_s))):
+            try:
+                if not should_run():
+                    continue
+                if ensure_relay_runtime() == "started":
+                    log.info("Fetch keeper restarted the relay runtime; it was not running")
+                for ensure in extra_ensures:
+                    if ensure() == "started":
+                        log.info("Fetch keeper restarted a companion runtime; it was not running")
+            except Exception:
+                log.debug("Fetch runtime keeper tick failed", exc_info=True)
+
+    threading.Thread(target=_tick_forever, name="fetch-runtime-keeper", daemon=True).start()
+    return True
+
+
+def _stop_runtime_keeper_for_tests() -> None:
+    global _keeper_running
+    with _keeper_lock:
+        if _keeper_stop_event is not None:
+            _keeper_stop_event.set()
+        _keeper_running = False
 
 
 def restart_relay_runtime_for_reconfigure() -> dict:

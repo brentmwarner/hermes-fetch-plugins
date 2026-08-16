@@ -597,3 +597,53 @@ def test_child_script_exits_when_server_keeps_failing(tmp_path, monkeypatch) -> 
     )
     assert result.returncode == 1  # gave the slot back instead of looping
     assert b"RuntimeError" in result.stderr  # and said why in the log
+
+
+def test_runtime_keeper_restarts_missing_runtimes(monkeypatch) -> None:
+    monkeypatch.setattr(runtime, "_keeper_running", False)
+    relay_calls = []
+    computer_calls = []
+    monkeypatch.setattr(
+        runtime, "ensure_relay_runtime", lambda: relay_calls.append(1) or "started"
+    )
+    try:
+        assert runtime.start_runtime_keeper(
+            should_run=lambda: True,
+            extra_ensures=(lambda: computer_calls.append(1) or "started",),
+            interval_s=0.01,
+            jitter_s=0.0,
+        ) is True
+
+        deadline = time.time() + 5.0
+        while time.time() < deadline and (len(relay_calls) < 2 or len(computer_calls) < 2):
+            time.sleep(0.01)
+        assert len(relay_calls) >= 2  # keeps ticking, not one-shot
+        assert len(computer_calls) >= 2
+
+        # One keeper per process.
+        assert runtime.start_runtime_keeper(should_run=lambda: True) is False
+    finally:
+        runtime._stop_runtime_keeper_for_tests()
+
+
+def test_runtime_keeper_respects_should_run_gate(monkeypatch) -> None:
+    monkeypatch.setattr(runtime, "_keeper_running", False)
+    calls = []
+    monkeypatch.setattr(
+        runtime, "ensure_relay_runtime", lambda: calls.append(1) or "started"
+    )
+    gate = {"open": False}
+    try:
+        assert runtime.start_runtime_keeper(
+            should_run=lambda: gate["open"], interval_s=0.01, jitter_s=0.0
+        ) is True
+        time.sleep(0.2)
+        assert calls == []  # unpaired/disabled hosts stay passive
+
+        gate["open"] = True
+        deadline = time.time() + 5.0
+        while time.time() < deadline and not calls:
+            time.sleep(0.01)
+        assert calls
+    finally:
+        runtime._stop_runtime_keeper_for_tests()
