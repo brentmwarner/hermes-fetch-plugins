@@ -486,19 +486,20 @@ def configure(
         )
         if kind != "Virtual Linux desktop":
             remove_environment_keys(environment_path, VIRTUAL_DESKTOP_ENV_KEYS)
-        stale_host_x11 = tuple(
-            key
-            for key, present in (
-                (DISPLAY_ENV, display),
-                (XAUTHORITY_ENV, xauthority),
-                (BROWSER_ENV, browser),
+        if kind == "Virtual Linux desktop":
+            stale_host_x11 = tuple(
+                key
+                for key, present in (
+                    (DISPLAY_ENV, display),
+                    (XAUTHORITY_ENV, xauthority),
+                    (BROWSER_ENV, browser),
+                )
+                if not present
             )
-            if not present
-        )
-        if stale_host_x11:
-            remove_environment_keys(environment_path, stale_host_x11)
-            for key in stale_host_x11:
-                os.environ.pop(key, None)
+            if stale_host_x11:
+                remove_environment_keys(environment_path, stale_host_x11)
+                for key in stale_host_x11:
+                    os.environ.pop(key, None)
         if not vnc_password:
             remove_environment_keys(environment_path, (VNC_PASSWORD_ENV,))
             os.environ.pop(VNC_PASSWORD_ENV, None)

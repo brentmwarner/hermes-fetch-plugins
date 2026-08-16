@@ -528,6 +528,56 @@ def test_container_setup_clears_host_x11_and_points_browser_at_docker_exec(
     assert setup.XAUTHORITY_ENV not in setup.os.environ
 
 
+def test_macos_setup_preserves_unrelated_browser_preference(tmp_path, monkeypatch) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text('BROWSER="firefox"\n', encoding="utf-8")
+
+    class FakeRuntime:
+        def restart_computer_runtime(self):
+            return True
+
+        def ensure_computer_runtime(self, **kwargs):
+            return "started"
+
+    class FakeRelayRuntime:
+        def ensure_keeper_units(self):
+            return "unsupported"
+
+        def restart_relay_runtime_for_reconfigure(self):
+            return {"stopped": [], "left_running": []}
+
+        def ensure_relay_runtime(self, **kwargs):
+            return "started"
+
+    monkeypatch.setattr(setup, "probe_desktop", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        setup,
+        "_credentials",
+        lambda: {"relay_url": "https://relay", "agent_id": "agent", "agent_secret": "secret"},
+    )
+    monkeypatch.setattr(setup, "hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(setup, "_computer_runtime_module", lambda: FakeRuntime())
+    monkeypatch.setattr(setup, "_relay_runtime_module", lambda: FakeRelayRuntime())
+    monkeypatch.setattr(setup, "wait_for_relay", lambda *args, **kwargs: {"ok": True})
+    monkeypatch.setattr(setup, "configured_vnc_password", lambda: "secret")
+
+    setup.configure(
+        target="tcp://127.0.0.1:5900",
+        kind="Mac desktop",
+        name="",
+        display="",
+        xauthority="",
+        headed_browser=True,
+        browser="",
+        vnc_password="secret",
+        wait_seconds=5,
+        check_only=False,
+    )
+
+    saved = env_path.read_text(encoding="utf-8")
+    assert 'BROWSER="firefox"' in saved
+
+
 def test_non_virtual_setup_restores_physical_session_for_all_later_runtimes(
     tmp_path, monkeypatch
 ) -> None:

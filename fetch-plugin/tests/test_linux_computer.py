@@ -169,11 +169,38 @@ def test_stop_container_removes_a_running_container(monkeypatch) -> None:
         return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
+    monkeypatch.setattr(manage, "extra_computer_containers", lambda _engine: [])
     monkeypatch.setattr(manage, "container_exists", lambda engine, name=manage.CONTAINER_NAME: True)
     monkeypatch.setattr(manage.subprocess, "run", fake_run)
 
     assert manage.stop_container() == "stopped"
     assert calls == [["docker", "rm", "-f", manage.CONTAINER_NAME]]
+
+
+def test_stop_container_removes_extra_fetch_computer_names(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        calls.append(list(command))
+        return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    def fake_exists(engine, name=manage.CONTAINER_NAME) -> bool:
+        return name in {manage.CONTAINER_NAME, "fetch-computer-coder"}
+
+    monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
+    monkeypatch.setattr(
+        manage,
+        "extra_computer_containers",
+        lambda _engine: ["fetch-computer-coder"],
+    )
+    monkeypatch.setattr(manage, "container_exists", fake_exists)
+    monkeypatch.setattr(manage.subprocess, "run", fake_run)
+
+    assert manage.stop_container() == "stopped"
+    assert calls == [
+        ["docker", "rm", "-f", manage.CONTAINER_NAME],
+        ["docker", "rm", "-f", "fetch-computer-coder"],
+    ]
 
 
 def test_stop_container_reports_absent_when_no_container(monkeypatch) -> None:
@@ -241,6 +268,7 @@ def test_image_keeps_branded_wallpaper_and_loopback_vnc() -> None:
     assert "FROM ubuntu:24.04" in dockerfile
     assert "FETCH_GEOMETRY=1280x800" in dockerfile
     assert "tigervnc-standalone-server" in dockerfile
+    assert "x11-utils" in dockerfile
     assert "xfce4" in dockerfile
     assert "EXPOSE" not in dockerfile
     assert "if [ -x /usr/bin/google-chrome ]" in dockerfile
@@ -265,6 +293,9 @@ def test_image_keeps_branded_wallpaper_and_loopback_vnc() -> None:
     assert "0.0.0.0" not in compose_code
     assert "docker exec" in runner
     assert "fetch-computer" in runner
+    assert 'DISPLAY=":1"' in runner
+    assert 'XAUTHORITY="/home/fetch/.Xauthority"' in runner
+    assert "${DISPLAY" not in runner
     assert "-v" not in runner
     assert "--mount" not in runner
 
@@ -516,6 +547,7 @@ def test_run_container_reuses_a_healthy_single_container(tmp_path, monkeypatch) 
     monkeypatch.setattr(manage, "container_running", lambda _engine, name=manage.CONTAINER_NAME: True)
     monkeypatch.setattr(manage, "rfb_port_open", lambda *args, **kwargs: True)
     monkeypatch.setattr(manage, "desktop_client_can_open", lambda _engine, name=manage.CONTAINER_NAME: True)
+    monkeypatch.setattr(manage, "container_needs_recreate", lambda _engine, name=manage.CONTAINER_NAME: False)
     monkeypatch.setattr(
         manage.subprocess,
         "run",
@@ -526,6 +558,31 @@ def test_run_container_reuses_a_healthy_single_container(tmp_path, monkeypatch) 
     manage.run_container("docker")
 
     assert started == []
+
+
+def test_run_container_recreates_a_legacy_host_network_container(tmp_path, monkeypatch) -> None:
+    started: list[list[str]] = []
+    monkeypatch.setattr(manage, "runtime_dir", lambda: tmp_path)
+    monkeypatch.setattr(manage, "container_home_dir", lambda: tmp_path / "home")
+    monkeypatch.setattr(manage, "extra_computer_containers", lambda _engine: [])
+    monkeypatch.setattr(manage, "container_running", lambda _engine, name=manage.CONTAINER_NAME: True)
+    monkeypatch.setattr(manage, "rfb_port_open", lambda *args, **kwargs: False)
+    monkeypatch.setattr(manage, "desktop_client_can_open", lambda _engine, name=manage.CONTAINER_NAME: True)
+    monkeypatch.setattr(manage, "container_needs_recreate", lambda _engine, name=manage.CONTAINER_NAME: True)
+    monkeypatch.setattr(manage, "container_exists", lambda _engine, name=manage.CONTAINER_NAME: True)
+    monkeypatch.setattr(manage, "stop_container", lambda **kwargs: "stopped")
+    monkeypatch.setattr(manage, "selinux_enforcing", lambda: False)
+    monkeypatch.setattr(manage, "host_user_ids", lambda: (1000, 1000))
+
+    def fake_run(args, **_kwargs):
+        started.append(list(args))
+        return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(manage.subprocess, "run", fake_run)
+
+    manage.run_container("docker")
+
+    assert started[0][:3] == ["docker", "run", "-d"]
 
 
 def test_run_container_omits_user_when_ids_unavailable(tmp_path, monkeypatch) -> None:

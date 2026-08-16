@@ -17,6 +17,7 @@ RUN apt-get update \
         openssl \
         thunar \
         tigervnc-standalone-server \
+        x11-utils \
         x11-xserver-utils \
         xauth \
         xfce4 \

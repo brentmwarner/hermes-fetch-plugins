@@ -10,7 +10,7 @@ if [[ $# -eq 0 ]]; then
 fi
 
 exec docker exec -i \
-  -e DISPLAY="${DISPLAY:-:1}" \
-  -e XAUTHORITY="${XAUTHORITY:-/home/fetch/.Xauthority}" \
+  -e DISPLAY=":1" \
+  -e XAUTHORITY="/home/fetch/.Xauthority" \
   fetch-computer \
   "$@"

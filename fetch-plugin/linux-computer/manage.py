@@ -524,26 +524,60 @@ def host_user_ids() -> tuple[int | None, int | None]:
         return None, None
 
 
+def container_needs_recreate(engine: str, name: str = CONTAINER_NAME) -> bool:
+    """True when a running container still uses the legacy host-X11 integration."""
+
+    if not container_exists(engine, name):
+        return False
+    network = _command_text(
+        [engine, "inspect", "-f", "{{.HostConfig.NetworkMode}}", name]
+    ).strip()
+    if network == "host":
+        return True
+    mounts = _command_text(
+        [
+            engine,
+            "inspect",
+            "-f",
+            "{{range .Mounts}}{{.Source}}:{{.Destination}} {{end}}",
+            name,
+        ]
+    )
+    if "/tmp/.X11-unix" in mounts or "Xauthority" in mounts:
+        return True
+    image_id = _command_text([engine, "inspect", "-f", "{{.Image}}", name]).strip()
+    current_image_id = _command_text(
+        [engine, "inspect", "-f", "{{.Id}}", IMAGE_NAME]
+    ).strip()
+    if image_id and current_image_id and image_id != current_image_id:
+        return True
+    return False
+
+
 def stop_container(*, name: str = CONTAINER_NAME) -> str:
     binaries = engine_binaries()
     if not binaries:
         return "no-engine"
     saw_container = False
     for engine in binaries:
-        if not container_exists(engine, name):
-            continue
-        saw_container = True
-        result = subprocess.run(
-            [engine, "rm", "-f", name],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout or "").strip()
-            raise ComputerError(
-                f"Could not stop the Fetch computer container: {detail or engine}"
+        names = [name]
+        if name == CONTAINER_NAME:
+            names.extend(extra_computer_containers(engine))
+        for container_name in dict.fromkeys(names):
+            if not container_exists(engine, container_name):
+                continue
+            saw_container = True
+            result = subprocess.run(
+                [engine, "rm", "-f", container_name],
+                capture_output=True,
+                text=True,
+                check=False,
             )
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "").strip()
+                raise ComputerError(
+                    f"Could not stop the Fetch computer container: {detail or engine}"
+                )
     return "stopped" if saw_container else "absent"
 
 
@@ -587,6 +621,7 @@ def run_container(engine: str) -> None:
         container_running(engine)
         and rfb_port_open()
         and desktop_client_can_open(engine)
+        and not container_needs_recreate(engine)
     ):
         return
     if container_exists(engine):
