@@ -38,6 +38,21 @@ _CONFIG_ENVS = (
     "HERMES_FETCH_RELAY_URL",
     "HERMES_FETCH_STORE_HOME",
 )
+# Settings computer setup persists to the Hermes ``.env`` that the spawned
+# bridge reads from its inherited environment. The keeper compares each one
+# against the persisted file, so the set must not include keys that are
+# legitimately env-only (relay URL, store home): those would read as a
+# permanent mismatch and bench every keeper.
+_KEEPER_PERSISTED_ENVS = (
+    "HERMES_FETCH_COMPUTER_NAME",
+    "HERMES_FETCH_COMPUTER_KIND",
+    VNC_PASSWORD_ENV,
+)
+# Setup leaves an omitted ``--name`` alone rather than scrubbing it the way an
+# empty VNC password is scrubbed, so a name can legitimately live only in the
+# process environment. An empty persisted value for these keys expresses no
+# opinion; a persisted value must still match.
+_KEEPER_ENV_ONLY_OK = ("HERMES_FETCH_COMPUTER_NAME",)
 
 
 def _child_environment(environment: dict[str, str] | None) -> dict[str, str]:
@@ -78,14 +93,76 @@ def _pid_path() -> Path:
     return _runtime_dir() / _PID_FILE
 
 
-def _credentials_path() -> Path:
+def _store_home() -> Path:
     store_home = os.environ.get("HERMES_FETCH_STORE_HOME", "").strip()
-    home = Path(os.path.expanduser(store_home)) if store_home else _load_runtime_module()._hermes_home()
-    return home / "push" / "fetch-relay.json"
+    if store_home:
+        return Path(os.path.expanduser(store_home))
+    return _load_runtime_module()._hermes_home()
+
+
+def _credentials_path() -> Path:
+    return _store_home() / "push" / "fetch-relay.json"
 
 
 def _target() -> str:
     return os.environ.get(TARGET_ENV, os.environ.get(LEGACY_TARGET_ENV, "")).strip()
+
+
+def _persisted_environment_value(path: Path, key: str) -> str:
+    """Read ``key`` from the persisted Hermes ``.env`` (last assignment wins).
+
+    Mirrors the parsing computer setup uses when it persists configuration:
+    an optional ``export `` prefix and a JSON- or shell-quoted value.
+    """
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    for line in reversed(lines):
+        stripped = line.strip()
+        candidate = stripped[7:].lstrip() if stripped.startswith("export ") else stripped
+        name, separator, value = candidate.partition("=")
+        if not separator or name.strip() != key:
+            continue
+        try:
+            decoded = json.loads(value)
+            return decoded if isinstance(decoded, str) else ""
+        except (TypeError, ValueError):
+            return value.strip().strip("'\"")
+    return ""
+
+
+def _persisted_target() -> str:
+    path = _store_home() / ".env"
+    for key in (TARGET_ENV, LEGACY_TARGET_ENV):
+        value = _persisted_environment_value(path, key).strip()
+        if value:
+            return value
+    return ""
+
+
+def keeper_ensure_computer_runtime() -> str:
+    """Ambient ensure for the runtime keeper: defer to persisted configuration.
+
+    A keeper thread can outlive a disable or reconfigure performed in another
+    process, leaving stale computer settings in this process's environment.
+    Respawning from those values would resurrect a bridge the user just
+    disabled, revive a rotated VNC password or old name/kind, or fight a newly
+    configured bridge. Only ensure when every persisted computer setting the
+    bridge consumes still matches this process's environment; a stale host
+    stays passive and leaves the bridge to the process that owns the current
+    configuration.
+    """
+    if _target() != _persisted_target():
+        return "stale-config"
+    environment_path = _store_home() / ".env"
+    for key in _KEEPER_PERSISTED_ENVS:
+        persisted = _persisted_environment_value(environment_path, key).strip()
+        if not persisted and key in _KEEPER_ENV_ONLY_OK:
+            continue
+        if os.environ.get(key, "").strip() != persisted:
+            return "stale-config"
+    return ensure_computer_runtime()
 
 
 def _signature() -> str:
