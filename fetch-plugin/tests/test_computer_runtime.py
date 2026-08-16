@@ -276,10 +276,56 @@ def test_keeper_ensure_skips_target_gone_stale_after_disable(tmp_path, monkeypat
     assert calls == []
 
 
+def test_keeper_ensure_skips_when_persisted_settings_diverge(tmp_path, monkeypatch) -> None:
+    # Reconfiguring without changing the target — rotating the VNC password,
+    # renaming, or switching kinds — must also bench a stale host: the bridge
+    # it would spawn carries the old environment.
+    monkeypatch.setenv("HERMES_FETCH_STORE_HOME", str(tmp_path))
+    monkeypatch.setenv(computer_runtime.TARGET_ENV, "tcp://127.0.0.1:5900")
+    monkeypatch.delenv(computer_runtime.LEGACY_TARGET_ENV, raising=False)
+    monkeypatch.setenv(computer_runtime.VNC_PASSWORD_ENV, "old-secret")
+    monkeypatch.setenv("HERMES_FETCH_COMPUTER_KIND", "Linux desktop")
+    monkeypatch.delenv("HERMES_FETCH_COMPUTER_NAME", raising=False)
+    calls = []
+    monkeypatch.setattr(
+        computer_runtime, "ensure_computer_runtime", lambda: calls.append(1) or "started"
+    )
+    environment_path = tmp_path / ".env"
+
+    def write_env(password: str, kind: str = "Linux desktop", name: str | None = None) -> None:
+        lines = [
+            f'{computer_runtime.TARGET_ENV}="tcp://127.0.0.1:5900"',
+            f'HERMES_FETCH_COMPUTER_KIND="{kind}"',
+            f'{computer_runtime.VNC_PASSWORD_ENV}="{password}"',
+        ]
+        if name is not None:
+            lines.append(f'HERMES_FETCH_COMPUTER_NAME="{name}"')
+        environment_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    write_env("old-secret")
+    assert computer_runtime.keeper_ensure_computer_runtime() == "started"
+    assert calls == [1]
+
+    # Rotated VNC password, same target.
+    write_env("new-secret")
+    assert computer_runtime.keeper_ensure_computer_runtime() == "stale-config"
+
+    # Switched kind, same target.
+    write_env("old-secret", kind="Virtual Linux desktop")
+    assert computer_runtime.keeper_ensure_computer_runtime() == "stale-config"
+
+    # Renamed, same target.
+    write_env("old-secret", name="Studio Mac")
+    assert computer_runtime.keeper_ensure_computer_runtime() == "stale-config"
+    assert calls == [1]
+
+
 def test_keeper_ensure_runs_when_environment_matches_persisted(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HERMES_FETCH_STORE_HOME", str(tmp_path))
     monkeypatch.setenv(computer_runtime.TARGET_ENV, "tcp://127.0.0.1:5900")
     monkeypatch.delenv(computer_runtime.LEGACY_TARGET_ENV, raising=False)
+    for key in computer_runtime._KEEPER_PERSISTED_ENVS:
+        monkeypatch.delenv(key, raising=False)
     (tmp_path / ".env").write_text(
         f'export {computer_runtime.TARGET_ENV}="tcp://127.0.0.1:5900"\n', encoding="utf-8"
     )
@@ -298,6 +344,8 @@ def test_keeper_ensure_passes_through_unconfigured_hosts(tmp_path, monkeypatch) 
     monkeypatch.setenv("HERMES_FETCH_STORE_HOME", str(tmp_path))
     monkeypatch.delenv(computer_runtime.TARGET_ENV, raising=False)
     monkeypatch.delenv(computer_runtime.LEGACY_TARGET_ENV, raising=False)
+    for key in computer_runtime._KEEPER_PERSISTED_ENVS:
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(computer_runtime, "ensure_computer_runtime", lambda: "disabled")
 
     assert computer_runtime.keeper_ensure_computer_runtime() == "disabled"

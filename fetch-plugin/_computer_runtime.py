@@ -38,6 +38,16 @@ _CONFIG_ENVS = (
     "HERMES_FETCH_RELAY_URL",
     "HERMES_FETCH_STORE_HOME",
 )
+# Settings computer setup persists to the Hermes ``.env`` that the spawned
+# bridge reads from its inherited environment. The keeper compares each one
+# against the persisted file, so the set must not include keys that are
+# legitimately env-only (relay URL, store home): those would read as a
+# permanent mismatch and bench every keeper.
+_KEEPER_PERSISTED_ENVS = (
+    "HERMES_FETCH_COMPUTER_NAME",
+    "HERMES_FETCH_COMPUTER_KIND",
+    VNC_PASSWORD_ENV,
+)
 
 
 def _child_environment(environment: dict[str, str] | None) -> dict[str, str]:
@@ -130,15 +140,21 @@ def keeper_ensure_computer_runtime() -> str:
     """Ambient ensure for the runtime keeper: defer to persisted configuration.
 
     A keeper thread can outlive a disable or reconfigure performed in another
-    process, leaving a stale ``HERMES_FETCH_COMPUTER_TARGET`` in this process's
-    environment. Respawning from that value would resurrect a bridge the user
-    just disabled, or fight a newly configured one. Only ensure when this
-    process's target still matches the persisted Hermes configuration; a stale
-    host stays passive and leaves the bridge to the process that owns the
-    current configuration.
+    process, leaving stale computer settings in this process's environment.
+    Respawning from those values would resurrect a bridge the user just
+    disabled, revive a rotated VNC password or old name/kind, or fight a newly
+    configured bridge. Only ensure when every persisted computer setting the
+    bridge consumes still matches this process's environment; a stale host
+    stays passive and leaves the bridge to the process that owns the current
+    configuration.
     """
     if _target() != _persisted_target():
         return "stale-config"
+    environment_path = _store_home() / ".env"
+    for key in _KEEPER_PERSISTED_ENVS:
+        persisted = _persisted_environment_value(environment_path, key).strip()
+        if os.environ.get(key, "").strip() != persisted:
+            return "stale-config"
     return ensure_computer_runtime()
 
 
