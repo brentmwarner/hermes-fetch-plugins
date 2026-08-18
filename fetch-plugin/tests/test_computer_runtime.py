@@ -373,6 +373,39 @@ def test_keeper_ensure_passes_through_unconfigured_hosts(tmp_path, monkeypatch) 
     assert computer_runtime.keeper_ensure_computer_runtime() == "disabled"
 
 
+def test_desktop_bootstrap_command_uses_python_on_windows(monkeypatch) -> None:
+    monkeypatch.setattr(computer_runtime.sys, "platform", "win32")
+    command = computer_runtime._desktop_bootstrap_command()
+
+    assert command is not None
+    assert command[0] == computer_runtime.sys.executable
+    assert command[-1] == "bootstrap"
+    assert command[-2].endswith("linux-computer/manage.py")
+
+
+def test_apply_container_profile_target_overrides_explicit_environment(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_PROFILE", "researcher")
+    monkeypatch.delenv("HERMES_FETCH_COMPUTER_HOST_OPT_IN", raising=False)
+    monkeypatch.setattr(computer_runtime, "_load_computer_manager", lambda: None)
+
+    displays_path = tmp_path / "fetch-computer-displays.json"
+    displays_path.write_text(
+        json.dumps({"profiles": {"default": 1}}) + "\n", encoding="utf-8"
+    )
+    environment = {
+        computer_runtime.TARGET_ENV: "tcp://127.0.0.1:5901",
+        "DISPLAY": ":1",
+    }
+    display_num = computer_runtime._apply_container_profile_target(environment)
+
+    assert display_num == 2
+    assert environment[computer_runtime.TARGET_ENV] == "tcp://127.0.0.1:5902"
+    assert environment["DISPLAY"] == ":2"
+
+
 def test_wake_desktop_container_starts_once(tmp_path, monkeypatch) -> None:
     calls: list[list[str]] = []
     computer_runtime._desktop_wake_started = False

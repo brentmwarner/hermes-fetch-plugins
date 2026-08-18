@@ -237,3 +237,25 @@ def test_driver_command_uses_profile_display(visible_computer, monkeypatch, tmp_
     assert "DISPLAY=:2" in command
     assert "cua-driver" in command
     assert command[-3:] == ["call", "list_windows", "{}"]
+
+
+def test_check_requirements_requires_docker_without_host_opt_in(
+    visible_computer, monkeypatch
+) -> None:
+    monkeypatch.setattr(visible_computer, "host_desktop_opt_in", lambda: False)
+    monkeypatch.setattr(visible_computer.shutil, "which", lambda name: None)
+
+    assert visible_computer.check_requirements() is False
+
+
+def test_check_requirements_accepts_docker_without_host_cua_driver(
+    visible_computer, monkeypatch
+) -> None:
+    monkeypatch.setattr(visible_computer, "host_desktop_opt_in", lambda: False)
+    monkeypatch.setattr(
+        visible_computer.shutil,
+        "which",
+        lambda name: "/usr/bin/docker" if name == "docker" else None,
+    )
+
+    assert visible_computer.check_requirements() is True

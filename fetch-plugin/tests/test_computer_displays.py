@@ -1,5 +1,6 @@
 from pathlib import Path
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 if str(PLUGIN_DIR) not in sys.path:
@@ -22,6 +23,16 @@ def test_host_desktop_opt_in_reads_dotenv(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     (tmp_path / ".env").write_text(
         f"{displays.HOST_OPT_IN_ENV}=true\n", encoding="utf-8"
+    )
+
+    assert displays.host_desktop_opt_in() is True
+
+
+def test_host_desktop_opt_in_reads_export_prefixed_dotenv(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv(displays.HOST_OPT_IN_ENV, raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / ".env").write_text(
+        f"export {displays.HOST_OPT_IN_ENV}=1\n", encoding="utf-8"
     )
 
     assert displays.host_desktop_opt_in() is True
@@ -53,3 +64,20 @@ def test_hermes_profile_names_include_disk_profiles(tmp_path, monkeypatch) -> No
     assert "default" in names
     assert "researcher" in names
     assert "signal-monitor" in names
+
+
+def test_allocate_display_serializes_concurrent_profiles(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(
+            pool.map(
+                lambda profile: displays.allocate_display(profile),
+                [f"bot-{index}" for index in range(8)],
+            )
+        )
+
+    assert len(set(results)) == 8
+    mapping = displays.load_profile_displays()
+    assert len(mapping) == 8
+    assert set(mapping.values()) == set(results)

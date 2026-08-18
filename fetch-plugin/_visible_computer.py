@@ -75,7 +75,7 @@ def check_requirements() -> bool:
     """Return whether this host can drive the streamed Fetch desktop."""
     if host_desktop_opt_in():
         return shutil.which("cua-driver") is not None
-    return shutil.which("docker") is not None or shutil.which("cua-driver") is not None
+    return shutil.which("docker") is not None
 
 
 def _load_computer_manager():

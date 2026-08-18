@@ -6,8 +6,11 @@ Mac/Windows/Linux desktop is opt-in only (HERMES_FETCH_COMPUTER_HOST_OPT_IN).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import sys
+import tempfile
 from pathlib import Path
 
 FIRST_DISPLAY = 1
@@ -78,12 +81,42 @@ def host_desktop_opt_in() -> bool:
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
-        key, _, value = stripped.partition("=")
+        candidate = stripped[7:].lstrip() if stripped.startswith("export ") else stripped
+        key, _, value = candidate.partition("=")
         if key.strip() != HOST_OPT_IN_ENV:
             continue
         value = value.strip().strip("\"'")
         return value.lower() in {"1", "true", "yes", "on"}
     return False
+
+
+@contextlib.contextmanager
+def _displays_lock():
+    """Serialize read/allocate/write across Hermes processes on one host."""
+
+    lock_path = displays_path().with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        if sys.platform == "win32":
+            import msvcrt
+
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def load_profile_displays() -> dict[str, int]:
@@ -111,26 +144,38 @@ def load_profile_displays() -> dict[str, int]:
 def save_profile_displays(mapping: dict[str, int]) -> None:
     path = displays_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"profiles": mapping}, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    fd, tmp_path = tempfile.mkstemp(
+        dir=path.parent, prefix=f"{path.name}.", suffix=".tmp"
     )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps({"profiles": mapping}, indent=2, sort_keys=True) + "\n"
+            )
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def allocate_display(profile: str | None = None) -> int:
     key = (profile or current_profile()).strip().lower() or "default"
-    mapping = load_profile_displays()
-    existing = mapping.get(key)
-    if existing is not None:
-        return existing
-    used = set(mapping.values())
-    display_num = FIRST_DISPLAY
-    while display_num in used:
-        display_num += 1
-    if display_num > MAX_DISPLAYS:
-        raise RuntimeError(
-            f"Fetch computer supports at most {MAX_DISPLAYS} bot desktops."
-        )
-    mapping[key] = display_num
-    save_profile_displays(mapping)
-    return display_num
+    with _displays_lock():
+        mapping = load_profile_displays()
+        existing = mapping.get(key)
+        if existing is not None:
+            return existing
+        used = set(mapping.values())
+        display_num = FIRST_DISPLAY
+        while display_num in used:
+            display_num += 1
+        if display_num > MAX_DISPLAYS:
+            raise RuntimeError(
+                f"Fetch computer supports at most {MAX_DISPLAYS} bot desktops."
+            )
+        mapping[key] = display_num
+        save_profile_displays(mapping)
+        return display_num

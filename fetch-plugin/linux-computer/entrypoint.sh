@@ -207,7 +207,13 @@ if [[ -x /usr/local/bin/fetch-start-display && -f "$wanted_file" ]]; then
   while read -r extra_num; do
     [[ "$extra_num" =~ ^[0-9]+$ ]] || continue
     [[ "$extra_num" -eq "$display_number" ]] && continue
+    if [[ "$extra_num" -eq 1 ]]; then
+      extra_vnc_port=5901
+    else
+      extra_vnc_port=$((5900 + extra_num))
+    fi
     FETCH_VNC_LOCALHOST="${FETCH_VNC_LOCALHOST:-0}" \
+      FETCH_RFB_PORT="$extra_vnc_port" \
       /usr/local/bin/fetch-start-display ":${extra_num}" &
   done <"$wanted_file"
 fi

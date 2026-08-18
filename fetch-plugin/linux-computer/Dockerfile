@@ -104,9 +104,11 @@ RUN curl -fsSL \
     && /bin/bash /tmp/cua-install.sh \
     && rm -f /tmp/cua-install.sh \
     && if [ -x /root/.local/bin/cua-driver ]; then \
-         ln -sf /root/.local/bin/cua-driver /usr/local/bin/cua-driver; \
+         cp /root/.local/bin/cua-driver /usr/local/bin/cua-driver \
+         && chmod 0755 /usr/local/bin/cua-driver; \
        elif [ -x /home/fetch/.local/bin/cua-driver ]; then \
-         ln -sf /home/fetch/.local/bin/cua-driver /usr/local/bin/cua-driver; \
+         cp /home/fetch/.local/bin/cua-driver /usr/local/bin/cua-driver \
+         && chmod 0755 /usr/local/bin/cua-driver; \
        fi \
     && command -v cua-driver
 

@@ -69,8 +69,12 @@ _CONTAINER_VNC_PORT_HIGH = 5916
 
 def _desktop_bootstrap_command() -> list[str] | None:
     plugin_dir = Path(__file__).resolve().parent
-    script = plugin_dir / "linux-computer" / "manage-computer.sh"
     manager = plugin_dir / "linux-computer" / "manage.py"
+    if sys.platform == "win32":
+        if manager.is_file():
+            return [sys.executable, str(manager), "bootstrap"]
+        return None
+    script = plugin_dir / "linux-computer" / "manage-computer.sh"
     if script.is_file():
         return [str(script), "bootstrap"]
     if manager.is_file():
