@@ -97,6 +97,7 @@ def _displays_lock():
     lock_path = displays_path().with_suffix(".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    locked = False
     try:
         if sys.platform == "win32":
             import msvcrt
@@ -106,17 +107,21 @@ def _displays_lock():
             import fcntl
 
             fcntl.flock(fd, fcntl.LOCK_EX)
+        locked = True
         yield
     finally:
-        if sys.platform == "win32":
-            import msvcrt
+        try:
+            if locked:
+                if sys.platform == "win32":
+                    import msvcrt
 
-            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
 
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 def load_profile_displays() -> dict[str, int]:
