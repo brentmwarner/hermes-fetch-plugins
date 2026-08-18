@@ -136,8 +136,8 @@ def _apply_container_profile_target(environment: dict[str, str] | None) -> int |
     target = computer_target_for(display_num)
     os.environ[TARGET_ENV] = target
     if environment is not None:
-        environment.setdefault(TARGET_ENV, target)
-        environment.setdefault("DISPLAY", display_name(display_num))
+        environment[TARGET_ENV] = target
+        environment["DISPLAY"] = display_name(display_num)
     return display_num
 
 
