@@ -267,9 +267,9 @@ def test_local_dashboard_status_swallows_connection_failures(monkeypatch) -> Non
     import httpx
 
     def _refuse(*args, **kwargs):
-        raise httpx.ConnectError("connection refused")
+        raise ConnectionError("connection refused")
 
-    monkeypatch.setattr(httpx, "get", _refuse)
+    monkeypatch.setattr(httpx, "get", _refuse, raising=False)
     assert pairing._local_dashboard_status(base="http://127.0.0.1:9119") is None
 
 

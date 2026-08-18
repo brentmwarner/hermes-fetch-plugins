@@ -14,6 +14,9 @@ _spec.loader.exec_module(computer_runtime)
 class FakeProcess:
     pid = 4242
 
+    def poll(self):
+        return None
+
 
 def _fake_runtime(tmp_path, *, command=None, terminate=True):
     terminated = []
@@ -40,6 +43,11 @@ def _fake_runtime(tmp_path, *, command=None, terminate=True):
         reaped=reaped,
     )
     return runtime
+
+
+def _stub_container_desktop(monkeypatch) -> None:
+    monkeypatch.setattr(computer_runtime, "_apply_container_profile_target", lambda env: None)
+    monkeypatch.setattr(computer_runtime, "_load_computer_manager", lambda: None)
 
 
 def _write_pid(tmp_path, pid=4242, *, role="fetch-computer-runtime", signature=None) -> Path:
@@ -72,6 +80,8 @@ def test_ensure_starts_dedicated_computer_process(tmp_path, monkeypatch) -> None
     monkeypatch.setattr(computer_runtime, "_load_runtime_module", lambda: _fake_runtime(tmp_path))
     monkeypatch.setattr(computer_runtime, "_credentials_path", lambda: credentials)
     monkeypatch.setattr(computer_runtime, "_active_pid", lambda **kwargs: None)
+    monkeypatch.setattr(computer_runtime, "wake_desktop_container", lambda: "skipped")
+    _stub_container_desktop(monkeypatch)
     monkeypatch.setattr(
         computer_runtime.subprocess,
         "Popen",
@@ -101,6 +111,8 @@ def test_ensure_computer_runtime_uses_explicit_child_environment(tmp_path, monke
     monkeypatch.setattr(computer_runtime, "_load_runtime_module", lambda: _fake_runtime(tmp_path))
     monkeypatch.setattr(computer_runtime, "_credentials_path", lambda: credentials)
     monkeypatch.setattr(computer_runtime, "_active_pid", lambda **kwargs: None)
+    monkeypatch.setattr(computer_runtime, "wake_desktop_container", lambda: "skipped")
+    _stub_container_desktop(monkeypatch)
     monkeypatch.setattr(
         computer_runtime.subprocess,
         "Popen",
@@ -199,6 +211,7 @@ def test_ensure_spawns_reaper_for_child(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(computer_runtime, "_load_runtime_module", lambda: fake)
     monkeypatch.setattr(computer_runtime, "_credentials_path", lambda: credentials)
     monkeypatch.setattr(computer_runtime, "_active_pid", lambda **kwargs: None)
+    _stub_container_desktop(monkeypatch)
     monkeypatch.setattr(
         computer_runtime.subprocess, "Popen", lambda args, **kwargs: process
     )
@@ -221,6 +234,7 @@ def test_ambient_ensure_defers_to_live_runtime_with_other_signature(tmp_path, mo
     monkeypatch.delenv(computer_runtime.DISABLE_AUTOSTART_ENV, raising=False)
     monkeypatch.setattr(computer_runtime, "_load_runtime_module", lambda: fake)
     monkeypatch.setattr(computer_runtime, "_credentials_path", lambda: credentials)
+    _stub_container_desktop(monkeypatch)
     pid_path = _write_pid(tmp_path, signature="someone-elses-config")
 
     assert computer_runtime.ensure_computer_runtime() == "already-running"
@@ -242,6 +256,7 @@ def test_explicit_environment_ensure_replaces_mismatched_runtime(tmp_path, monke
     monkeypatch.delenv(computer_runtime.DISABLE_AUTOSTART_ENV, raising=False)
     monkeypatch.setattr(computer_runtime, "_load_runtime_module", lambda: fake)
     monkeypatch.setattr(computer_runtime, "_credentials_path", lambda: credentials)
+    _stub_container_desktop(monkeypatch)
     monkeypatch.setattr(
         computer_runtime.subprocess, "Popen", lambda args, **kwargs: process
     )
@@ -356,3 +371,136 @@ def test_keeper_ensure_passes_through_unconfigured_hosts(tmp_path, monkeypatch) 
     monkeypatch.setattr(computer_runtime, "ensure_computer_runtime", lambda: "disabled")
 
     assert computer_runtime.keeper_ensure_computer_runtime() == "disabled"
+
+
+def test_wake_desktop_container_starts_once(tmp_path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+    computer_runtime._desktop_wake_started = False
+    computer_runtime._desktop_wake_process = None
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv(computer_runtime.DISABLE_AUTOSTART_ENV, raising=False)
+    monkeypatch.delenv("HERMES_FETCH_COMPUTER_HOST_OPT_IN", raising=False)
+    monkeypatch.setattr(computer_runtime, "_load_computer_manager", lambda: None)
+    monkeypatch.setattr(
+        computer_runtime, "_desktop_bootstrap_command", lambda: ["bootstrap"]
+    )
+
+    def fake_popen(args, **_kwargs):
+        calls.append(list(args))
+        return FakeProcess()
+
+    monkeypatch.setattr(computer_runtime.subprocess, "Popen", fake_popen)
+
+    assert computer_runtime.wake_desktop_container() == "started"
+    assert computer_runtime.wake_desktop_container() == "already-waking"
+    assert calls == [["bootstrap"]]
+
+
+def test_ensure_wakes_desktop_before_spawning_bridge(tmp_path, monkeypatch) -> None:
+    credentials = tmp_path / "push" / "fetch-relay.json"
+    credentials.parent.mkdir()
+    credentials.write_text("{}", encoding="utf-8")
+    fake = _fake_runtime(tmp_path)
+    process = FakeProcess()
+    wakes: list[str] = []
+    computer_runtime._desktop_wake_started = False
+    monkeypatch.setenv(computer_runtime.TARGET_ENV, "tcp://127.0.0.1:5901")
+    monkeypatch.delenv(computer_runtime.AUTOSTART_ENV, raising=False)
+    monkeypatch.delenv(computer_runtime.DISABLE_AUTOSTART_ENV, raising=False)
+    monkeypatch.setattr(computer_runtime, "_load_runtime_module", lambda: fake)
+    monkeypatch.setattr(computer_runtime, "_credentials_path", lambda: credentials)
+    monkeypatch.setattr(computer_runtime, "_active_pid", lambda **kwargs: None)
+    _stub_container_desktop(monkeypatch)
+    monkeypatch.setattr(
+        computer_runtime, "wake_desktop_container", lambda: wakes.append("wake") or "started"
+    )
+    monkeypatch.setattr(
+        computer_runtime.subprocess, "Popen", lambda args, **kwargs: process
+    )
+
+    assert computer_runtime.ensure_computer_runtime() == "started"
+    assert wakes == ["wake"]
+
+
+def test_keeper_accepts_sibling_bot_display_ports(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_FETCH_STORE_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv(computer_runtime.TARGET_ENV, "tcp://127.0.0.1:5902")
+    monkeypatch.delenv(computer_runtime.LEGACY_TARGET_ENV, raising=False)
+    monkeypatch.delenv("HERMES_FETCH_COMPUTER_HOST_OPT_IN", raising=False)
+    (tmp_path / ".env").write_text(
+        f'{computer_runtime.TARGET_ENV}="tcp://127.0.0.1:5901"\n', encoding="utf-8"
+    )
+    calls: list[int] = []
+    monkeypatch.setattr(
+        computer_runtime, "ensure_computer_runtime", lambda: calls.append(1) or "started"
+    )
+
+    assert computer_runtime.keeper_ensure_computer_runtime() == "started"
+    assert calls == [1]
+
+
+def test_ensure_isolated_desktops_pins_and_starts_bot_screens(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_PROFILE", "default")
+    monkeypatch.delenv(computer_runtime.DISABLE_AUTOSTART_ENV, raising=False)
+    monkeypatch.delenv("HERMES_FETCH_COMPUTER_HOST_OPT_IN", raising=False)
+    (tmp_path / "profiles" / "researcher").mkdir(parents=True)
+    (tmp_path / "profiles" / "signal-monitor").mkdir()
+    computer_runtime._display_wait_started = False
+    computer_runtime._desktop_wake_started = False
+    computer_runtime._desktop_wake_process = None
+    started: list[str] = []
+
+    class Manager:
+        ENGINE = "docker"
+
+        @staticmethod
+        def container_running(engine, name=None):
+            return True
+
+        @staticmethod
+        def start_profile_displays(engine, name=None):
+            started.append(engine)
+            return [1, 2, 3]
+
+    monkeypatch.setattr(computer_runtime, "_load_computer_manager", lambda: Manager)
+    monkeypatch.setattr(computer_runtime, "wake_desktop_container", lambda: "already-running")
+
+    assert computer_runtime.ensure_isolated_desktops() == "already-running"
+    mapping = json.loads(
+        (tmp_path / "fetch-computer-displays.json").read_text(encoding="utf-8")
+    )
+    assert mapping["profiles"]["default"] == 1
+    assert mapping["profiles"]["researcher"] == 2
+    assert mapping["profiles"]["signal-monitor"] == 3
+    assert started == ["docker"]
+
+
+def test_wake_starts_profile_displays_when_container_is_already_up(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv(computer_runtime.DISABLE_AUTOSTART_ENV, raising=False)
+    monkeypatch.delenv("HERMES_FETCH_COMPUTER_HOST_OPT_IN", raising=False)
+    started: list[str] = []
+
+    class Manager:
+        ENGINE = "docker"
+
+        @staticmethod
+        def container_running(engine, name=None):
+            return True
+
+        @staticmethod
+        def start_profile_displays(engine, name=None):
+            started.append(engine)
+            return [1]
+
+    monkeypatch.setattr(computer_runtime, "_load_computer_manager", lambda: Manager)
+    monkeypatch.setattr(
+        computer_runtime.subprocess,
+        "Popen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("bootstrap must not run")),
+    )
+
+    assert computer_runtime.wake_desktop_container() == "already-running"
+    assert started == ["docker"]

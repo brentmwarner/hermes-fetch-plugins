@@ -1,7 +1,8 @@
 # Convenience file. Prefer ./manage-computer.sh bootstrap so Docker
 # detection, loopback-only VNC, and Fetch env persistence stay correct.
 # The container owns its X server. Do not mount the host /tmp/.X11-unix or
-# use host networking. Publish VNC only on 127.0.0.1:5901.
+# use host networking. Publish VNC only on 127.0.0.1:5901-5916 (one port
+# per DISPLAY=:N inside this single container).
 services:
   fetch-computer:
     build: .
@@ -16,5 +17,20 @@ services:
       FETCH_GEOMETRY: "1280x800"
     ports:
       - "127.0.0.1:5901:5901"
+      - "127.0.0.1:5902:5902"
+      - "127.0.0.1:5903:5903"
+      - "127.0.0.1:5904:5904"
+      - "127.0.0.1:5905:5905"
+      - "127.0.0.1:5906:5906"
+      - "127.0.0.1:5907:5907"
+      - "127.0.0.1:5908:5908"
+      - "127.0.0.1:5909:5909"
+      - "127.0.0.1:5910:5910"
+      - "127.0.0.1:5911:5911"
+      - "127.0.0.1:5912:5912"
+      - "127.0.0.1:5913:5913"
+      - "127.0.0.1:5914:5914"
+      - "127.0.0.1:5915:5915"
+      - "127.0.0.1:5916:5916"
     volumes:
       - ${FETCH_COMPUTER_HOME:-${HOME}/.local/share/fetch-computer/home}:/home/fetch

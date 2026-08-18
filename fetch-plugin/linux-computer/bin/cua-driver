@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Host cua-driver talks to the Mac/Windows desktop. Fetch Watch streams
+# Ubuntu, so computer_use must docker-exec into fetch-computer on this
+# profile's DISPLAY=:N.
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+exec "${script_dir}/../fetch-computer-run.sh" cua-driver "$@"

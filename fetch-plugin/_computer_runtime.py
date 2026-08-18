@@ -15,8 +15,13 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
+
+_PLUGIN_DIR = Path(__file__).resolve().parent
+if str(_PLUGIN_DIR) not in sys.path:
+    sys.path.insert(0, str(_PLUGIN_DIR))
 
 log = logging.getLogger("fetch_plugin.computer_runtime")
 
@@ -53,6 +58,237 @@ _KEEPER_PERSISTED_ENVS = (
 # process environment. An empty persisted value for these keys expresses no
 # opinion; a persisted value must still match.
 _KEEPER_ENV_ONLY_OK = ("HERMES_FETCH_COMPUTER_NAME",)
+
+_desktop_wake_lock = threading.Lock()
+_desktop_wake_started = False
+_desktop_wake_process: subprocess.Popen | None = None
+_display_wait_started = False
+_CONTAINER_VNC_PORT_LOW = 5901
+_CONTAINER_VNC_PORT_HIGH = 5916
+
+
+def _desktop_bootstrap_command() -> list[str] | None:
+    plugin_dir = Path(__file__).resolve().parent
+    script = plugin_dir / "linux-computer" / "manage-computer.sh"
+    manager = plugin_dir / "linux-computer" / "manage.py"
+    if script.is_file():
+        return [str(script), "bootstrap"]
+    if manager.is_file():
+        return [sys.executable, str(manager), "bootstrap"]
+    return None
+
+
+def _desktop_autostart_disabled() -> bool:
+    return os.environ.get(DISABLE_AUTOSTART_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _host_desktop_opt_in() -> bool:
+    try:
+        from _computer_displays import host_desktop_opt_in
+
+        return host_desktop_opt_in()
+    except Exception:
+        return False
+
+
+def _load_computer_manager():
+    existing = sys.modules.get("fetch_plugin_linux_computer")
+    if existing is not None:
+        return existing
+    path = Path(__file__).resolve().parent / "linux-computer" / "manage.py"
+    spec = importlib.util.spec_from_file_location("fetch_plugin_linux_computer", path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _apply_container_profile_target(environment: dict[str, str] | None) -> int | None:
+    """Pin this Hermes profile to DISPLAY=:N and stream that VNC port."""
+
+    if _host_desktop_opt_in():
+        return None
+    try:
+        from _computer_displays import computer_target_for, display_name
+    except Exception:
+        return None
+    display_num = None
+    try:
+        manager = _load_computer_manager()
+        if manager is not None:
+            display_num = manager.pin_and_start_display()
+    except Exception:
+        log.debug("Fetch could not start this bot's Ubuntu display", exc_info=True)
+    if display_num is None:
+        try:
+            from _computer_displays import allocate_display
+
+            display_num = allocate_display()
+        except Exception:
+            return None
+    target = computer_target_for(display_num)
+    os.environ[TARGET_ENV] = target
+    if environment is not None:
+        environment.setdefault(TARGET_ENV, target)
+        environment.setdefault("DISPLAY", display_name(display_num))
+    return display_num
+
+
+def _pin_known_displays() -> list[int]:
+    """Persist DISPLAY=:N for every Hermes bot profile, even before Docker is up."""
+
+    pinned: list[int] = []
+    try:
+        from _computer_displays import allocate_display, hermes_profile_names
+
+        for profile in hermes_profile_names():
+            pinned.append(allocate_display(profile))
+    except Exception:
+        log.debug("Fetch could not pin bot DISPLAY=:N mappings", exc_info=True)
+    return pinned
+
+
+def _start_profile_displays_now() -> bool:
+    manager = _load_computer_manager()
+    if manager is None:
+        return False
+    engine = getattr(manager, "ENGINE", "docker")
+    if not manager.container_running(engine):
+        return False
+    manager.start_profile_displays(engine)
+    return True
+
+
+def _schedule_profile_displays() -> None:
+    """Start extra bot screens now, or once fetch-computer answers."""
+
+    global _display_wait_started
+    try:
+        if _start_profile_displays_now():
+            return
+    except Exception:
+        log.debug("Fetch could not start isolated bot desktops yet", exc_info=True)
+        return
+    with _desktop_wake_lock:
+        if _display_wait_started:
+            return
+        _display_wait_started = True
+
+    def _run() -> None:
+        deadline = time.time() + 180
+        while time.time() < deadline:
+            try:
+                if _start_profile_displays_now():
+                    return
+            except Exception:
+                log.debug("Fetch stopped waiting for isolated bot desktops", exc_info=True)
+                return
+            time.sleep(2)
+
+    threading.Thread(
+        target=_run, daemon=True, name="fetch-computer-displays"
+    ).start()
+
+
+def ensure_isolated_desktops() -> str:
+    """Plugin load/install: pin bots to DISPLAY=:N and boot those screens."""
+
+    if _desktop_autostart_disabled():
+        return "disabled"
+    if _host_desktop_opt_in():
+        return "host-opt-in"
+    _pin_known_displays()
+    state = wake_desktop_container()
+    _schedule_profile_displays()
+    return state
+
+
+def _loopback_vnc_port(target: str) -> int | None:
+    prefix = "tcp://127.0.0.1:"
+    if not target.startswith(prefix):
+        return None
+    try:
+        return int(target[len(prefix) :])
+    except ValueError:
+        return None
+
+
+def _targets_match_for_keeper(live: str, persisted: str) -> bool:
+    """True when the keeper should still own this host's computer bridge.
+
+    Isolated bots share one Ubuntu box on 5901–5916. The persisted default is
+    :1 / 5901; a researcher agent on :2 / 5902 is the same computer, not a
+    stale reconfigure. Host-opt-in desktops still require an exact match.
+    """
+
+    if live == persisted:
+        return True
+    if _host_desktop_opt_in():
+        return False
+    live_port = _loopback_vnc_port(live)
+    persisted_port = _loopback_vnc_port(persisted)
+    if live_port is None or persisted_port is None:
+        return False
+    try:
+        from _computer_displays import FIRST_DISPLAY, MAX_DISPLAYS, vnc_port_for
+
+        low = vnc_port_for(FIRST_DISPLAY)
+        high = vnc_port_for(MAX_DISPLAYS)
+    except Exception:
+        low, high = _CONTAINER_VNC_PORT_LOW, _CONTAINER_VNC_PORT_HIGH
+    return low <= live_port <= high and low <= persisted_port <= high
+
+
+def wake_desktop_container() -> str:
+    """Start fetch-computer in the background when a viewer opens.
+
+    Docker Desktop is often stopped. Tapping Watch should boot the Ubuntu
+    box instead of waiting for a manual bootstrap command.
+    """
+
+    global _desktop_wake_started, _desktop_wake_process
+    if _desktop_autostart_disabled():
+        return "disabled"
+    if _host_desktop_opt_in():
+        return "host-opt-in"
+    try:
+        manager = _load_computer_manager()
+        engine = getattr(manager, "ENGINE", "docker") if manager is not None else None
+        if manager is not None and engine and manager.container_running(engine):
+            try:
+                manager.start_profile_displays(engine)
+            except Exception:
+                log.debug("Fetch could not start extra bot displays", exc_info=True)
+            return "already-running"
+    except Exception:
+        log.debug("Fetch could not inspect the computer container", exc_info=True)
+    command = _desktop_bootstrap_command()
+    if command is None:
+        return "unavailable"
+    with _desktop_wake_lock:
+        if _desktop_wake_process is not None and _desktop_wake_process.poll() is None:
+            return "already-waking"
+        try:
+            _desktop_wake_process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                close_fds=True,
+            )
+        except OSError:
+            log.warning("Fetch could not start the computer container", exc_info=True)
+            return "failed"
+        _desktop_wake_started = True
+        return "started"
 
 
 def _child_environment(environment: dict[str, str] | None) -> dict[str, str]:
@@ -153,7 +389,7 @@ def keeper_ensure_computer_runtime() -> str:
     stays passive and leaves the bridge to the process that owns the current
     configuration.
     """
-    if _target() != _persisted_target():
+    if not _targets_match_for_keeper(_target(), _persisted_target()):
         return "stale-config"
     environment_path = _store_home() / ".env"
     for key in _KEEPER_PERSISTED_ENVS:
@@ -287,10 +523,13 @@ asyncio.run(main())
 
 
 def ensure_computer_runtime(*, environment: dict[str, str] | None = None) -> str:
-    if os.environ.get(DISABLE_AUTOSTART_ENV, "").strip().lower() in {"1", "true", "yes", "on"}:
+    if _desktop_autostart_disabled():
         return "disabled"
     if os.environ.get(AUTOSTART_ENV, "").strip() == "1":
         return "self"
+    _apply_container_profile_target(environment)
+    if not _host_desktop_opt_in():
+        wake_desktop_container()
     if not _target():
         return "disabled"
     if not _credentials_path().is_file():

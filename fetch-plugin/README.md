@@ -59,14 +59,16 @@ hermes gateway restart      # (and restart `hermes dashboard` if running separat
 hermes setup                # choose Fetch, paste the Fetch setup code, then scan/paste the setup link
 ```
 
-On Linux, Mac, and Windows, after a plugin install or `hermes plugins update`:
-install Docker if needed (Docker Desktop on Mac/Windows), then bootstrap the
-computer once. `hermes setup` (Fetch) prints the exact next steps and can start
-the container after one confirmation. After that, `unless-stopped` brings the
-computer back with the engine, and Fetch Watch just works.
+On Linux, Mac, and Windows, after a plugin install or `hermes plugins update`,
+install Docker if needed (Docker Desktop on Mac/Windows) and start it. Plugin
+load, `hermes setup` (Fetch), and Fetch Watch start the Ubuntu desktop in the
+background — no TTY yes/no and no “run this bootstrap command” as the primary
+path. If Docker is missing, setup prints the exact next steps and retries when
+Docker appears. After the first start, `unless-stopped` brings the computer
+back with the engine, and Fetch Watch just works.
 
 ```bash
-# Linux, macOS, and Windows (Git Bash), once per host:
+# Fallback only, if Watch never comes up:
 ~/.hermes/plugins/fetch/linux-computer/manage-computer.sh bootstrap
 
 # Windows (PowerShell) alternative:
@@ -150,15 +152,16 @@ sessions against the same desktop.
 On Fedora, Ubuntu, other Linux desktops, a VPS, macOS, and Windows, the default
 computer is one Ubuntu `fetch-computer` container. Hermes stays on the host.
 The plugin starts TigerVNC + XFCE inside the container, maps RFB only to
-`127.0.0.1:5901`, and reuses the existing Fetch loopback bridge. Fedora Wayland
+`127.0.0.1:5901`–`5916` (one port per bot `DISPLAY=:N`), and reuses the existing Fetch loopback bridge. Fedora Wayland
 is a first-class case: do not scrape the physical login session.
 
 Update the plugin, then install real Docker if needed (Docker Desktop on
-Mac/Windows), bootstrap once, and Fetch Watch just works. Setup fails closed if
+Mac/Windows). Fetch starts the container automatically on plugin load, pairing,
+and Watch. Setup fails closed if
 Docker is missing, the daemon is not running, or `docker` is a Podman /
 `podman-docker` shim; it does not silently `apt`/`dnf` XFCE onto the host.
 `hermes setup` (Fetch) and plugin load print one ready line or the next
-copy-pasteable fix — Docker Desktop install + bootstrap on Mac/Windows, and
+copy-pasteable fix — Docker Desktop install on Mac/Windows, and
 `docker.io` / `moby-engine` + `systemctl` on Linux. Doctor proves Docker is
 real, `fetch-computer` is running, RFB answers on `127.0.0.1:5901`, and a
 desktop client inside the container can open the VNC X server:
@@ -168,17 +171,18 @@ desktop client inside the container can open the VNC X server:
 ```
 
 The bootstrap builds the image if needed, starts the one `fetch-computer`
-container, waits until RFB answers on `127.0.0.1:5901`, persists
+container, waits until RFB answers on `127.0.0.1:5901`, starts extra X
+displays for current Hermes profiles (up to 16), persists
 `HERMES_FETCH_COMPUTER_TARGET=tcp://127.0.0.1:5901`,
 `HERMES_FETCH_COMPUTER_NAME=Fetch computer`, and
 `HERMES_FETCH_COMPUTER_KIND=Virtual Linux desktop`, then starts the existing
 bridge and fail-closes on `GET /v1/agents/computer/status` the same way
 `computer_setup.py` already does. Hermes stays on the host. Headed
-`browser_*` / `computer_use` windows docker-exec into that container so
-they never use the host `/tmp/.X11-unix` or `~/.Xauthority`. One Hermes
-install uses one computer container (display `:1` inside it). Extra
-virtual displays can come later inside that same container, not from a
-second container on `:1`.
+`browser_*` / `computer_use` / cua-driver calls docker-exec into that
+container with `DISPLAY=:N` for the current Hermes profile so they never use
+the host `/tmp/.X11-unix`, `~/.Xauthority`, or host cua-driver. One Hermes
+install uses one computer container and several `DISPLAY=:N` inside it, not a
+second container.
 
 TigerVNC runs at **1280×800** (Grok Bot’s desktop). The default backdrop is
 the Fetch brand landscape shipped at `linux-computer/branding/wallpaper.png`
@@ -190,9 +194,9 @@ PNG and rebuild the image to change the desktop background without a
 redesign.
 
 The VNC port is deliberately private. The container owns its X server,
-cookie, and VNC; the manager publishes only `127.0.0.1:5901`. It does not
+cookie, and VNC; the manager publishes only `127.0.0.1:5901`–`5916`. It does not
 use host networking or bind-mount the host `/tmp/.X11-unix`. Never publish
-VNC on `0.0.0.0` or open port 5901 in a firewall. If something else already
+VNC on `0.0.0.0` or open those ports in a firewall. If something else already
 holds display `:1` or port `5901`, setup stops with one sentence and:
 
 ```bash

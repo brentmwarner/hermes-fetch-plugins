@@ -128,6 +128,7 @@ def test_linux_run_args_publish_loopback_and_never_share_host_x11() -> None:
     assert "FETCH_GEOMETRY=1280x800" in args
     assert "-p" in args
     assert f"{manage.RFB_HOST}:{manage.RFB_PORT}:{manage.RFB_PORT}" in args
+    assert f"{manage.RFB_HOST}:5916:5916" in args
     assert "0.0.0.0" not in " ".join(args)
     assert "/tmp/.X11-unix" not in " ".join(args)
     assert ".Xauthority" not in " ".join(args)
@@ -276,6 +277,9 @@ def test_image_keeps_branded_wallpaper_and_loopback_vnc() -> None:
     assert "xfce4" in dockerfile
     assert "EXPOSE" not in dockerfile
     assert "if [ -x /usr/bin/google-chrome ]" in dockerfile
+    assert "libs/cua-driver/scripts/install.sh" in dockerfile
+    assert "command -v cua-driver" in dockerfile
+    assert "at-spi2-core" in dockerfile
     assert 'exec /usr/bin/epiphany "$@"' in dockerfile
     assert "1280x800" in entrypoint
     assert "1920x1080" not in entrypoint
@@ -297,10 +301,11 @@ def test_image_keeps_branded_wallpaper_and_loopback_vnc() -> None:
     assert "0.0.0.0" not in compose_code
     assert "docker exec" in runner
     assert "fetch-computer" in runner
-    assert 'DISPLAY=":1"' in runner
+    assert "pin_and_start_display" in runner
+    assert 'DISPLAY="${display}"' in runner
     assert 'XAUTHORITY="/home/fetch/.Xauthority"' in runner
     assert "${DISPLAY" not in runner
-    assert "-v" not in runner
+    assert "-v /tmp/.X11-unix" not in runner
     assert "--mount" not in runner
 
 
@@ -590,7 +595,7 @@ def test_computer_readiness_reports_ready(monkeypatch) -> None:
     assert report["message"] == manage.READY_MESSAGE
 
 
-def test_guide_prints_copy_pasteable_bootstrap_and_does_not_auto_start(monkeypatch) -> None:
+def test_guide_starts_container_without_a_tty(monkeypatch) -> None:
     printed: list[str] = []
     monkeypatch.setattr(
         manage,
@@ -602,16 +607,21 @@ def test_guide_prints_copy_pasteable_bootstrap_and_does_not_auto_start(monkeypat
         },
     )
     monkeypatch.setattr(manage.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setitem(
+        sys.modules,
+        "_computer_runtime",
+        type("Runtime", (), {"wake_desktop_container": staticmethod(lambda: "started")})(),
+    )
 
     def fail_install() -> None:
-        raise AssertionError("guide must not bootstrap without a confirmed TTY")
+        raise AssertionError("guide must wake the container instead of a TTY prompt")
 
     monkeypatch.setattr(manage, "install", fail_install)
 
     state = manage.guide_computer(offer_bootstrap=True, printer=printed.append)
 
-    assert state == "container-absent"
-    assert any("manage-computer.sh bootstrap" in line for line in printed)
+    assert state == "starting"
+    assert any("background" in line.lower() for line in printed)
 
 
 def test_guide_prints_docker_desktop_copy_on_macos(monkeypatch) -> None:
@@ -833,7 +843,27 @@ def test_run_container_passes_user_on_linux(tmp_path, monkeypatch) -> None:
     assert "1000:1000" in captured["args"]
 
 
+def test_computer_readiness_ignores_host_desktop_without_opt_in(monkeypatch) -> None:
+    monkeypatch.setattr(manage, "host_desktop_opt_in", lambda: False)
+    monkeypatch.setattr(manage, "engine_binaries", lambda: [])
+    monkeypatch.setattr(manage, "container_running", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        manage, "configured_computer_target", lambda: "tcp://127.0.0.1:5900"
+    )
+    monkeypatch.setattr(
+        manage,
+        "rfb_port_open",
+        lambda host=manage.RFB_HOST, port=manage.RFB_PORT: host == "127.0.0.1" and port == 5900,
+    )
+
+    report = manage.computer_readiness()
+
+    assert report["state"] != "ready"
+    assert "already configured" not in report["message"]
+
+
 def test_computer_readiness_treats_working_opt_in_desktop_as_ready(monkeypatch) -> None:
+    monkeypatch.setattr(manage, "host_desktop_opt_in", lambda: True)
     monkeypatch.setattr(manage, "engine_binaries", lambda: [])
     monkeypatch.setattr(manage, "container_running", lambda *args, **kwargs: False)
     monkeypatch.setattr(
@@ -853,6 +883,7 @@ def test_computer_readiness_treats_working_opt_in_desktop_as_ready(monkeypatch) 
 
 
 def test_computer_readiness_keeps_opt_in_host_desktop_on_macos(monkeypatch) -> None:
+    monkeypatch.setattr(manage, "host_desktop_opt_in", lambda: True)
     monkeypatch.setattr(manage, "engine_binaries", lambda: [])
     monkeypatch.setattr(manage, "container_running", lambda *args, **kwargs: False)
     monkeypatch.setattr(
@@ -890,6 +921,54 @@ def test_container_exec_args_point_at_the_container_desktop() -> None:
     assert "XAUTHORITY=/home/fetch/.Xauthority" in args
     assert manage.CONTAINER_NAME in args
     assert args[-1] == "xdpyinfo"
+
+
+def test_pin_and_start_display_starts_allocated_screen(tmp_path, monkeypatch) -> None:
+    started: list[int] = []
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_PROFILE", "researcher")
+    monkeypatch.setattr(manage, "container_running", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        manage,
+        "ensure_display",
+        lambda engine, display_num, **kwargs: started.append(display_num) or True,
+    )
+
+    first = manage.pin_and_start_display("docker", profile="researcher")
+    second = manage.pin_and_start_display("docker", profile="signal-monitor")
+
+    assert first == 1
+    assert second == 2
+    assert started == [1, 2]
+
+
+def test_profile_exec_args_bind_non_default_display(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(manage, "container_running", lambda *args, **kwargs: False)
+    manage.allocate_display("default")
+
+    args = manage.profile_exec_args("docker", "cua-driver", "call", profile="writer")
+
+    assert "DISPLAY=:2" in args
+    assert args[-2:] == ["cua-driver", "call"]
+
+
+def test_start_profile_displays_covers_hermes_bots(tmp_path, monkeypatch) -> None:
+    started: list[int] = []
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "profiles" / "researcher").mkdir(parents=True)
+    (tmp_path / "profiles" / "writer").mkdir()
+    monkeypatch.setattr(manage, "container_running", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        manage,
+        "ensure_display",
+        lambda engine, display_num, **kwargs: started.append(display_num) or True,
+    )
+
+    displays = manage.start_profile_displays("docker")
+
+    assert 1 in displays
+    assert len(started) >= 2
 
 
 def test_status_is_ready_on_macos(monkeypatch, capsys) -> None:

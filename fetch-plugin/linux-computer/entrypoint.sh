@@ -196,6 +196,22 @@ paint_wallpaper() {
 ) &
 wallpaper_pid=$!
 
+# Extra bot desktops (DISPLAY=:N) persist in ~/desktops/wanted so a container
+# restart brings them back. :1 is this entrypoint's own VNC.
+wanted_file="${HOME}/desktops/wanted"
+mkdir -p "$(dirname -- "$wanted_file")"
+if [[ ! -f "$wanted_file" ]] || ! grep -qx "$display_number" "$wanted_file" 2>/dev/null; then
+  printf '%s\n' "$display_number" >>"$wanted_file"
+fi
+if [[ -x /usr/local/bin/fetch-start-display && -f "$wanted_file" ]]; then
+  while read -r extra_num; do
+    [[ "$extra_num" =~ ^[0-9]+$ ]] || continue
+    [[ "$extra_num" -eq "$display_number" ]] && continue
+    FETCH_VNC_LOCALHOST="${FETCH_VNC_LOCALHOST:-0}" \
+      /usr/local/bin/fetch-start-display ":${extra_num}" &
+  done <"$wanted_file"
+fi
+
 while kill -0 "$vnc_pid" 2>/dev/null && kill -0 "$desktop_pid" 2>/dev/null; do
   sleep 2
 done

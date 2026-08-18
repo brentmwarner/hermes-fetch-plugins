@@ -13,6 +13,21 @@ import sys
 import time
 from pathlib import Path
 
+_PLUGIN_DIR = Path(__file__).resolve().parent.parent
+if str(_PLUGIN_DIR) not in sys.path:
+    sys.path.insert(0, str(_PLUGIN_DIR))
+
+from _computer_displays import (  # noqa: E402
+    FIRST_DISPLAY,
+    MAX_DISPLAYS,
+    allocate_display,
+    computer_target_for,
+    display_name,
+    hermes_profile_names,
+    host_desktop_opt_in,
+    vnc_port_for,
+)
+
 CONTAINER_NAME = "fetch-computer"
 IMAGE_NAME = "fetch-computer:local"
 ENGINE = "docker"
@@ -25,7 +40,9 @@ KIND = "Virtual Linux desktop"
 NAME = "Fetch computer"
 TARGET_ENV = "HERMES_FETCH_COMPUTER_TARGET"
 CONTAINER_XAUTHORITY = "/home/fetch/.Xauthority"
+START_DISPLAY = "/usr/local/bin/fetch-start-display"
 READY_MESSAGE = "Fetch computer is ready. Fetch Watch can use this desktop."
+DOCKER_DESKTOP_WAIT_SECONDS = 90.0
 
 
 class ComputerError(RuntimeError):
@@ -140,6 +157,52 @@ def engine_daemon_ready(engine: str, *, timeout: float = 8.0) -> bool:
     return result.returncode == 0
 
 
+def _docker_desktop_launch_args(*, platform: str | None = None) -> list[str] | None:
+    if is_macos_host(platform):
+        return ["open", "-a", "Docker"]
+    if is_windows_host(platform):
+        return [
+            "cmd",
+            "/c",
+            "start",
+            "",
+            r"C:\Program Files\Docker\Docker\Docker Desktop.exe",
+        ]
+    return None
+
+
+def try_start_engine(*, platform: str | None = None, wait_seconds: float = 90.0) -> bool:
+    """Launch Docker Desktop when it is installed but stopped, then wait.
+
+    Watch already shows “Booting up desktop”; this must not prompt on a TTY.
+    """
+
+    if not engine_binaries() or docker_looks_like_podman(ENGINE):
+        return False
+    if engine_daemon_ready(ENGINE):
+        return True
+    launch = _docker_desktop_launch_args(platform=platform)
+    if launch:
+        try:
+            subprocess.Popen(
+                launch,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                close_fds=True,
+            )
+        except OSError:
+            pass
+    deadline = time.monotonic() + max(0.0, wait_seconds)
+    while True:
+        if engine_daemon_ready(ENGINE):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(2.0)
+
+
 def bootstrap_command(*, platform: str | None = None) -> str:
     if is_windows_host(platform):
         return f'python "{image_dir() / "manage.py"}" bootstrap'
@@ -198,22 +261,24 @@ def engine_install_steps(*, platform: str | None = None) -> str:
 def engine_missing_instructions(*, platform: str | None = None) -> str:
     return (
         "Fetch computer setup requires Docker. "
-        "Install Docker, start it, then bootstrap once.\n"
+        "Install Docker and start it. Fetch starts the Ubuntu desktop "
+        "automatically after that — no extra bootstrap command.\n"
         "\n"
         f"{engine_install_steps(platform=platform)}"
         "\n"
-        f"  Then run:\n    {bootstrap_command(platform=platform)}"
+        f"  If Watch still cannot connect, run:\n    {bootstrap_command(platform=platform)}"
     )
 
 
 def engine_shim_instructions(*, platform: str | None = None) -> str:
     return (
         "Fetch computer setup requires real Docker, not Podman or podman-docker. "
-        "Install Docker, start it, then bootstrap once.\n"
+        "Install Docker and start it. Fetch starts the Ubuntu desktop "
+        "automatically after that.\n"
         "\n"
         f"{engine_install_steps(platform=platform)}"
         "\n"
-        f"  Then run:\n    {bootstrap_command(platform=platform)}"
+        f"  If Watch still cannot connect, run:\n    {bootstrap_command(platform=platform)}"
     )
 
 
@@ -236,16 +301,19 @@ def engine_not_running_instructions(*, platform: str | None = None) -> str:
         "\n"
         f"{start_step}"
         "\n"
-        f"  Then run:\n    {bootstrap_command(platform=platform)}"
+        "  Fetch will start the Ubuntu desktop once Docker is running.\n"
+        f"  If Watch still cannot connect, run:\n    {bootstrap_command(platform=platform)}"
     )
 
 
 def container_missing_instructions(*, platform: str | None = None) -> str:
     return (
-        "The Fetch computer container is not running. Start it once; after that "
-        "the engine restart policy (`unless-stopped`) brings it back automatically.\n"
+        "The Fetch computer container is not running. Fetch starts it in the "
+        "background when the plugin loads, pairing finishes, or Watch opens. "
+        "After the first start, the engine restart policy (`unless-stopped`) "
+        "brings it back automatically.\n"
         "\n"
-        f"  {bootstrap_command(platform=platform)}"
+        f"  If it never comes up, run:\n    {bootstrap_command(platform=platform)}"
     )
 
 
@@ -282,12 +350,14 @@ def rfb_down_instructions(*, platform: str | None = None) -> str:
     )
 
 
-def detect_engine(*, platform: str | None = None) -> str:
+def detect_engine(*, platform: str | None = None, wait_seconds: float = 0.0) -> str:
     if not engine_binaries():
         raise ComputerError(engine_missing_instructions(platform=platform))
     if docker_looks_like_podman(ENGINE):
         raise ComputerError(engine_shim_instructions(platform=platform))
     if not engine_daemon_ready(ENGINE):
+        if wait_seconds > 0 and try_start_engine(platform=platform, wait_seconds=wait_seconds):
+            return ENGINE
         raise ComputerError(engine_not_running_instructions(platform=platform))
     return ENGINE
 
@@ -336,8 +406,6 @@ def container_run_args(
         args.extend(["--user", f"{uid}:{gid}"])
     args.extend(
         [
-            "-p",
-            f"{RFB_HOST}:{RFB_PORT}:{RFB_PORT}",
             "-e",
             "FETCH_VNC_LOCALHOST=0",
             "-e",
@@ -352,6 +420,9 @@ def container_run_args(
             f"{home_dir}:/home/fetch",
         ]
     )
+    for display_num in range(FIRST_DISPLAY, MAX_DISPLAYS + 1):
+        port = vnc_port_for(display_num)
+        args.extend(["-p", f"{RFB_HOST}:{port}:{port}"])
     args.append(image)
     return reject_non_loopback_publish(args)
 
@@ -445,9 +516,12 @@ def existing_loopback_desktop_ready() -> bool:
 
     Mac Screen Sharing, Windows UltraVNC, linux-desktop, and linux-vps persist a
     loopback target. Leave those setups alone so bootstrap does not clobber them.
-    New hosts with no target default to the fetch-computer container.
+    Without HERMES_FETCH_COMPUTER_HOST_OPT_IN, Fetch uses the container instead
+    of a previously configured host VNC on 5900.
     """
 
+    if not host_desktop_opt_in():
+        return False
     target = configured_computer_target()
     if not target:
         return False
@@ -462,17 +536,103 @@ def container_exec_args(
     engine: str,
     *command: str,
     name: str = CONTAINER_NAME,
+    display_num: int | None = None,
 ) -> list[str]:
+    n = FIRST_DISPLAY if display_num is None else int(display_num)
     return [
         engine,
         "exec",
         "-e",
-        f"DISPLAY={DISPLAY_NAME}",
+        f"DISPLAY={display_name(n)}",
         "-e",
         f"XAUTHORITY={CONTAINER_XAUTHORITY}",
         name,
         *command,
     ]
+
+
+def pin_and_start_display(
+    engine: str | None = None,
+    *,
+    profile: str | None = None,
+    name: str = CONTAINER_NAME,
+) -> int:
+    """Allocate DISPLAY=:N for this Hermes profile and start that screen."""
+
+    display_num = allocate_display(profile)
+    engine = engine or ENGINE
+    if container_running(engine, name):
+        ensure_display(engine, display_num, name=name)
+    return display_num
+
+
+def profile_exec_args(
+    engine: str,
+    *command: str,
+    name: str = CONTAINER_NAME,
+    profile: str | None = None,
+) -> list[str]:
+    """docker exec bound to this Hermes profile's DISPLAY=:N."""
+
+    return container_exec_args(
+        engine,
+        *command,
+        name=name,
+        display_num=pin_and_start_display(engine, profile=profile, name=name),
+    )
+
+
+def ensure_display(
+    engine: str,
+    display_num: int,
+    *,
+    name: str = CONTAINER_NAME,
+    timeout: float = 60.0,
+) -> bool:
+    """Start DISPLAY=:N inside the running container (VNC + desktop session)."""
+
+    if display_num < FIRST_DISPLAY or display_num > MAX_DISPLAYS:
+        raise ComputerError(
+            f"Fetch computer display must be {FIRST_DISPLAY}–{MAX_DISPLAYS}."
+        )
+    try:
+        result = subprocess.run(
+            [
+                engine,
+                "exec",
+                "-e",
+                f"FETCH_RFB_PORT={vnc_port_for(display_num)}",
+                "-e",
+                f"FETCH_VNC_LOCALHOST=0",
+                "-e",
+                f"FETCH_GEOMETRY={GEOMETRY}",
+                "-e",
+                f"XAUTHORITY={CONTAINER_XAUTHORITY}",
+                name,
+                START_DISPLAY,
+                display_name(display_num),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def start_profile_displays(engine: str, *, name: str = CONTAINER_NAME) -> list[int]:
+    """Pin current Hermes profiles to DISPLAY=:N and start those screens."""
+
+    started: list[int] = []
+    for profile in hermes_profile_names():
+        display_num = pin_and_start_display(engine, profile=profile, name=name)
+        if display_num not in started:
+            started.append(display_num)
+    if FIRST_DISPLAY not in started:
+        started.append(pin_and_start_display(engine, profile="default", name=name))
+    return started
 
 
 def desktop_client_can_open(engine: str, name: str = CONTAINER_NAME) -> bool:
@@ -570,22 +730,31 @@ def computer_readiness(*, platform: str | None = None) -> dict[str, str]:
 
 
 def guide_computer(*, offer_bootstrap: bool = True, printer=print) -> str:
-    """Print copy-pasteable next steps and optionally start the container."""
+    """Print next steps and start the container without a TTY yes/no prompt."""
 
     report = computer_readiness()
-    if report["state"] == "configured":
+    if report["state"] in {"ready", "configured"}:
+        if report.get("message"):
+            printer(report["message"])
         return report["state"]
-    printer(report["message"])
-    if report["state"] != "container-absent" or not offer_bootstrap:
+    if report["state"] in {"engine-missing", "engine-shim", "extra-container"}:
+        printer(report["message"])
         return report["state"]
-    if not sys.stdin.isatty():
+    if not offer_bootstrap:
+        printer(report["message"])
         return report["state"]
+    printer("Starting the Fetch Ubuntu desktop in the background.")
+    if report.get("message"):
+        printer(report["message"])
     try:
-        from hermes_cli.cli_output import prompt_yes_no
+        from _computer_runtime import wake_desktop_container
+
+        state = wake_desktop_container()
     except Exception:
-        return report["state"]
-    if not prompt_yes_no("Start the Fetch computer container now?", True):
-        return report["state"]
+        state = "failed"
+    if state in {"started", "already-waking"}:
+        printer("Fetch Watch can connect once Docker finishes booting the container.")
+        return "starting"
     try:
         install()
     except ComputerError as exc:
@@ -654,6 +823,12 @@ def container_needs_recreate(engine: str, name: str = CONTAINER_NAME) -> bool:
         [engine, "inspect", "-f", "{{.Id}}", IMAGE_NAME]
     ).strip()
     if image_id and current_image_id and image_id != current_image_id:
+        return True
+    bindings = _command_text(
+        [engine, "inspect", "-f", "{{json .HostConfig.PortBindings}}", name]
+    )
+    last_port = vnc_port_for(MAX_DISPLAYS)
+    if f"{last_port}/tcp" not in bindings and f'"{last_port}"' not in bindings:
         return True
     return False
 
@@ -754,7 +929,7 @@ def _computer_setup_command(*, check_only: bool, wait_seconds: float) -> list[st
         sys.executable,
         str(plugin_dir() / "computer_setup.py"),
         "--target",
-        TARGET,
+        computer_target_for(FIRST_DISPLAY),
         "--kind",
         KIND,
         "--name",
@@ -780,10 +955,11 @@ def _run_computer_setup(*, check_only: bool, wait_seconds: float) -> None:
 
 
 def install(*, wait_seconds: float = 90.0) -> None:
-    engine = detect_engine()
+    engine = detect_engine(wait_seconds=max(wait_seconds, DOCKER_DESKTOP_WAIT_SECONDS))
     build_image(engine)
     run_container(engine)
     wait_for_container_desktop(engine, wait_seconds=wait_seconds)
+    start_profile_displays(engine)
     _run_computer_setup(check_only=False, wait_seconds=wait_seconds)
 
 

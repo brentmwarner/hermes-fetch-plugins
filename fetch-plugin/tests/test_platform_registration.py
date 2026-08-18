@@ -201,6 +201,37 @@ def test_register_stays_quiet_when_computer_is_ready(monkeypatch, capsys):
     assert "requires Docker" not in err
 
 
+def test_register_starts_isolated_desktops(monkeypatch, tmp_path):
+    fetch = _load_module(
+        "fetch_plugin_isolated_desktop_register_test",
+        FETCH_PLUGIN_DIR / "__init__.py",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("HERMES_FETCH_COMPUTER_DISABLE_AUTOSTART", raising=False)
+    monkeypatch.setattr(fetch, "_spawn_tunnel", lambda: None)
+    monkeypatch.setattr(
+        fetch._pairing,
+        "_linux_computer_module",
+        lambda: types.SimpleNamespace(
+            computer_readiness=lambda: {"state": "starting", "message": ""}
+        ),
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        fetch._computer_runtime,
+        "ensure_isolated_desktops",
+        lambda: calls.append("ensure") or "started",
+    )
+    ctx = types.SimpleNamespace(
+        register_hook=lambda *args, **kwargs: None,
+        register_platform=lambda **kwargs: None,
+    )
+
+    fetch.register(ctx)
+
+    assert calls == ["ensure"]
+
+
 def test_fetch_cards_skill_never_overwrites_custom_skill(tmp_path, monkeypatch):
     fetch = _load_module("fetch_plugin_skill_install_test", FETCH_PLUGIN_DIR / "__init__.py")
     target = tmp_path / "skills" / "fetch-cards"
