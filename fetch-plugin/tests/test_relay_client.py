@@ -13,6 +13,43 @@ sys.modules[_spec.name] = relay
 _spec.loader.exec_module(relay)
 
 
+
+def test_agent_identity_prefers_explicit_assignee(monkeypatch):
+    monkeypatch.setenv("HERMES_PROFILE", "chief-of-staff")
+    data = relay._with_agent_identity(
+        session_id="inbox_researcher",
+        data={"assignee": "code_reviewer"},
+    )
+    assert data["agent_id"] == "code_reviewer"
+    assert data["agent_name"] == "Code Reviewer"
+
+
+def test_agent_identity_comes_from_gateway_session_key(monkeypatch):
+    monkeypatch.delenv("HERMES_PROFILE", raising=False)
+    data = relay._with_agent_identity(
+        session_id="agent:chief-of-staff:fetch:private:123",
+        data=None,
+    )
+    assert data == {
+        "agent_id": "chief-of-staff",
+        "agent_name": "Chief Of Staff",
+    }
+
+
+def test_agent_identity_comes_from_per_agent_inbox_thread(monkeypatch):
+    monkeypatch.delenv("HERMES_PROFILE", raising=False)
+    data = relay._with_agent_identity(session_id="inbox_researcher", data=None)
+    assert data["agent_id"] == "researcher"
+    assert data["agent_name"] == "Researcher"
+
+
+def test_system_inbox_thread_falls_back_to_fetch(monkeypatch):
+    monkeypatch.delenv("HERMES_PROFILE", raising=False)
+    monkeypatch.setattr(relay, "_active_agent", lambda: "")
+    data = relay._with_agent_identity(session_id="inbox_cron-daily-brief", data=None)
+    assert data == {"agent_id": "default", "agent_name": "Fetch"}
+
+
 def test_hermes_home_honors_fetch_store_home(monkeypatch, tmp_path):
     """The relay client resolves credentials under HERMES_FETCH_STORE_HOME when
     set, so a proactive push fired under a worker profile still uses the
