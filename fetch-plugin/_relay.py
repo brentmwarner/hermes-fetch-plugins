@@ -55,7 +55,7 @@ def _known_profile_slugs(*, hermes_home: Path | None = None) -> set[str]:
     profiles_dir = _hermes_home(hermes_home) / "profiles"
     try:
         return {
-            entry.name
+            entry.name.strip().lower()
             for entry in profiles_dir.iterdir()
             if entry.is_dir() and not entry.name.startswith(".")
         }
@@ -88,7 +88,7 @@ def _agent_from_session(
     slug = _clean_agent_slug(raw.removeprefix("inbox_"))
     if _is_system_inbox_session(raw):
         return ""
-    if slug in _known_profile_slugs(hermes_home=hermes_home):
+    if slug.lower() in _known_profile_slugs(hermes_home=hermes_home):
         return slug
     return ""
 

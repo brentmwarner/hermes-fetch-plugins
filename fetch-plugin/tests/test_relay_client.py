@@ -44,6 +44,21 @@ def test_agent_identity_comes_from_per_agent_inbox_thread(monkeypatch):
     assert data["agent_name"] == "Researcher"
 
 
+def test_mixed_case_profile_dir_matches_lowercased_inbox_session(monkeypatch, tmp_path):
+    """Alias seeding uses the directory name as-is, but inbox sessions are always
+    lowercased by ``_slug_for_channel`` (Researcher → inbox_researcher)."""
+    monkeypatch.delenv("HERMES_PROFILE", raising=False)
+    (tmp_path / "profiles" / "Researcher").mkdir(parents=True)
+    monkeypatch.setattr(relay, "_active_agent", lambda: "chief-of-staff")
+    data = relay._with_agent_identity(
+        session_id="inbox_researcher",
+        data=None,
+        hermes_home=tmp_path,
+    )
+    assert data["agent_id"] == "researcher"
+    assert data["agent_name"] == "Researcher"
+
+
 def test_custom_inbox_channel_does_not_impersonate_agent(monkeypatch):
     """Named delivery channels (e.g. fetch:world-cup) are threads, not profiles."""
     monkeypatch.delenv("HERMES_PROFILE", raising=False)
