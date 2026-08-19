@@ -44,8 +44,7 @@ def test_agent_identity_comes_from_per_agent_inbox_thread(monkeypatch):
 
 
 def test_system_inbox_thread_falls_back_to_fetch(monkeypatch):
-    monkeypatch.delenv("HERMES_PROFILE", raising=False)
-    monkeypatch.setattr(relay, "_active_agent", lambda: "")
+    monkeypatch.setenv("HERMES_PROFILE", "chief-of-staff")
     data = relay._with_agent_identity(session_id="inbox_cron-daily-brief", data=None)
     assert data == {"agent_id": "default", "agent_name": "Fetch"}
 

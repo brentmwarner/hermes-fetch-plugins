@@ -58,7 +58,7 @@ def _agent_from_session(session_id: str | None) -> str:
         return ""
     slug = _clean_agent_slug(raw.removeprefix("inbox_"))
     if slug in _SYSTEM_INBOX_AGENT_SLUGS or slug.startswith(("cron-", "thread-")):
-        return ""
+        return "default"
     return slug
 
 
