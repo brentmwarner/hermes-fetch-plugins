@@ -23,8 +23,14 @@ RUN apt-get update \
         x11-utils \
         x11-xserver-utils \
         xauth \
+        xdotool \
         xfce4 \
         xfce4-terminal \
+        at-spi2-core \
+        at-spi2-atk \
+        libatk-adaptor \
+        libxtst6 \
+        python3 \
     && rm -f \
         /etc/xdg/autostart/light-locker.desktop \
         /etc/xdg/autostart/xscreensaver.desktop \
@@ -61,6 +67,7 @@ COPY branding/wallpaper.png /usr/share/fetch/wallpaper.png
 COPY branding/fetch_logo.svg /usr/share/fetch/fetch_logo.svg
 COPY xfce-config/ /usr/share/fetch/skel/config/
 COPY entrypoint.sh /usr/local/bin/fetch-computer-entrypoint
+COPY start-display.sh /usr/local/bin/fetch-start-display
 
 # Official Fetch F-mark is monochrome black. Recolor to near-white and rasterize
 # for the XFCE panel; keep the SVG path geometry unchanged.
@@ -70,6 +77,7 @@ RUN sed 's/fill="black"/fill="#f7f7f8"/g' /usr/share/fetch/fetch_logo.svg \
       -o /usr/share/fetch/fetch_logo.png \
     && rm -f /tmp/fetch_logo_white.svg \
     && chmod 0755 /usr/local/bin/fetch-computer-entrypoint \
+      /usr/local/bin/fetch-start-display \
     && chmod 0644 /usr/share/fetch/wallpaper.png \
       /usr/share/fetch/fetch_logo.svg \
       /usr/share/fetch/fetch_logo.png \
@@ -86,6 +94,23 @@ RUN sed 's/fill="black"/fill="#f7f7f8"/g' /usr/share/fetch/fetch_logo.svg \
            > /usr/local/bin/fetch-chrome; \
        fi \
     && chmod 0755 /usr/local/bin/fetch-chrome
+
+# Linux cua-driver lives in this image. The host Mac CuaDriver.app cannot
+# drive Ubuntu DISPLAY=:N; computer_use docker-execs this binary instead.
+RUN curl -fsSL \
+      https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.sh \
+      -o /tmp/cua-install.sh \
+    && chmod 0755 /tmp/cua-install.sh \
+    && /bin/bash /tmp/cua-install.sh \
+    && rm -f /tmp/cua-install.sh \
+    && if [ -x /root/.local/bin/cua-driver ]; then \
+         cp /root/.local/bin/cua-driver /usr/local/bin/cua-driver \
+         && chmod 0755 /usr/local/bin/cua-driver; \
+       elif [ -x /home/fetch/.local/bin/cua-driver ]; then \
+         cp /home/fetch/.local/bin/cua-driver /usr/local/bin/cua-driver \
+         && chmod 0755 /usr/local/bin/cua-driver; \
+       fi \
+    && command -v cua-driver
 
 USER fetch
 WORKDIR /home/fetch

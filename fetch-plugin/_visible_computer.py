@@ -10,10 +10,19 @@ module gives the Fetch plugin a narrow tool around that verified primitive.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import shutil
 import subprocess
+import sys
+from pathlib import Path
 from typing import Any
+
+_PLUGIN_DIR = Path(__file__).resolve().parent
+if str(_PLUGIN_DIR) not in sys.path:
+    sys.path.insert(0, str(_PLUGIN_DIR))
+
+from _computer_displays import host_desktop_opt_in  # noqa: E402
 
 
 FETCH_WINDOW_CONTROL_SCHEMA = {
@@ -63,23 +72,61 @@ FETCH_WINDOW_CONTROL_SCHEMA = {
 
 
 def check_requirements() -> bool:
-    """Return whether the public cua-driver dependency is installed."""
-    return shutil.which("cua-driver") is not None
+    """Return whether this host can drive the streamed Fetch desktop."""
+    if host_desktop_opt_in():
+        return shutil.which("cua-driver") is not None
+    return shutil.which("docker") is not None
+
+
+def _load_computer_manager():
+    existing = sys.modules.get("fetch_plugin_linux_computer")
+    if existing is not None:
+        return existing
+    path = Path(__file__).resolve().parent / "linux-computer" / "manage.py"
+    spec = importlib.util.spec_from_file_location("fetch_plugin_linux_computer", path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _driver_command(tool_name: str, payload: str) -> list[str] | None:
+    """cua-driver argv bound to this profile's Ubuntu DISPLAY=:N."""
+
+    if host_desktop_opt_in():
+        binary = shutil.which("cua-driver")
+        if binary is None:
+            return None
+        return [binary, "call", tool_name, payload]
+    manager = _load_computer_manager()
+    if manager is None:
+        return None
+    return manager.profile_exec_args(
+        "docker",
+        "cua-driver",
+        "call",
+        tool_name,
+        payload,
+    )
 
 
 def _driver_call(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
-    binary = shutil.which("cua-driver")
-    if binary is None:
+    payload = json.dumps(args, separators=(",", ":"))
+    command = _driver_command(tool_name, payload)
+    if command is None:
         return {
             "error": (
-                "cua-driver is unavailable. Run `hermes computer-use install` "
-                "on this Hermes host."
+                "cua-driver is unavailable. Fetch drives the Ubuntu container "
+                "via docker exec; install Docker, or run "
+                "`hermes computer-use install` for an opt-in host desktop."
             )
         }
 
     try:
         completed = subprocess.run(
-            [binary, "call", tool_name, json.dumps(args, separators=(",", ":"))],
+            command,
             capture_output=True,
             check=False,
             text=True,

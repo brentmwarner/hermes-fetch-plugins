@@ -128,6 +128,7 @@ def test_linux_run_args_publish_loopback_and_never_share_host_x11() -> None:
     assert "FETCH_GEOMETRY=1280x800" in args
     assert "-p" in args
     assert f"{manage.RFB_HOST}:{manage.RFB_PORT}:{manage.RFB_PORT}" in args
+    assert f"{manage.RFB_HOST}:5916:5916" in args
     assert "0.0.0.0" not in " ".join(args)
     assert "/tmp/.X11-unix" not in " ".join(args)
     assert ".Xauthority" not in " ".join(args)
@@ -250,6 +251,10 @@ def test_manager_does_not_install_host_xfce() -> None:
     assert "requires Docker" in text
     assert "apt-get install -y docker.io" in text
     assert "dnf install -y moby-engine" in text
+    assert "Docker Desktop for Mac" in text
+    assert "Docker Desktop for Windows" in text
+    assert "Linux-only" not in text
+    assert "not-linux" not in text
     assert "subprocess.run([\"apt" not in text
     assert "subprocess.run([\"dnf" not in text
 
@@ -272,6 +277,9 @@ def test_image_keeps_branded_wallpaper_and_loopback_vnc() -> None:
     assert "xfce4" in dockerfile
     assert "EXPOSE" not in dockerfile
     assert "if [ -x /usr/bin/google-chrome ]" in dockerfile
+    assert "libs/cua-driver/scripts/install.sh" in dockerfile
+    assert "command -v cua-driver" in dockerfile
+    assert "at-spi2-core" in dockerfile
     assert 'exec /usr/bin/epiphany "$@"' in dockerfile
     assert "1280x800" in entrypoint
     assert "1920x1080" not in entrypoint
@@ -293,10 +301,11 @@ def test_image_keeps_branded_wallpaper_and_loopback_vnc() -> None:
     assert "0.0.0.0" not in compose_code
     assert "docker exec" in runner
     assert "fetch-computer" in runner
-    assert 'DISPLAY=":1"' in runner
+    assert "pin_and_start_display" in runner
+    assert 'DISPLAY="${display}"' in runner
     assert 'XAUTHORITY="/home/fetch/.Xauthority"' in runner
     assert "${DISPLAY" not in runner
-    assert "-v" not in runner
+    assert "-v /tmp/.X11-unix" not in runner
     assert "--mount" not in runner
 
 
@@ -375,17 +384,20 @@ def test_image_brands_glass_panel_with_official_fetch_mark() -> None:
     assert "startxfce4" in entrypoint
 
 
-def test_readme_makes_the_container_the_default_linux_computer() -> None:
+def test_readme_makes_the_container_the_default_computer() -> None:
     readme = (PLUGIN_DIR / "README.md").read_text(encoding="utf-8")
 
     assert "linux-computer" in readme
     assert "install real Docker if needed" in readme
+    assert "Docker Desktop" in readme
     assert "Fedora Wayland" in readme
     assert "scrape the physical login session" in readme
     assert "Xorg" in readme
     assert "linux-desktop" in readme
     assert "Xcode and Simulator cannot run in Ubuntu" in readme
-    assert "optional extra" in readme
+    assert "optional extra" not in readme
+    assert "opt-in" in readme
+    assert "Linux, Mac, and Windows" in readme
     assert "linux-computer/branding/wallpaper.png" in readme
     assert "linux-computer/branding/fetch_logo.svg" in readme
     assert "1280×800" in readme or "1280x800" in readme
@@ -395,6 +407,7 @@ def test_readme_makes_the_container_the_default_linux_computer() -> None:
     assert "host networking" in readme
     assert "/tmp/.X11-unix" in readme
     assert "manage-computer.sh doctor" in readme
+    assert "agents to run in Docker containers" not in readme
 
 
 def test_bootstrap_command_points_at_the_installed_manager() -> None:
@@ -404,33 +417,64 @@ def test_bootstrap_command_points_at_the_installed_manager() -> None:
     assert str(PLUGIN_DIR / "linux-computer" / "manage-computer.sh") in command
 
 
-def test_computer_readiness_is_not_linux_on_macos() -> None:
-    report = manage.computer_readiness(platform="darwin")
-
-    assert report["state"] == "not-linux"
-    assert report["message"] == ""
-
-
-def test_computer_readiness_reports_engine_missing(monkeypatch) -> None:
-    monkeypatch.setattr(manage, "is_linux_computer_host", lambda platform=None: True)
+def _stub_missing_engine(monkeypatch) -> None:
     monkeypatch.setattr(manage, "engine_binaries", lambda: [])
     monkeypatch.setattr(manage, "existing_loopback_desktop_ready", lambda: False)
 
-    report = manage.computer_readiness()
+
+def _stub_engine_not_running(monkeypatch) -> None:
+    monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
+    monkeypatch.setattr(manage, "docker_looks_like_podman", lambda engine=manage.ENGINE: False)
+    monkeypatch.setattr(manage, "engine_daemon_ready", lambda _engine: False)
+    monkeypatch.setattr(manage, "existing_loopback_desktop_ready", lambda: False)
+
+
+def test_computer_readiness_is_not_gated_on_macos(monkeypatch) -> None:
+    _stub_missing_engine(monkeypatch)
+
+    report = manage.computer_readiness(platform="darwin")
+
+    assert report["state"] != "not-linux"
+    assert report["state"] == "engine-missing"
+    assert "Docker Desktop for Mac" in report["message"]
+    assert "systemctl" not in report["message"]
+    assert "docker.io" not in report["message"]
+    assert "moby-engine" not in report["message"]
+
+
+def test_computer_readiness_is_not_gated_on_windows(monkeypatch) -> None:
+    _stub_missing_engine(monkeypatch)
+
+    report = manage.computer_readiness(platform="win32")
+
+    assert report["state"] != "not-linux"
+    assert report["state"] == "engine-missing"
+    assert "Docker Desktop for Windows" in report["message"]
+    assert "systemctl" not in report["message"]
+    assert "docker.io" not in report["message"]
+    assert "python" in report["message"]
+    assert "manage.py" in report["message"]
+
+
+def test_computer_readiness_reports_engine_missing(monkeypatch) -> None:
+    _stub_missing_engine(monkeypatch)
+
+    report = manage.computer_readiness(platform="linux")
 
     assert report["state"] == "engine-missing"
     assert "sudo apt-get install -y docker.io" in report["message"]
     assert "sudo dnf install -y moby-engine" in report["message"]
+    assert "sudo systemctl enable --now docker" in report["message"]
     assert "manage-computer.sh bootstrap" in report["message"]
+    assert "Docker Desktop" not in report["message"]
 
 
 def test_computer_readiness_reports_engine_shim(monkeypatch) -> None:
-    monkeypatch.setattr(manage, "is_linux_computer_host", lambda platform=None: True)
     monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
     monkeypatch.setattr(manage, "docker_looks_like_podman", lambda engine=manage.ENGINE: True)
     monkeypatch.setattr(manage, "existing_loopback_desktop_ready", lambda: False)
 
-    report = manage.computer_readiness()
+    report = manage.computer_readiness(platform="linux")
 
     assert report["state"] == "engine-shim"
     assert "not Podman or podman-docker" in report["message"]
@@ -439,22 +483,54 @@ def test_computer_readiness_reports_engine_shim(monkeypatch) -> None:
     assert "manage-computer.sh bootstrap" in report["message"]
 
 
-def test_computer_readiness_reports_engine_not_running(monkeypatch) -> None:
-    monkeypatch.setattr(manage, "is_linux_computer_host", lambda platform=None: True)
+def test_computer_readiness_reports_engine_shim_on_macos(monkeypatch) -> None:
     monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
-    monkeypatch.setattr(manage, "docker_looks_like_podman", lambda engine=manage.ENGINE: False)
-    monkeypatch.setattr(manage, "engine_daemon_ready", lambda _engine: False)
+    monkeypatch.setattr(manage, "docker_looks_like_podman", lambda engine=manage.ENGINE: True)
     monkeypatch.setattr(manage, "existing_loopback_desktop_ready", lambda: False)
 
-    report = manage.computer_readiness()
+    report = manage.computer_readiness(platform="darwin")
+
+    assert report["state"] == "engine-shim"
+    assert "not Podman or podman-docker" in report["message"]
+    assert "Docker Desktop for Mac" in report["message"]
+    assert "systemctl" not in report["message"]
+
+
+def test_computer_readiness_reports_engine_not_running(monkeypatch) -> None:
+    _stub_engine_not_running(monkeypatch)
+
+    report = manage.computer_readiness(platform="linux")
 
     assert report["state"] == "engine-not-running"
     assert "sudo systemctl start docker" in report["message"]
     assert "manage-computer.sh bootstrap" in report["message"]
+    assert "Docker Desktop" not in report["message"]
+
+
+def test_computer_readiness_reports_engine_not_running_on_macos(monkeypatch) -> None:
+    _stub_engine_not_running(monkeypatch)
+
+    report = manage.computer_readiness(platform="darwin")
+
+    assert report["state"] == "engine-not-running"
+    assert "Open Docker Desktop" in report["message"]
+    assert "docker info" in report["message"]
+    assert "systemctl" not in report["message"]
+
+
+def test_computer_readiness_reports_engine_not_running_on_windows(monkeypatch) -> None:
+    _stub_engine_not_running(monkeypatch)
+
+    report = manage.computer_readiness(platform="win32")
+
+    assert report["state"] == "engine-not-running"
+    assert "Start Docker Desktop" in report["message"]
+    assert "docker info" in report["message"]
+    assert "systemctl" not in report["message"]
+    assert "python" in report["message"]
 
 
 def test_computer_readiness_reports_container_absent(monkeypatch) -> None:
-    monkeypatch.setattr(manage, "is_linux_computer_host", lambda platform=None: True)
     monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
     monkeypatch.setattr(manage, "docker_looks_like_podman", lambda engine=manage.ENGINE: False)
     monkeypatch.setattr(manage, "engine_daemon_ready", lambda engine: engine == "docker")
@@ -471,7 +547,6 @@ def test_computer_readiness_reports_container_absent(monkeypatch) -> None:
 
 
 def test_computer_readiness_requires_rfb_and_matching_xauthority(monkeypatch) -> None:
-    monkeypatch.setattr(manage, "is_linux_computer_host", lambda platform=None: True)
     monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
     monkeypatch.setattr(manage, "docker_looks_like_podman", lambda engine=manage.ENGINE: False)
     monkeypatch.setattr(manage, "engine_daemon_ready", lambda engine: engine == "docker")
@@ -489,7 +564,6 @@ def test_computer_readiness_requires_rfb_and_matching_xauthority(monkeypatch) ->
 
 
 def test_computer_readiness_reports_desktop_unhealthy(monkeypatch) -> None:
-    monkeypatch.setattr(manage, "is_linux_computer_host", lambda platform=None: True)
     monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
     monkeypatch.setattr(manage, "docker_looks_like_podman", lambda engine=manage.ENGINE: False)
     monkeypatch.setattr(manage, "engine_daemon_ready", lambda engine: engine == "docker")
@@ -507,7 +581,6 @@ def test_computer_readiness_reports_desktop_unhealthy(monkeypatch) -> None:
 
 
 def test_computer_readiness_reports_ready(monkeypatch) -> None:
-    monkeypatch.setattr(manage, "is_linux_computer_host", lambda platform=None: True)
     monkeypatch.setattr(manage, "engine_binaries", lambda: ["docker"])
     monkeypatch.setattr(manage, "docker_looks_like_podman", lambda engine=manage.ENGINE: False)
     monkeypatch.setattr(manage, "engine_daemon_ready", lambda engine: engine == "docker")
@@ -516,13 +589,13 @@ def test_computer_readiness_reports_ready(monkeypatch) -> None:
     monkeypatch.setattr(manage, "rfb_port_open", lambda *args, **kwargs: True)
     monkeypatch.setattr(manage, "desktop_client_can_open", lambda engine, name=manage.CONTAINER_NAME: True)
 
-    report = manage.computer_readiness()
+    report = manage.computer_readiness(platform="darwin")
 
     assert report["state"] == "ready"
     assert report["message"] == manage.READY_MESSAGE
 
 
-def test_guide_prints_copy_pasteable_bootstrap_and_does_not_auto_start(monkeypatch) -> None:
+def test_guide_starts_container_without_a_tty(monkeypatch) -> None:
     printed: list[str] = []
     monkeypatch.setattr(
         manage,
@@ -534,26 +607,39 @@ def test_guide_prints_copy_pasteable_bootstrap_and_does_not_auto_start(monkeypat
         },
     )
     monkeypatch.setattr(manage.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setitem(
+        sys.modules,
+        "_computer_runtime",
+        type("Runtime", (), {"wake_desktop_container": staticmethod(lambda: "started")})(),
+    )
 
     def fail_install() -> None:
-        raise AssertionError("guide must not bootstrap without a confirmed TTY")
+        raise AssertionError("guide must wake the container instead of a TTY prompt")
 
     monkeypatch.setattr(manage, "install", fail_install)
 
-    state = manage.guide_linux_computer(offer_bootstrap=True, printer=printed.append)
+    state = manage.guide_computer(offer_bootstrap=True, printer=printed.append)
 
-    assert state == "container-absent"
-    assert any("manage-computer.sh bootstrap" in line for line in printed)
+    assert state == "starting"
+    assert any("background" in line.lower() for line in printed)
 
 
-def test_guide_is_silent_when_not_linux(monkeypatch) -> None:
+def test_guide_prints_docker_desktop_copy_on_macos(monkeypatch) -> None:
     printed: list[str] = []
     monkeypatch.setattr(
-        manage, "computer_readiness", lambda: {"state": "not-linux", "message": ""}
+        manage,
+        "computer_readiness",
+        lambda: {
+            "state": "engine-missing",
+            "message": manage.engine_missing_instructions(platform="darwin"),
+        },
     )
 
-    assert manage.guide_linux_computer(printer=printed.append) == "not-linux"
-    assert printed == []
+    state = manage.guide_computer(offer_bootstrap=True, printer=printed.append)
+
+    assert state == "engine-missing"
+    assert any("Docker Desktop for Mac" in line for line in printed)
+    assert not any("systemctl" in line for line in printed)
 
 
 def test_compose_sets_grok_bot_geometry() -> None:
@@ -685,8 +771,99 @@ def test_run_container_omits_user_when_ids_unavailable(tmp_path, monkeypatch) ->
     assert "--network" not in captured["args"]
 
 
+def test_run_container_omits_user_and_selinux_on_docker_desktop(tmp_path, monkeypatch) -> None:
+    captured: dict[str, list[str]] = {}
+    monkeypatch.setattr(manage.sys, "platform", "darwin")
+    monkeypatch.setattr(manage, "runtime_dir", lambda: tmp_path)
+    monkeypatch.setattr(manage, "container_home_dir", lambda: tmp_path / "home")
+    monkeypatch.setattr(manage, "extra_computer_containers", lambda _engine: [])
+    monkeypatch.setattr(manage, "container_exists", lambda _engine: False)
+    monkeypatch.setattr(manage, "container_running", lambda _engine, name=manage.CONTAINER_NAME: False)
+    monkeypatch.setattr(manage, "rfb_port_open", lambda *args, **kwargs: False)
+    monkeypatch.setattr(manage, "host_user_ids", lambda: (501, 20))
+    monkeypatch.setattr(manage, "selinux_enforcing", lambda: True)
+
+    def fake_run(args, **_kwargs):
+        captured["args"] = list(args)
+        return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(manage.subprocess, "run", fake_run)
+
+    manage.run_container("docker")
+
+    assert "--user" not in captured["args"]
+    assert "label=disable" not in captured["args"]
+    assert "/tmp/.X11-unix" not in captured["args"]
+
+
+def test_run_container_omits_user_on_windows(tmp_path, monkeypatch) -> None:
+    captured: dict[str, list[str]] = {}
+    monkeypatch.setattr(manage.sys, "platform", "win32")
+    monkeypatch.setattr(manage, "runtime_dir", lambda: tmp_path)
+    monkeypatch.setattr(manage, "container_home_dir", lambda: tmp_path / "home")
+    monkeypatch.setattr(manage, "extra_computer_containers", lambda _engine: [])
+    monkeypatch.setattr(manage, "container_exists", lambda _engine: False)
+    monkeypatch.setattr(manage, "container_running", lambda _engine, name=manage.CONTAINER_NAME: False)
+    monkeypatch.setattr(manage, "rfb_port_open", lambda *args, **kwargs: False)
+    monkeypatch.setattr(manage, "host_user_ids", lambda: (1000, 1000))
+    monkeypatch.setattr(manage, "selinux_enforcing", lambda: False)
+
+    def fake_run(args, **_kwargs):
+        captured["args"] = list(args)
+        return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(manage.subprocess, "run", fake_run)
+
+    manage.run_container("docker")
+
+    assert "--user" not in captured["args"]
+
+
+def test_run_container_passes_user_on_linux(tmp_path, monkeypatch) -> None:
+    captured: dict[str, list[str]] = {}
+    monkeypatch.setattr(manage.sys, "platform", "linux")
+    monkeypatch.setattr(manage, "runtime_dir", lambda: tmp_path)
+    monkeypatch.setattr(manage, "container_home_dir", lambda: tmp_path / "home")
+    monkeypatch.setattr(manage, "extra_computer_containers", lambda _engine: [])
+    monkeypatch.setattr(manage, "container_exists", lambda _engine: False)
+    monkeypatch.setattr(manage, "container_running", lambda _engine, name=manage.CONTAINER_NAME: False)
+    monkeypatch.setattr(manage, "rfb_port_open", lambda *args, **kwargs: False)
+    monkeypatch.setattr(manage, "host_user_ids", lambda: (1000, 1000))
+    monkeypatch.setattr(manage, "selinux_enforcing", lambda: False)
+
+    def fake_run(args, **_kwargs):
+        captured["args"] = list(args)
+        return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(manage.subprocess, "run", fake_run)
+
+    manage.run_container("docker")
+
+    assert "--user" in captured["args"]
+    assert "1000:1000" in captured["args"]
+
+
+def test_computer_readiness_ignores_host_desktop_without_opt_in(monkeypatch) -> None:
+    monkeypatch.setattr(manage, "host_desktop_opt_in", lambda: False)
+    monkeypatch.setattr(manage, "engine_binaries", lambda: [])
+    monkeypatch.setattr(manage, "container_running", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        manage, "configured_computer_target", lambda: "tcp://127.0.0.1:5900"
+    )
+    monkeypatch.setattr(
+        manage,
+        "rfb_port_open",
+        lambda host=manage.RFB_HOST, port=manage.RFB_PORT: host == "127.0.0.1" and port == 5900,
+    )
+
+    report = manage.computer_readiness()
+
+    assert report["state"] != "ready"
+    assert "already configured" not in report["message"]
+
+
 def test_computer_readiness_treats_working_opt_in_desktop_as_ready(monkeypatch) -> None:
-    monkeypatch.setattr(manage, "is_linux_computer_host", lambda platform=None: True)
+    monkeypatch.setattr(manage, "host_desktop_opt_in", lambda: True)
     monkeypatch.setattr(manage, "engine_binaries", lambda: [])
     monkeypatch.setattr(manage, "container_running", lambda *args, **kwargs: False)
     monkeypatch.setattr(
@@ -703,6 +880,26 @@ def test_computer_readiness_treats_working_opt_in_desktop_as_ready(monkeypatch) 
     assert report["state"] == "ready"
     assert "already configured" in report["message"]
     assert "requires Docker" not in report["message"]
+
+
+def test_computer_readiness_keeps_opt_in_host_desktop_on_macos(monkeypatch) -> None:
+    monkeypatch.setattr(manage, "host_desktop_opt_in", lambda: True)
+    monkeypatch.setattr(manage, "engine_binaries", lambda: [])
+    monkeypatch.setattr(manage, "container_running", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        manage, "configured_computer_target", lambda: "tcp://127.0.0.1:5900"
+    )
+    monkeypatch.setattr(
+        manage,
+        "rfb_port_open",
+        lambda host=manage.RFB_HOST, port=manage.RFB_PORT: host == "127.0.0.1" and port == 5900,
+    )
+
+    report = manage.computer_readiness(platform="darwin")
+
+    assert report["state"] == "ready"
+    assert "already configured" in report["message"]
+    assert "Docker Desktop" not in report["message"]
 
 
 def test_configured_computer_target_reads_persisted_env(tmp_path, monkeypatch) -> None:
@@ -724,3 +921,83 @@ def test_container_exec_args_point_at_the_container_desktop() -> None:
     assert "XAUTHORITY=/home/fetch/.Xauthority" in args
     assert manage.CONTAINER_NAME in args
     assert args[-1] == "xdpyinfo"
+
+
+def test_pin_and_start_display_starts_allocated_screen(tmp_path, monkeypatch) -> None:
+    started: list[int] = []
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_PROFILE", "researcher")
+    monkeypatch.setattr(manage, "container_running", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        manage,
+        "ensure_display",
+        lambda engine, display_num, **kwargs: started.append(display_num) or True,
+    )
+
+    first = manage.pin_and_start_display("docker", profile="researcher")
+    second = manage.pin_and_start_display("docker", profile="signal-monitor")
+
+    assert first == 1
+    assert second == 2
+    assert started == [1, 2]
+
+
+def test_profile_exec_args_bind_non_default_display(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(manage, "container_running", lambda *args, **kwargs: False)
+    manage.allocate_display("default")
+
+    args = manage.profile_exec_args("docker", "cua-driver", "call", profile="writer")
+
+    assert "DISPLAY=:2" in args
+    assert args[-2:] == ["cua-driver", "call"]
+
+
+def test_start_profile_displays_covers_hermes_bots(tmp_path, monkeypatch) -> None:
+    started: list[int] = []
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "profiles" / "researcher").mkdir(parents=True)
+    (tmp_path / "profiles" / "writer").mkdir()
+    monkeypatch.setattr(manage, "container_running", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        manage,
+        "ensure_display",
+        lambda engine, display_num, **kwargs: started.append(display_num) or True,
+    )
+
+    displays = manage.start_profile_displays("docker")
+
+    assert 1 in displays
+    assert len(started) >= 2
+
+
+def test_status_is_ready_on_macos(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        manage,
+        "computer_readiness",
+        lambda: {"state": "ready", "message": manage.READY_MESSAGE},
+    )
+    monkeypatch.setattr(manage, "_run_computer_setup", lambda **_kwargs: None)
+
+    manage.status()
+
+    out = capsys.readouterr().out
+    assert manage.READY_MESSAGE in out
+    assert "Linux-only" not in out
+
+
+def test_host_desktop_helpers_remain_opt_in() -> None:
+    plugin_dir = PLUGIN_DIR
+    macos = (plugin_dir / "macos" / "check-computer.sh").read_text(encoding="utf-8")
+    windows = (plugin_dir / "windows" / "check-computer.ps1").read_text(encoding="utf-8")
+    readme = (plugin_dir / "README.md").read_text(encoding="utf-8")
+
+    assert (plugin_dir / "macos" / "check-computer.sh").is_file()
+    assert (plugin_dir / "windows" / "check-computer.ps1").is_file()
+    assert (plugin_dir / "linux-desktop" / "manage-user-service.sh").is_file()
+    assert "opt-in" in macos
+    assert "Xcode" in macos
+    assert "opt-in" in windows
+    assert "Mac host desktop (opt-in)" in readme
+    assert "Windows host desktop (opt-in)" in readme
+    assert "Existing Xorg Linux desktop (opt-in)" in readme

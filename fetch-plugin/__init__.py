@@ -100,6 +100,10 @@ _FETCH_ATTACHMENT_HINT = (
 )
 
 _FETCH_COMPUTER_HANDOFF_HINT = (
+    "The default computer is the Fetch Ubuntu container. Drive browser and "
+    "desktop work there. Use the host only when the task truly needs it "
+    "(Xcode, Simulator, host filesystem, native Windows app). Say so, then "
+    "use host tools. Do not imply every Mac agent lives on the host desktop. "
     "Fetch shows the same desktop the person is watching. Keep browser and "
     "computer work on that visible desktop: do not intentionally target a "
     "hidden or minimized window or another virtual desktop/Space. Use native "
@@ -798,20 +802,44 @@ def _spawn_tunnel() -> None:
     log.info("Fetch reverse-tunnel client starting (%s)", start_reason)
 
 
-def _announce_linux_computer_if_needed() -> None:
-    """After a plugin update, tell Linux hosts how to start the computer."""
+def _prefer_container_cua_driver() -> None:
+    """Put the docker-exec cua-driver wrapper first so Hermes does not click the host."""
 
-    if not sys.platform.startswith("linux"):
+    try:
+        displays = _load_sibling("fetch_plugin_computer_displays", "_computer_displays.py")
+        if displays.host_desktop_opt_in():
+            return
+    except Exception:
         return
+    bin_dir = Path(__file__).resolve().parent / "linux-computer" / "bin"
+    wrapper = bin_dir / "cua-driver"
+    if not wrapper.is_file():
+        return
+    path = os.environ.get("PATH", "")
+    prefix = str(bin_dir)
+    parts = path.split(os.pathsep) if path else []
+    if prefix not in parts:
+        os.environ["PATH"] = prefix + ((os.pathsep + path) if path else "")
+
+
+def _announce_computer_if_needed() -> None:
+    """Start Ubuntu + per-bot DISPLAY=:N in the background; print next steps if Docker is missing."""
+
+    _prefer_container_cua_driver()
+    try:
+        _computer_runtime.ensure_isolated_desktops()
+    except Exception:
+        log.debug("Fetch could not wake isolated computer desktops", exc_info=True)
+
     try:
         linux_computer = _pairing._linux_computer_module()
         if linux_computer is None:
             return
         report = linux_computer.computer_readiness()
     except Exception:
-        log.debug("Fetch could not check the Linux computer container", exc_info=True)
+        log.debug("Fetch could not check the computer container", exc_info=True)
         return
-    if report.get("state") in {"ready", "configured", "not-linux", ""}:
+    if report.get("state") in {"ready", "configured", "starting", ""}:
         return
     message = str(report.get("message") or "").strip()
     if not message:
@@ -932,6 +960,6 @@ def register(ctx) -> None:
 
     # Reverse tunnel: hold an outbound channel to the relay (gated, default off).
     _spawn_tunnel()
-    _announce_linux_computer_if_needed()
+    _announce_computer_if_needed()
 
     log.info("Fetch plugin registered (push hooks + pairing + reverse tunnel)")

@@ -12,6 +12,8 @@ when present (e.g. inside the agent's own test environment).
 import sys
 from pathlib import Path
 
+import pytest
+
 from agent_stubs import stub_agent_modules
 
 PLUGIN_DIR = Path(__file__).resolve().parent
@@ -19,3 +21,14 @@ if str(PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(PLUGIN_DIR))
 
 stub_agent_modules()
+
+
+@pytest.fixture(autouse=True)
+def _dont_boot_real_docker_from_plugin_load(monkeypatch):
+    """Unit tests must not spawn ``manage.py bootstrap`` against the host Docker.
+
+    Plugin ``register()`` starts isolated desktops automatically. Tests that
+    exercise that path ``delenv`` this flag.
+    """
+
+    monkeypatch.setenv("HERMES_FETCH_COMPUTER_DISABLE_AUTOSTART", "1")

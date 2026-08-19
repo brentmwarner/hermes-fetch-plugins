@@ -1,5 +1,6 @@
 *
 !entrypoint.sh
+!start-display.sh
 !branding/wallpaper.png
 !branding/fetch_logo.svg
 !xfce-config/**

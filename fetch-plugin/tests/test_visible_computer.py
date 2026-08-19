@@ -217,3 +217,45 @@ def test_unconfirmed_move_restores_previous_frame(visible_computer, monkeypatch)
     assert "restored the previous frame" in result["error"]
     assert calls[-1][1]["x"] == 20
     assert calls[-1][1]["y"] == 30
+
+
+def test_driver_command_uses_profile_display(visible_computer, monkeypatch, tmp_path):
+    monkeypatch.delenv("HERMES_FETCH_COMPUTER_HOST_OPT_IN", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    class Manager:
+        @staticmethod
+        def profile_exec_args(engine, *command, **kwargs):
+            return [engine, "exec", "-e", "DISPLAY=:2", "fetch-computer", *command]
+
+    monkeypatch.setattr(visible_computer, "_load_computer_manager", lambda: Manager)
+    monkeypatch.setattr(visible_computer, "host_desktop_opt_in", lambda: False)
+
+    command = visible_computer._driver_command("list_windows", "{}")
+
+    assert command[:2] == ["docker", "exec"]
+    assert "DISPLAY=:2" in command
+    assert "cua-driver" in command
+    assert command[-3:] == ["call", "list_windows", "{}"]
+
+
+def test_check_requirements_requires_docker_without_host_opt_in(
+    visible_computer, monkeypatch
+) -> None:
+    monkeypatch.setattr(visible_computer, "host_desktop_opt_in", lambda: False)
+    monkeypatch.setattr(visible_computer.shutil, "which", lambda name: None)
+
+    assert visible_computer.check_requirements() is False
+
+
+def test_check_requirements_accepts_docker_without_host_cua_driver(
+    visible_computer, monkeypatch
+) -> None:
+    monkeypatch.setattr(visible_computer, "host_desktop_opt_in", lambda: False)
+    monkeypatch.setattr(
+        visible_computer.shutil,
+        "which",
+        lambda name: "/usr/bin/docker" if name == "docker" else None,
+    )
+
+    assert visible_computer.check_requirements() is True

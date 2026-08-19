@@ -25,7 +25,7 @@ optional_env:
     description: "Set to 1/true only if you manage the local Hermes dashboard/API process yourself and do not want Fetch to start a headless relay runtime."
     password: false
   - name: HERMES_FETCH_COMPUTER_TARGET
-    description: "Optional loopback VNC target for Fetch computer viewing, for example tcp://127.0.0.1:5900. Non-loopback targets are rejected."
+    description: "Optional loopback VNC target for Fetch computer viewing. The default Ubuntu container uses tcp://127.0.0.1:5901. Opt-in host desktops use tcp://127.0.0.1:5900. Non-loopback targets are rejected."
     password: false
   - name: HERMES_FETCH_COMPUTER_NAME
     description: "Optional friendly computer name shown in the Fetch viewer."
@@ -36,6 +36,9 @@ optional_env:
   - name: HERMES_FETCH_COMPUTER_VNC_PASSWORD
     description: "Dedicated loopback Screen Sharing/VNC password saved by host computer setup. Fetch uses it locally and never sends it to the relay or phone."
     password: true
+  - name: HERMES_FETCH_COMPUTER_HOST_OPT_IN
+    description: "Set to 1/true to use the host Mac/Windows/Linux desktop (Screen Sharing / UltraVNC / x0vnc) instead of the Ubuntu fetch-computer container."
+    password: false
   - name: HERMES_FETCH_COMPUTER_WS_URL
     description: "Legacy loopback websockify target retained for compatibility. Prefer HERMES_FETCH_COMPUTER_TARGET."
     password: false
