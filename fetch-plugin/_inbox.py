@@ -69,14 +69,14 @@ _CRON_RESPONSE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Process-level cache mapping home-channel → (last resolved cron channel, stamp).
+# Process-level cache mapping delivery channel → (last resolved cron channel, stamp).
 # When Hermes chunks a long cron response, only the first chunk starts with
 # "Cronjob Response... (job_id: ...)"; later chunks lack the header and would
-# otherwise fall back to the home channel, splitting one run between
-# inbox_cron-* and inbox_default. Entries are honored only within
+# otherwise fall back to the requested target, splitting one run between
+# inbox_cron-* and an interactive agent/home thread. Entries are honored only within
 # _CRON_CACHE_TTL of the cron chunk that set them — long enough to carry one
-# delivery's chunks, short enough that the next unrelated home message goes
-# home instead of being captured by a finished cron thread.
+# delivery's chunks, short enough that the next unrelated message is not
+# captured by a finished cron thread.
 _CRON_CACHE_TTL = 180.0
 _cron_channel_cache: dict[str, tuple[str, float]] = {}
 
@@ -144,6 +144,7 @@ class FetchInboxAdapter(BasePlatformAdapter):
             channel=channel,
             content=str(content or ""),
             thread_id=thread_id,
+            cron_job_id=cron_job_id,
         )
         try:
             delivery = deliver_to_inbox(
@@ -284,7 +285,7 @@ async def standalone_send(
         content=content,
         thread_id=thread_id,
     )
-    if not thread_id and _is_home_channel(channel):
+    if not thread_id:
         if _cron_channel_from_content(content):
             # First chunk of a cron response: cache the resolved channel so
             # subsequent chunks (which lack the header) route to the same thread.
@@ -294,11 +295,11 @@ async def standalone_send(
             if cached is not None:
                 cached_channel, stamp = cached
                 if _now() - stamp <= _CRON_CACHE_TTL:
-                    # Subsequent chunk of the same delivery: follow its thread.
+                    # Subsequent chunk of the same delivery: follow its job thread.
                     resolved_channel = cached_channel
                 else:
                     # Stale carry from a finished delivery: drop it so later
-                    # home messages are never captured by an old cron thread.
+                    # messages are never captured by an old cron thread.
                     _cron_channel_cache.pop(channel, None)
     title = _default_title_for_delivery(
         channel=channel,
@@ -386,9 +387,9 @@ def deliver_to_inbox(
     same channel land in the same app thread. Per-agent channels
     (``fetch:researcher``) produce per-agent sessions (``inbox_researcher``) so
     each agent gets its own Fetch DM instead of one pooled ``inbox_default``
-    thread. ``cron_job_id`` (from the scheduler's send metadata) routes a home
-    delivery into its per-job thread even when ``cron.wrap_response`` is off
-    and the content lacks the "Cronjob Response" header.
+    thread. ``cron_job_id`` (from the scheduler's send metadata) routes every
+    scheduled delivery into its per-job thread, even when its requested target
+    is a named agent and ``cron.wrap_response`` is off.
     """
     if _is_gateway_control_notice(content):
         logger.debug("Fetch dropped a gateway lifecycle notice (control-flow, not a message)")
@@ -638,19 +639,18 @@ def _delivery_channel(
 ) -> str:
     """Resolve the stable Fetch thread key for one outbound delivery.
 
-    Explicit channels are preserved (`fetch:researcher` stays `researcher`).
-    Bare home-channel cron deliveries get split by cron job id, otherwise every
-    scheduled job collapses into the shared `inbox_default` home thread. The
-    scheduler's metadata job id wins over the content header — it's present
-    even when `cron.wrap_response` strips the header from the body.
+    Interactive explicit channels are preserved (`fetch:researcher` stays
+    `researcher`). Scheduled-delivery provenance wins over both channel and
+    thread targets: automation output must never be persisted as speech in an
+    interactive DM. The scheduler's metadata job id wins over the content
+    header; the exact wrapped header remains a compatibility fallback.
     """
     clean_channel = _normalize_channel(_strip_platform_prefix(channel))
+    cron_channel = _cron_channel_from_job_id(cron_job_id) or _cron_channel_from_content(content)
+    if cron_channel:
+        return cron_channel
     if thread_id:
         return _thread_channel(clean_channel, thread_id)
-    if _is_home_channel(clean_channel):
-        cron_channel = _cron_channel_from_job_id(cron_job_id) or _cron_channel_from_content(content)
-        if cron_channel:
-            return cron_channel
     return clean_channel
 
 
@@ -695,24 +695,35 @@ def _cron_delivery_info(content: str) -> CronDeliveryInfo | None:
     return CronDeliveryInfo(name=name or job_id, job_id=job_id)
 
 
-def _default_title_for_delivery(*, channel: str, content: str, thread_id: str | None = None) -> str:
+def _default_title_for_delivery(
+    *,
+    channel: str,
+    content: str,
+    thread_id: str | None = None,
+    cron_job_id: str | None = None,
+) -> str:
+    info = _cron_delivery_info(content)
+    if info is not None:
+        return info.name
+    cron_channel = _cron_channel_from_job_id(cron_job_id)
+    if cron_channel:
+        return _label_for_channel(cron_channel)
     if thread_id:
         return _label_for_channel(thread_id)
-    info = _cron_delivery_info(content)
-    if _is_home_channel(channel) and info is not None:
-        return info.name
     return _label_for_channel(channel)
 
 
 def _title_for_channel(channel: str, *, content: str, proposed: str) -> str:
     if channel.startswith("cron-"):
+        info = _cron_delivery_info(content)
+        if info is not None:
+            return info.name
         home_titles = {DEFAULT_TITLE, _label_for_channel(DEFAULT_CHANNEL), _label_for_channel(_home_channel())}
         if not proposed or proposed in home_titles:
-            info = _cron_delivery_info(content)
             # No wrapped header to name the job from (wrap_response off):
             # fall back to the cron channel label rather than the home title,
             # so the thread doesn't masquerade as the pooled "Fetch" thread.
-            return info.name if info is not None else _label_for_channel(channel)
+            return _label_for_channel(channel)
     return proposed or _label_for_channel(channel)
 
 

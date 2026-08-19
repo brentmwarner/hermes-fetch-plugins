@@ -350,6 +350,28 @@ def test_standalone_send_preserves_cron_channel_across_chunks(monkeypatch):
     )
 
 
+def test_standalone_send_isolates_explicit_agent_cron_across_chunks(monkeypatch):
+    """Legacy standalone delivery lacks scheduler metadata, so the wrapped
+    header and per-channel chunk cache must keep every chunk out of the agent
+    DM."""
+    inbox = _load_inbox()
+    calls = []
+    monkeypatch.setattr(
+        inbox,
+        "deliver_to_inbox",
+        lambda **kw: calls.append(kw) or inbox.InboxDelivery(session_id="inbox_cron-abc123", message_id=1),
+    )
+
+    first_chunk = "Cronjob Response: Morning Brief\n(job_id: abc123)\n\nStart of the summary..."
+    second_chunk = "...the rest of the summary without a cron header..."
+
+    asyncio.run(inbox.standalone_send(None, "fetch:researcher", first_chunk))
+    asyncio.run(inbox.standalone_send(None, "fetch:researcher", second_chunk))
+
+    assert [call["channel"] for call in calls] == ["cron-abc123", "cron-abc123"]
+    assert calls[0]["title"] == "Morning Brief"
+
+
 def test_title_from_metadata_ignores_thread_id():
     """_title_from_metadata must NOT fall back to metadata['thread_id'];
     that value is handled by _thread_id_from_metadata and
@@ -436,7 +458,7 @@ def test_deliver_to_inbox_routes_home_cron_delivery_to_job_thread(monkeypatch):
     assert notify_calls[0]["title"] == "Morning Brief"
 
 
-def test_deliver_to_inbox_preserves_explicit_agent_channel_for_cron_body(monkeypatch):
+def test_deliver_to_inbox_routes_explicit_agent_cron_body_to_job_thread(monkeypatch):
     inbox = _load_inbox()
     captured = {}
     body = "Cronjob Response: Morning Brief\n(job_id: abc123)\n\nWeather and inbox summary"
@@ -457,9 +479,9 @@ def test_deliver_to_inbox_preserves_explicit_agent_channel_for_cron_body(monkeyp
         title="Researcher",
     )
 
-    assert delivery.session_id == "inbox_researcher"
-    assert captured["create"]["user_id"] == "researcher"
-    assert captured["title"] == ("inbox_researcher", "Researcher")
+    assert delivery.session_id == "inbox_cron-abc123"
+    assert captured["create"]["user_id"] == "cron-abc123"
+    assert captured["title"] == ("inbox_cron-abc123", "Morning Brief")
 
 
 def test_label_for_channel_titles_profile_names():
@@ -575,10 +597,10 @@ def test_deliver_to_inbox_routes_cron_by_job_id_without_header(monkeypatch):
     assert captured["title"] == ("inbox_cron-abc123", "Cron Abc123")
 
 
-def test_deliver_to_inbox_job_id_does_not_hijack_explicit_agent_channel(monkeypatch):
-    """A cron job that delivers to `fetch:researcher` explicitly stays in the
-    researcher DM — only bare home-channel deliveries split into cron threads,
-    mirroring the content-header behavior."""
+def test_deliver_to_inbox_job_id_isolates_explicit_agent_channel(monkeypatch):
+    """Scheduler provenance wins over its delivery target. A cron job sent via
+    `fetch:researcher` belongs to the job's update thread, never the interactive
+    researcher DM."""
     inbox = _load_inbox()
     captured = {}
     monkeypatch.setattr(inbox, "SessionDB", lambda **kw: _RoutingCaptureDB(captured))
@@ -591,7 +613,27 @@ def test_deliver_to_inbox_job_id_does_not_hijack_explicit_agent_channel(monkeypa
         cron_job_id="abc123",
     )
 
-    assert delivery.session_id == "inbox_researcher"
+    assert delivery.session_id == "inbox_cron-abc123"
+    assert captured["create"]["user_id"] == "cron-abc123"
+
+
+def test_deliver_to_inbox_job_id_wins_over_thread_target(monkeypatch):
+    """A scheduler job must not become user speech merely because its delivery
+    target also carries a platform thread id."""
+    inbox = _load_inbox()
+    captured = {}
+    monkeypatch.setattr(inbox, "SessionDB", lambda **kw: _RoutingCaptureDB(captured))
+    monkeypatch.setattr(inbox, "_notify_proactive", lambda **kw: None)
+
+    delivery = inbox.deliver_to_inbox(
+        channel="researcher",
+        content="standup",
+        title="Researcher",
+        thread_id="chief-of-staff",
+        cron_job_id="abc123",
+    )
+
+    assert delivery.session_id == "inbox_cron-abc123"
 
 
 def test_adapter_send_routes_cron_by_metadata_job_id(monkeypatch):
