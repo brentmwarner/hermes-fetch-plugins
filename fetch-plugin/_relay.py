@@ -37,6 +37,123 @@ ENROLLMENT_TOKEN_ENV = "HERMES_FETCH_ENROLLMENT_TOKEN"
 
 _DEDUPE_WINDOW_S = 10.0
 
+_SYSTEM_INBOX_AGENT_SLUGS = {"default"}
+_NEUTRAL_AGENT_ID = "default"
+_NEUTRAL_AGENT_NAME = "Fetch"
+
+
+def _clean_agent_slug(value: object) -> str:
+    """Return a bounded profile identity that is safe for a push payload."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return text[:80]
+
+
+def _known_profile_slugs(*, hermes_home: Path | None = None) -> set[str]:
+    """Profile directory names under the store home (e.g. ``researcher``)."""
+    profiles_dir = _hermes_home(hermes_home) / "profiles"
+    try:
+        return {
+            entry.name
+            for entry in profiles_dir.iterdir()
+            if entry.is_dir() and not entry.name.startswith(".")
+        }
+    except OSError:
+        return set()
+
+
+def _is_system_inbox_session(session_id: str | None) -> bool:
+    """Sessions that should always show the neutral Fetch sender."""
+    raw = str(session_id or "").strip()
+    if not raw.startswith("inbox_"):
+        return False
+    slug = _clean_agent_slug(raw.removeprefix("inbox_"))
+    return (
+        slug in _SYSTEM_INBOX_AGENT_SLUGS
+        or slug.startswith(("cron-", "thread-"))
+    )
+
+
+def _agent_from_session(
+    session_id: str | None, *, hermes_home: Path | None = None
+) -> str:
+    """Best-effort profile identity encoded by Fetch/Hermes session keys."""
+    raw = str(session_id or "").strip()
+    parts = raw.split(":")
+    if len(parts) >= 2 and parts[0] == "agent":
+        return _clean_agent_slug(parts[1])
+    if not raw.startswith("inbox_"):
+        return ""
+    slug = _clean_agent_slug(raw.removeprefix("inbox_"))
+    if _is_system_inbox_session(raw):
+        return ""
+    if slug in _known_profile_slugs(hermes_home=hermes_home):
+        return slug
+    return ""
+
+
+def _active_agent() -> str:
+    """Resolve the current profile without leaking across concurrent sessions."""
+    try:
+        from gateway.session_context import get_session_env
+
+        profile = _clean_agent_slug(get_session_env("HERMES_SESSION_PROFILE", ""))
+        if profile:
+            return profile
+    except Exception:
+        pass
+    profile = _clean_agent_slug(os.environ.get("HERMES_PROFILE"))
+    if profile:
+        return profile
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+
+        return _clean_agent_slug(get_active_profile_name())
+    except Exception:
+        return ""
+
+
+def _agent_display_name(agent_id: str) -> str:
+    if not agent_id or agent_id.lower() == _NEUTRAL_AGENT_ID:
+        return _NEUTRAL_AGENT_NAME
+    return " ".join(
+        part[:1].upper() + part[1:]
+        for part in agent_id.replace("_", "-").split("-")
+        if part
+    )[:120] or "Fetch"
+
+
+def _with_agent_identity(
+    *,
+    session_id: str | None,
+    data: dict | None,
+    hermes_home: Path | None = None,
+) -> dict:
+    """Stamp every notification with one stable sender id + display name.
+
+    Explicit task metadata wins, then an identity encoded in the session, then
+    the task-local Hermes profile. Resolving this before starting the daemon
+    thread is important: contextvars do not automatically cross that boundary.
+    """
+    merged = dict(data) if isinstance(data, dict) else {}
+    explicit = merged.get("agent_id") or merged.get("assignee")
+    agent_id = _clean_agent_slug(explicit)
+    if not agent_id and _is_system_inbox_session(session_id):
+        agent_id = _NEUTRAL_AGENT_ID
+    if not agent_id:
+        agent_id = (
+            _agent_from_session(session_id, hermes_home=hermes_home)
+            or _active_agent()
+        )
+    if not agent_id:
+        agent_id = _NEUTRAL_AGENT_ID
+    merged["agent_id"] = agent_id
+    merged["agent_name"] = (
+        _clean_agent_slug(merged.get("agent_name")) or _agent_display_name(agent_id)
+    )
+    return merged
+
 
 def _hermes_home(hermes_home: Path | None = None) -> Path:
     if hermes_home is not None:
@@ -450,9 +567,10 @@ def send_event_background(
     Fetch-channel pushes become inbox threads) instead of maintaining a
     Hermes-specific denylist.
     """
-    data_key = ""
-    if isinstance(data, dict):
-        data_key = str(data.get("target") or "") + ":" + str(data.get("task_id") or "")
+    data = _with_agent_identity(
+        session_id=session_id, data=data, hermes_home=hermes_home
+    )
+    data_key = str(data.get("target") or "") + ":" + str(data.get("task_id") or "")
     if _is_duplicate(f"{kind}:{session_id or ''}:{data_key}:{(body or '')[:80]}"):
         return
     threading.Thread(
