@@ -38,14 +38,31 @@ def test_agent_identity_comes_from_gateway_session_key(monkeypatch):
 
 def test_agent_identity_comes_from_per_agent_inbox_thread(monkeypatch):
     monkeypatch.delenv("HERMES_PROFILE", raising=False)
+    monkeypatch.setattr(relay, "_known_profile_slugs", lambda **kw: {"researcher"})
     data = relay._with_agent_identity(session_id="inbox_researcher", data=None)
     assert data["agent_id"] == "researcher"
     assert data["agent_name"] == "Researcher"
 
 
+def test_custom_inbox_channel_does_not_impersonate_agent(monkeypatch):
+    """Named delivery channels (e.g. fetch:world-cup) are threads, not profiles."""
+    monkeypatch.delenv("HERMES_PROFILE", raising=False)
+    monkeypatch.setattr(relay, "_known_profile_slugs", lambda **kw: {"researcher"})
+    monkeypatch.setattr(relay, "_active_agent", lambda: "chief-of-staff")
+    data = relay._with_agent_identity(session_id="inbox_world-cup", data=None)
+    assert data["agent_id"] == "chief-of-staff"
+    assert data["agent_name"] == "Chief Of Staff"
+
+
 def test_system_inbox_thread_falls_back_to_fetch(monkeypatch):
-    monkeypatch.setenv("HERMES_PROFILE", "chief-of-staff")
+    monkeypatch.setenv("HERMES_PROFILE", "researcher")
     data = relay._with_agent_identity(session_id="inbox_cron-daily-brief", data=None)
+    assert data == {"agent_id": "default", "agent_name": "Fetch"}
+
+
+def test_system_default_inbox_ignores_active_profile(monkeypatch):
+    monkeypatch.setenv("HERMES_PROFILE", "researcher")
+    data = relay._with_agent_identity(session_id="inbox_default", data=None)
     assert data == {"agent_id": "default", "agent_name": "Fetch"}
 
 
