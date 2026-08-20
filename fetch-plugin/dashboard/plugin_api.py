@@ -16,6 +16,7 @@ client is loaded by file path, exactly as the runtime half does.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import logging
 import os
@@ -295,7 +296,11 @@ def _pairing_diagnostics(creds) -> dict:
     }
 
 
-def _relay_troubleshooting(owner_status: dict, pairing_status: dict) -> list[dict]:
+def _relay_troubleshooting(
+    owner_status: dict,
+    pairing_status: dict,
+    runtime_recovery: str | None = None,
+) -> list[dict]:
     items: list[dict] = []
     if owner_status.get("state") == "owned" and not owner_status.get("owner_current_process"):
         items.append({
@@ -303,6 +308,24 @@ def _relay_troubleshooting(owner_status: dict, pairing_status: dict) -> list[dic
             "message": (
                 "A different local Hermes process owns the one agent tunnel. This is expected and still supports "
                 "multiple Fetch app clients; it is not a duplicate-device failure."
+            ),
+        })
+    elif (
+        owner_status.get("state") in {"stale", "invalid", "foreign", "unowned"}
+        and runtime_recovery == "started"
+    ):
+        owner_state = owner_status.get("state")
+        state_phrase = {
+            "stale": "a stale tunnel owner",
+            "invalid": "an invalid tunnel owner",
+            "foreign": "a foreign tunnel owner",
+            "unowned": "no tunnel owner",
+        }.get(owner_state, "an unhealthy tunnel owner")
+        items.append({
+            "code": "tunnel_owner_recovery_started",
+            "message": (
+                f"Fetch detected {state_phrase} and started a replacement runtime. "
+                "The relay should reconnect automatically."
             ),
         })
     elif owner_status.get("state") in {"stale", "invalid", "unreadable"}:
@@ -404,17 +427,32 @@ async def diagnostics() -> dict:
         owner = tunnel.TunnelOwnerLock(agent_id=creds.agent_id, lock_dir=_relay_runtime_dir(relay_client, runtime))
         owner_status = owner.status()
         pairing_status = _pairing_diagnostics(creds)
+        runtime_recovery = None
+        if (
+            owner_status.get("state") in {"stale", "invalid", "foreign", "unowned"}
+            and runtime.keeper_should_run()
+        ):
+            # Diagnostics is often the first current-plugin code to run after
+            # an upgrade. Use that healthy request as a watchdog tick so the
+            # app's Retry action repairs a dead owner instead of only reporting
+            # the same stale lock forever.
+            runtime_recovery = await asyncio.to_thread(runtime.ensure_relay_runtime)
         relay_state = {
             "configured": True,
             "relay_url": creds.relay_url,
             "agent_id": creds.agent_id,
             "tunnel_enabled": runtime.truthy(os.environ.get(runtime.TUNNEL_ENABLED_ENV)),
             "runtime_pid": runtime._active_runtime_pid(),
+            "runtime_recovery": runtime_recovery,
             "owner_pid": owner_status["owner_pid"],
             "owner_current_process": owner_status["owner_current_process"],
             "owner": owner_status,
             "pairing": pairing_status,
-            "troubleshooting": _relay_troubleshooting(owner_status, pairing_status),
+            "troubleshooting": _relay_troubleshooting(
+                owner_status,
+                pairing_status,
+                runtime_recovery,
+            ),
         }
     except Exception as exc:
         relay_state = {"configured": False, "error": str(exc)}

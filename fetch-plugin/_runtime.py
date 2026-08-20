@@ -37,6 +37,8 @@ DISABLE_AUTOSTART_ENV = "HERMES_FETCH_TUNNEL_DISABLE_DASHBOARD_AUTOSTART"
 _PID_FILE = "fetch-relay-runtime.pid"
 _LOG_FILE = "fetch-relay-runtime.log"
 _PID_ROLE = "fetch-relay-runtime"
+_TUNNEL_START_GRACE_S = 15.0
+_MODULE_STARTED_MONOTONIC = time.monotonic()
 
 
 def truthy(value: str | None) -> bool:
@@ -699,6 +701,75 @@ def _spawn_reaper(process) -> None:
     threading.Thread(target=_reap, name="fetch-runtime-reaper", daemon=True).start()
 
 
+def _runtime_record_age_s(pid: int) -> float | None:
+    """Age of the structured runtime record when it still names ``pid``."""
+    try:
+        data = json.loads(_pid_path().read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return None
+        record_pid = int(data.get("pid"))
+        created_at = float(data.get("created_at"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError, AttributeError):
+        return None
+    if record_pid != pid or created_at <= 0:
+        return None
+    return max(0.0, time.time() - created_at)
+
+
+def _current_tunnel_owner_status() -> dict | None:
+    """Inspect the owner lock for the currently persisted relay identity.
+
+    ``None`` means the probe itself is unavailable, not that the owner is
+    unhealthy. Recovery must fail open here so a diagnostics/import problem
+    cannot churn a working runtime.
+    """
+    try:
+        relay = _sibling("fetch_plugin_relay", "_relay.py")
+        relay_client = relay.relay_client()
+        credentials = relay_client._read_credentials()
+        if credentials is None:
+            return None
+        tunnel = _sibling("fetch_plugin_tunnel", "_tunnel.py")
+        lock_dir = Path(relay_client.credentials_path).parent.parent / "run"
+        owner = tunnel.TunnelOwnerLock(
+            agent_id=credentials.agent_id,
+            lock_dir=lock_dir,
+        )
+        return owner.status()
+    except Exception:
+        log.debug("Fetch could not inspect tunnel ownership for runtime recovery", exc_info=True)
+        return None
+
+
+def _unhealthy_tunnel_owner(runtime_pid: int) -> dict | None:
+    """Return a recoverable unhealthy owner status after startup grace."""
+    status = _current_tunnel_owner_status()
+    if status is None or status.get("state") not in {
+        "stale",
+        "invalid",
+        "foreign",
+        "unowned",
+    }:
+        return None
+    if status.get("state") == "unowned" and runtime_pid == os.getpid():
+        # The child calls ensure_relay_runtime() from _spawn_tunnel before it
+        # starts the tunnel, so unowned is the expected pre-tunnel state.
+        # Treating it as failed after grace replaces this process, returns
+        # "started", and skips the tunnel — a slow discover_plugins path then
+        # respawns successors forever.
+        return None
+
+    age_s = _runtime_record_age_s(runtime_pid)
+    if age_s is None and runtime_pid == os.getpid():
+        # The child can import the plugin before its parent writes the pid
+        # record. Module uptime still prevents that startup race from replacing
+        # a healthy child before its tunnel thread has acquired the owner lock.
+        age_s = time.monotonic() - _MODULE_STARTED_MONOTONIC
+    if age_s is not None and age_s < _TUNNEL_START_GRACE_S:
+        return None
+    return status
+
+
 def ensure_relay_runtime(*, environment: dict[str, str] | None = None) -> str:
     """Start a long-lived headless relay runtime unless one is already running.
 
@@ -711,10 +782,47 @@ def ensure_relay_runtime(*, environment: dict[str, str] | None = None) -> str:
     """
     if truthy(os.environ.get(DISABLE_AUTOSTART_ENV)):
         return "disabled"
-    if truthy(os.environ.get(AUTOSTART_RUNTIME_ENV)):
-        return "self"
-    if _active_runtime_pid(reclaim_legacy=True) is not None:
-        return "already-running"
+
+    is_runtime_child = truthy(os.environ.get(AUTOSTART_RUNTIME_ENV))
+    runtime_pid = os.getpid() if is_runtime_child else _active_runtime_pid(reclaim_legacy=True)
+    if runtime_pid is not None:
+        unhealthy_owner = _unhealthy_tunnel_owner(runtime_pid)
+        if unhealthy_owner is None:
+            return "self" if is_runtime_child else "already-running"
+
+        log.warning(
+            "Fetch relay runtime pid=%s has tunnel owner state=%s (owner pid=%s); replacing it",
+            runtime_pid,
+            unhealthy_owner.get("state"),
+            unhealthy_owner.get("owner_pid") or "unknown",
+        )
+        if not is_runtime_child:
+            discard_record = False
+            if _process_alive(runtime_pid):
+                if not _command_looks_like_runtime(_process_command(runtime_pid)):
+                    log.warning(
+                        "Fetch relay runtime pid=%s is alive but cannot be verified as Fetch "
+                        "runtime; discarding stale record without terminating",
+                        runtime_pid,
+                    )
+                    discard_record = True
+                elif not _terminate_process(runtime_pid):
+                    return "already-running"
+                else:
+                    discard_record = True
+            else:
+                discard_record = True
+
+            if discard_record:
+                current_pid, _role = _read_pid_record(_pid_path())
+                if current_pid == runtime_pid:
+                    try:
+                        _pid_path().unlink()
+                    except OSError:
+                        pass
+        # A runtime child replaces itself by spawning its successor and writing
+        # the successor pid below. The child's supersession watcher then exits
+        # the old dashboard process cleanly while the new tunnel takes over.
 
     log_dir = _hermes_home() / "logs"
     runtime_dir = _runtime_dir()

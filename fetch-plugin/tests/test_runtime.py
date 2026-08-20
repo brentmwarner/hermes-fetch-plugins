@@ -102,6 +102,249 @@ def test_child_pythonpath_ignores_parent_interpreter_paths(tmp_path, monkeypatch
 
 def test_ensure_relay_runtime_uses_existing_pid(monkeypatch) -> None:
     monkeypatch.setattr(runtime, "_active_runtime_pid", lambda **kwargs: 1234)
+    monkeypatch.setattr(
+        runtime,
+        "_current_tunnel_owner_status",
+        lambda: {"state": "owned", "owner_pid": 1234},
+    )
+    monkeypatch.delenv(runtime.DISABLE_AUTOSTART_ENV, raising=False)
+    monkeypatch.delenv(runtime.AUTOSTART_RUNTIME_ENV, raising=False)
+
+    assert runtime.ensure_relay_runtime() == "already-running"
+
+
+def test_ensure_relay_runtime_replaces_live_runtime_with_stale_owner(
+    tmp_path, monkeypatch
+) -> None:
+    calls = []
+    terminated = []
+    monkeypatch.setattr(runtime, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(runtime, "_active_runtime_pid", lambda **kwargs: 1234)
+    monkeypatch.setattr(runtime, "_process_alive", lambda pid: True)
+    monkeypatch.setattr(
+        runtime,
+        "_process_command",
+        lambda pid: "python -c HERMES_FETCH_TUNNEL_AUTOSTARTED_RUNTIME",
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_current_tunnel_owner_status",
+        lambda: {"state": "stale", "owner_pid": 9876},
+    )
+    monkeypatch.setattr(runtime, "_runtime_record_age_s", lambda pid: 60.0)
+    monkeypatch.setattr(
+        runtime,
+        "_terminate_process",
+        lambda pid: terminated.append(pid) or True,
+    )
+    monkeypatch.setattr(runtime, "_child_pythonpath", lambda: "/tmp/hermes-agent")
+    monkeypatch.setattr(runtime, "_child_python_executable", lambda: "/tmp/python")
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "Popen",
+        lambda args, **kwargs: calls.append((args, kwargs)) or FakeProcess(),
+    )
+    monkeypatch.delenv(runtime.DISABLE_AUTOSTART_ENV, raising=False)
+    monkeypatch.delenv(runtime.AUTOSTART_RUNTIME_ENV, raising=False)
+
+    assert runtime.ensure_relay_runtime() == "started"
+    assert terminated == [1234]
+    assert len(calls) == 1
+    assert json.loads(runtime._pid_path().read_text(encoding="utf-8"))["pid"] == 4242
+
+
+def test_ensure_relay_runtime_replaces_unverified_runtime_without_terminating(
+    tmp_path, monkeypatch
+) -> None:
+    calls = []
+    terminated = []
+    runtime_dir = tmp_path / "run"
+    runtime_dir.mkdir()
+    (runtime_dir / "fetch-relay-runtime.pid").write_text(
+        json.dumps({"pid": 1234, "role": "fetch-relay-runtime", "created_at": time.time()}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(runtime, "_process_alive", lambda pid: True)
+    monkeypatch.setattr(runtime, "_process_command", lambda pid: None)
+    monkeypatch.setattr(
+        runtime,
+        "_current_tunnel_owner_status",
+        lambda: {"state": "stale", "owner_pid": 9876},
+    )
+    monkeypatch.setattr(runtime, "_runtime_record_age_s", lambda pid: 60.0)
+    monkeypatch.setattr(
+        runtime,
+        "_terminate_process",
+        lambda pid: terminated.append(pid) or True,
+    )
+    monkeypatch.setattr(runtime, "_child_pythonpath", lambda: "/tmp/hermes-agent")
+    monkeypatch.setattr(runtime, "_child_python_executable", lambda: "/tmp/python")
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "Popen",
+        lambda args, **kwargs: calls.append((args, kwargs)) or FakeProcess(),
+    )
+    monkeypatch.delenv(runtime.DISABLE_AUTOSTART_ENV, raising=False)
+    monkeypatch.delenv(runtime.AUTOSTART_RUNTIME_ENV, raising=False)
+
+    assert runtime.ensure_relay_runtime() == "started"
+    assert terminated == []
+    assert len(calls) == 1
+    assert json.loads(runtime._pid_path().read_text(encoding="utf-8"))["pid"] == 4242
+
+
+def test_ensure_relay_runtime_replaces_self_when_tunnel_owner_is_stale(
+    tmp_path, monkeypatch
+) -> None:
+    calls = []
+    monkeypatch.setattr(runtime, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(
+        runtime,
+        "_current_tunnel_owner_status",
+        lambda: {"state": "stale", "owner_pid": 9876},
+    )
+    monkeypatch.setattr(runtime, "_runtime_record_age_s", lambda pid: 60.0)
+    monkeypatch.setattr(runtime, "_child_pythonpath", lambda: "/tmp/hermes-agent")
+    monkeypatch.setattr(runtime, "_child_python_executable", lambda: "/tmp/python")
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "Popen",
+        lambda args, **kwargs: calls.append((args, kwargs)) or FakeProcess(),
+    )
+    monkeypatch.delenv(runtime.DISABLE_AUTOSTART_ENV, raising=False)
+    monkeypatch.setenv(runtime.AUTOSTART_RUNTIME_ENV, "1")
+
+    assert runtime.ensure_relay_runtime() == "started"
+    assert len(calls) == 1
+    assert json.loads(runtime._pid_path().read_text(encoding="utf-8"))["pid"] == 4242
+
+
+def test_ensure_relay_runtime_child_does_not_replace_self_when_unowned(
+    tmp_path, monkeypatch
+) -> None:
+    calls = []
+    monkeypatch.setattr(runtime, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(
+        runtime,
+        "_current_tunnel_owner_status",
+        lambda: {"state": "unowned", "owner_pid": None},
+    )
+    monkeypatch.setattr(runtime, "_runtime_record_age_s", lambda pid: 60.0)
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "Popen",
+        lambda args, **kwargs: calls.append((args, kwargs)) or FakeProcess(),
+    )
+    monkeypatch.delenv(runtime.DISABLE_AUTOSTART_ENV, raising=False)
+    monkeypatch.setenv(runtime.AUTOSTART_RUNTIME_ENV, "1")
+
+    assert runtime.ensure_relay_runtime() == "self"
+    assert calls == []
+
+
+def test_ensure_relay_runtime_replaces_unowned_runtime_after_grace(
+    tmp_path, monkeypatch
+) -> None:
+    calls = []
+    terminated = []
+    monkeypatch.setattr(runtime, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(runtime, "_active_runtime_pid", lambda **kwargs: 1234)
+    monkeypatch.setattr(runtime, "_process_alive", lambda pid: True)
+    monkeypatch.setattr(
+        runtime,
+        "_process_command",
+        lambda pid: "python -c HERMES_FETCH_TUNNEL_AUTOSTARTED_RUNTIME",
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_current_tunnel_owner_status",
+        lambda: {"state": "unowned", "owner_pid": None},
+    )
+    monkeypatch.setattr(runtime, "_runtime_record_age_s", lambda pid: 60.0)
+    monkeypatch.setattr(
+        runtime,
+        "_terminate_process",
+        lambda pid: terminated.append(pid) or True,
+    )
+    monkeypatch.setattr(runtime, "_child_pythonpath", lambda: "/tmp/hermes-agent")
+    monkeypatch.setattr(runtime, "_child_python_executable", lambda: "/tmp/python")
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "Popen",
+        lambda args, **kwargs: calls.append((args, kwargs)) or FakeProcess(),
+    )
+    monkeypatch.delenv(runtime.DISABLE_AUTOSTART_ENV, raising=False)
+    monkeypatch.delenv(runtime.AUTOSTART_RUNTIME_ENV, raising=False)
+
+    assert runtime.ensure_relay_runtime() == "started"
+    assert terminated == [1234]
+    assert len(calls) == 1
+
+
+def test_runtime_record_age_s_skips_legacy_pid(tmp_path, monkeypatch) -> None:
+    runtime_dir = tmp_path / "run"
+    runtime_dir.mkdir()
+    (runtime_dir / "fetch-relay-runtime.pid").write_text("4242", encoding="utf-8")
+    monkeypatch.setattr(runtime, "_hermes_home", lambda: tmp_path)
+
+    assert runtime._runtime_record_age_s(4242) is None
+
+
+def test_ensure_relay_runtime_replaces_legacy_pid_with_stale_owner(
+    tmp_path, monkeypatch
+) -> None:
+    runtime_dir = tmp_path / "run"
+    runtime_dir.mkdir()
+    (runtime_dir / "fetch-relay-runtime.pid").write_text("1234", encoding="utf-8")
+    calls = []
+    terminated = []
+    monkeypatch.setattr(runtime, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(runtime, "_active_runtime_pid", lambda **kwargs: 1234)
+    monkeypatch.setattr(runtime, "_process_alive", lambda pid: True)
+    monkeypatch.setattr(
+        runtime,
+        "_process_command",
+        lambda pid: "python -c HERMES_FETCH_TUNNEL_AUTOSTARTED_RUNTIME",
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_current_tunnel_owner_status",
+        lambda: {"state": "stale", "owner_pid": 9876},
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_terminate_process",
+        lambda pid: terminated.append(pid) or True,
+    )
+    monkeypatch.setattr(runtime, "_child_pythonpath", lambda: "/tmp/hermes-agent")
+    monkeypatch.setattr(runtime, "_child_python_executable", lambda: "/tmp/python")
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "Popen",
+        lambda args, **kwargs: calls.append((args, kwargs)) or FakeProcess(),
+    )
+    monkeypatch.delenv(runtime.DISABLE_AUTOSTART_ENV, raising=False)
+    monkeypatch.delenv(runtime.AUTOSTART_RUNTIME_ENV, raising=False)
+
+    assert runtime.ensure_relay_runtime() == "started"
+    assert terminated == [1234]
+    assert len(calls) == 1
+
+
+def test_ensure_relay_runtime_gives_new_runtime_time_to_claim_owner(monkeypatch) -> None:
+    monkeypatch.setattr(runtime, "_active_runtime_pid", lambda **kwargs: 1234)
+    monkeypatch.setattr(
+        runtime,
+        "_current_tunnel_owner_status",
+        lambda: {"state": "stale", "owner_pid": 9876},
+    )
+    monkeypatch.setattr(runtime, "_runtime_record_age_s", lambda pid: 1.0)
+    monkeypatch.setattr(
+        runtime,
+        "_terminate_process",
+        lambda pid: (_ for _ in ()).throw(AssertionError("must honor startup grace")),
+    )
     monkeypatch.delenv(runtime.DISABLE_AUTOSTART_ENV, raising=False)
     monkeypatch.delenv(runtime.AUTOSTART_RUNTIME_ENV, raising=False)
 
