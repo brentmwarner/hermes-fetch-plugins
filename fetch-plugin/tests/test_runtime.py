@@ -250,6 +250,12 @@ def test_ensure_relay_runtime_replaces_unowned_runtime_after_grace(
     terminated = []
     monkeypatch.setattr(runtime, "_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(runtime, "_active_runtime_pid", lambda **kwargs: 1234)
+    monkeypatch.setattr(runtime, "_process_alive", lambda pid: True)
+    monkeypatch.setattr(
+        runtime,
+        "_process_command",
+        lambda pid: "python -c HERMES_FETCH_TUNNEL_AUTOSTARTED_RUNTIME",
+    )
     monkeypatch.setattr(
         runtime,
         "_current_tunnel_owner_status",
@@ -295,6 +301,12 @@ def test_ensure_relay_runtime_replaces_legacy_pid_with_stale_owner(
     terminated = []
     monkeypatch.setattr(runtime, "_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(runtime, "_active_runtime_pid", lambda **kwargs: 1234)
+    monkeypatch.setattr(runtime, "_process_alive", lambda pid: True)
+    monkeypatch.setattr(
+        runtime,
+        "_process_command",
+        lambda pid: "python -c HERMES_FETCH_TUNNEL_AUTOSTARTED_RUNTIME",
+    )
     monkeypatch.setattr(
         runtime,
         "_current_tunnel_owner_status",
