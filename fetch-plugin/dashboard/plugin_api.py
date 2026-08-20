@@ -16,6 +16,7 @@ client is loaded by file path, exactly as the runtime half does.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import logging
 import os
@@ -313,10 +314,17 @@ def _relay_troubleshooting(
         owner_status.get("state") in {"stale", "invalid", "foreign", "unowned"}
         and runtime_recovery == "started"
     ):
+        owner_state = owner_status.get("state")
+        state_phrase = {
+            "stale": "a stale tunnel owner",
+            "invalid": "an invalid tunnel owner",
+            "foreign": "a foreign tunnel owner",
+            "unowned": "no tunnel owner",
+        }.get(owner_state, "an unhealthy tunnel owner")
         items.append({
             "code": "tunnel_owner_recovery_started",
             "message": (
-                "Fetch detected the missing tunnel owner and started a replacement runtime. "
+                f"Fetch detected {state_phrase} and started a replacement runtime. "
                 "The relay should reconnect automatically."
             ),
         })
@@ -428,7 +436,7 @@ async def diagnostics() -> dict:
             # an upgrade. Use that healthy request as a watchdog tick so the
             # app's Retry action repairs a dead owner instead of only reporting
             # the same stale lock forever.
-            runtime_recovery = runtime.ensure_relay_runtime()
+            runtime_recovery = await asyncio.to_thread(runtime.ensure_relay_runtime)
         relay_state = {
             "configured": True,
             "relay_url": creds.relay_url,

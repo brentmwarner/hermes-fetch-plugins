@@ -277,6 +277,53 @@ def test_diagnostics_starts_recovery_for_stale_tunnel_owner(monkeypatch, tmp_pat
     codes = {item["code"] for item in body["relay"]["troubleshooting"]}
     assert "tunnel_owner_recovery_started" in codes
     assert "stale_tunnel_owner_lock" not in codes
+    recovery_messages = [
+        item["message"]
+        for item in body["relay"]["troubleshooting"]
+        if item["code"] == "tunnel_owner_recovery_started"
+    ]
+    assert recovery_messages == [
+        "Fetch detected a stale tunnel owner and started a replacement runtime. "
+        "The relay should reconnect automatically."
+    ]
+
+
+def test_diagnostics_recovery_message_reflects_foreign_tunnel_owner(monkeypatch, tmp_path):
+    runtime = api._load_sibling("fetch_plugin_runtime_foreign_owner_test", "_runtime.py")
+    tunnel = api._load_sibling("fetch_plugin_tunnel_foreign_owner_test", "_tunnel.py")
+    paired_home = tmp_path / "paired-home"
+    owner = tunnel.TunnelOwnerLock(agent_id="agent-1", lock_dir=paired_home / "run")
+    owner.path.parent.mkdir(parents=True)
+    owner.path.write_text("4242", encoding="utf-8")
+    monkeypatch.setattr(tunnel, "_process_alive", lambda pid: True)
+    monkeypatch.setattr(tunnel, "_process_command", lambda pid: "python /tmp/not-fetch.py")
+    monkeypatch.setattr(runtime, "keeper_should_run", lambda: True)
+    monkeypatch.setattr(
+        runtime,
+        "ensure_relay_runtime",
+        lambda: "started",
+    )
+    monkeypatch.setattr(runtime, "_runtime_dir", lambda: paired_home / "run")
+    monkeypatch.setattr(
+        api,
+        "_load_sibling",
+        lambda module_name, filename: runtime if filename == "_runtime.py" else tunnel,
+    )
+
+    c = _client(_FakeClient(credentials_path=paired_home / "push" / "fetch-relay.json"))
+    body = c.get("/diagnostics").json()
+
+    assert body["relay"]["owner"]["state"] == "foreign"
+    assert body["relay"]["runtime_recovery"] == "started"
+    recovery_messages = [
+        item["message"]
+        for item in body["relay"]["troubleshooting"]
+        if item["code"] == "tunnel_owner_recovery_started"
+    ]
+    assert recovery_messages == [
+        "Fetch detected a foreign tunnel owner and started a replacement runtime. "
+        "The relay should reconnect automatically."
+    ]
 
 
 def test_diagnostics_reports_missing_pairing_separately_from_owner(monkeypatch, tmp_path):

@@ -797,14 +797,29 @@ def ensure_relay_runtime(*, environment: dict[str, str] | None = None) -> str:
             unhealthy_owner.get("owner_pid") or "unknown",
         )
         if not is_runtime_child:
-            if not _terminate_process(runtime_pid):
-                return "already-running"
-            current_pid, _role = _read_pid_record(_pid_path())
-            if current_pid == runtime_pid:
-                try:
-                    _pid_path().unlink()
-                except OSError:
-                    pass
+            discard_record = False
+            if _process_alive(runtime_pid):
+                if not _command_looks_like_runtime(_process_command(runtime_pid)):
+                    log.warning(
+                        "Fetch relay runtime pid=%s is alive but cannot be verified as Fetch "
+                        "runtime; discarding stale record without terminating",
+                        runtime_pid,
+                    )
+                    discard_record = True
+                elif not _terminate_process(runtime_pid):
+                    return "already-running"
+                else:
+                    discard_record = True
+            else:
+                discard_record = True
+
+            if discard_record:
+                current_pid, _role = _read_pid_record(_pid_path())
+                if current_pid == runtime_pid:
+                    try:
+                        _pid_path().unlink()
+                    except OSError:
+                        pass
         # A runtime child replaces itself by spawning its successor and writing
         # the successor pid below. The child's supersession watcher then exits
         # the old dashboard process cleanly while the new tunnel takes over.
