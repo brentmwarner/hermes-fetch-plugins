@@ -705,9 +705,11 @@ def _runtime_record_age_s(pid: int) -> float | None:
     """Age of the structured runtime record when it still names ``pid``."""
     try:
         data = json.loads(_pid_path().read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return None
         record_pid = int(data.get("pid"))
         created_at = float(data.get("created_at"))
-    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+    except (OSError, TypeError, ValueError, json.JSONDecodeError, AttributeError):
         return None
     if record_pid != pid or created_at <= 0:
         return None
@@ -748,6 +750,13 @@ def _unhealthy_tunnel_owner(runtime_pid: int) -> dict | None:
         "foreign",
         "unowned",
     }:
+        return None
+    if status.get("state") == "unowned" and runtime_pid == os.getpid():
+        # The child calls ensure_relay_runtime() from _spawn_tunnel before it
+        # starts the tunnel, so unowned is the expected pre-tunnel state.
+        # Treating it as failed after grace replaces this process, returns
+        # "started", and skips the tunnel — a slow discover_plugins path then
+        # respawns successors forever.
         return None
 
     age_s = _runtime_record_age_s(runtime_pid)
