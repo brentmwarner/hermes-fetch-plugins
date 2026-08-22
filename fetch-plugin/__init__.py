@@ -724,6 +724,17 @@ def _should_start_tunnel() -> bool:
     return _tunnel_start_reason() is not None
 
 
+def _dashboard_session_token() -> str | None:
+    """Load the dashboard credential from the same durable config as setup.
+
+    Hermes reads ``~/.hermes/.env`` without necessarily exporting its values
+    into the host process environment. Reading only ``os.environ`` therefore
+    starts a healthy relay tunnel that forwards every protected request without
+    a token after some restart and update paths.
+    """
+    return _relay._config_value("HERMES_DASHBOARD_SESSION_TOKEN")
+
+
 def _spawn_tunnel() -> None:
     """Start the agent-side reverse-tunnel client on a daemon thread, so the
     phone can reach this NAT'd agent with no inbound port. A first install stays
@@ -782,7 +793,7 @@ def _spawn_tunnel() -> None:
                         relay_url=creds.relay_url,
                         agent_id=creds.agent_id,
                         agent_secret=creds.agent_secret,
-                        dashboard_token=os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN"),
+                        dashboard_token=_dashboard_session_token(),
                         reload_credentials=relay_client._read_credentials,
                     )
                     try:
