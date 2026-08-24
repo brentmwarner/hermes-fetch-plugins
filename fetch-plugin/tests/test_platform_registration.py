@@ -70,6 +70,21 @@ def test_fetch_tunnel_false_env_overrides_pairing(monkeypatch):
     assert fetch._tunnel_start_reason() is None
 
 
+def test_dashboard_token_loads_from_persisted_hermes_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("HERMES_DASHBOARD_SESSION_TOKEN", raising=False)
+    (tmp_path / ".env").write_text(
+        "HERMES_DASHBOARD_SESSION_TOKEN=persisted-dashboard-token\n",
+        encoding="utf-8",
+    )
+    fetch = _load_module(
+        "fetch_plugin_persisted_dashboard_token_test",
+        FETCH_PLUGIN_DIR / "__init__.py",
+    )
+    monkeypatch.setattr(fetch._relay, "_hermes_home", lambda hermes_home=None: tmp_path)
+
+    assert fetch._dashboard_session_token() == "persisted-dashboard-token"
+
+
 def test_fetch_is_not_connected_from_stale_delivery_env(monkeypatch):
     monkeypatch.setenv("HERMES_FETCH_DELIVERY_ENABLED", "1")
     monkeypatch.setenv("HERMES_FETCH_HOME_CHANNEL", "default")
