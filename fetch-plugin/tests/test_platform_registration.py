@@ -70,6 +70,35 @@ def test_fetch_tunnel_false_env_overrides_pairing(monkeypatch):
     assert fetch._tunnel_start_reason() is None
 
 
+def test_specialist_registration_never_starts_tunnel_or_keeper(monkeypatch):
+    """A specialist stays passive even with pairing and enablement state."""
+    monkeypatch.setenv("HERMES_FETCH_OWNER_PROFILE", "default")
+    monkeypatch.setenv("HERMES_PROFILE", "OPS")
+    monkeypatch.setenv("HERMES_FETCH_TUNNEL_ENABLED", "1")
+    fetch = _load_module(
+        "fetch_plugin_specialist_passive_test", FETCH_PLUGIN_DIR / "__init__.py"
+    )
+    monkeypatch.setattr(fetch._pairing, "is_pairing_configured", lambda: True)
+    keeper_calls = []
+    runtime_calls = []
+    monkeypatch.setattr(
+        fetch._runtime,
+        "start_runtime_keeper",
+        lambda **kwargs: keeper_calls.append(kwargs) or True,
+    )
+    monkeypatch.setattr(
+        fetch._runtime,
+        "ensure_relay_runtime",
+        lambda **kwargs: runtime_calls.append(kwargs) or "started",
+    )
+
+    assert fetch._tunnel_start_reason() is None
+    fetch._spawn_tunnel()
+
+    assert keeper_calls == []
+    assert runtime_calls == []
+
+
 def test_dashboard_token_loads_from_persisted_hermes_env(tmp_path, monkeypatch):
     monkeypatch.delenv("HERMES_DASHBOARD_SESSION_TOKEN", raising=False)
     (tmp_path / ".env").write_text(

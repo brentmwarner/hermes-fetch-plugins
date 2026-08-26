@@ -50,6 +50,7 @@ STORE_HOME_ENV = "HERMES_FETCH_STORE_HOME"
 
 _relay_module = None
 _preview_module = None
+_owner_module_cache = None
 
 
 @dataclass(frozen=True)
@@ -120,6 +121,24 @@ def _start_runtime_keeper_best_effort() -> None:
         runtime.start_default_runtime_keeper()
     except Exception:
         logger.debug("Fetch inbox adapter could not start the runtime keeper", exc_info=True)
+
+
+def _load_owner():
+    global _owner_module_cache
+    if _owner_module_cache is not None:
+        return _owner_module_cache
+    existing = sys.modules.get("fetch_plugin_owner")
+    if existing is not None:
+        _owner_module_cache = existing
+        return existing
+    path = Path(__file__).resolve().parent / "_owner.py"
+    spec = importlib.util.spec_from_file_location("fetch_plugin_owner", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    _owner_module_cache = module
+    return module
 
 
 class FetchInboxAdapter(BasePlatformAdapter):
@@ -205,7 +224,7 @@ class FetchInboxAdapter(BasePlatformAdapter):
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         channel = _channel_from_chat_id(chat_id)
         name = DEFAULT_TITLE if _is_home_channel(channel) else _label_for_channel(channel)
-        return {"name": name, "type": "dm"}
+        return {"name": name, "type": "dm", "chat_id": channel}
 
 
 def check_requirements() -> bool:
@@ -591,10 +610,7 @@ def _store_home() -> Path:
     instead — so a delivery run under a worker profile still lands in the
     relay-paired home the Fetch app reads.
     """
-    override = os.environ.get(STORE_HOME_ENV, "").strip()
-    if override:
-        return Path(os.path.expanduser(override))
-    return get_hermes_home()
+    return _load_owner().delivery_home()
 
 
 def _channel_from_chat_id(chat_id) -> str:

@@ -68,6 +68,19 @@ def _runtime_module():
     return module
 
 
+def _owner_module():
+    existing = sys.modules.get("fetch_plugin_owner")
+    if existing is not None:
+        return existing
+    path = Path(__file__).resolve().parent / "_owner.py"
+    spec = importlib.util.spec_from_file_location("fetch_plugin_owner", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _computer_runtime_module():
     """Load the dedicated computer bridge runtime helper by file path."""
     existing = sys.modules.get("fetch_plugin_computer_runtime")
@@ -221,12 +234,7 @@ def _gated_dashboard_warning(status: dict | None) -> str | None:
 
 
 def _hermes_home() -> Path:
-    try:
-        from hermes_cli.config import get_hermes_home
-
-        return Path(get_hermes_home())
-    except Exception:
-        return Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
+    return _owner_module().owner_home()
 
 
 def _has_relay_pairing_credentials() -> bool:
@@ -438,6 +446,12 @@ def interactive_setup() -> None:
                 "Fetch could not start the relay runtime automatically. Start it manually:\n"
                 "      HERMES_FETCH_TUNNEL_ENABLED=1 hermes dashboard --no-open"
             )
+        elif runtime_status == "foreign-listener":
+            print_info(
+                "Port 127.0.0.1:9119 is owned by a dashboard Fetch cannot authenticate "
+                "as this profile. Identify and stop that profile's dashboard/runtime, then "
+                "rerun Fetch setup. Fetch did not kill or attach to it."
+            )
         else:
             print_info("Fetch started the relay runtime, but the relay still reports the agent offline.")
         print_info(f"Tunnel status: {reason}")
@@ -446,6 +460,17 @@ def interactive_setup() -> None:
         print()
 
     print_header("Fetch")
+    policy = _owner_module().policy_status()
+    if not policy.get("is_owner"):
+        print_warning(
+            f"This is Hermes profile {policy.get('current_profile')!r}, which is a passive "
+            f"Fetch bot. Pair Fetch only from owner profile {policy.get('owner_profile')!r}."
+        )
+        print_info(
+            "The bot remains usable and its proactive/routed results use the owner's one "
+            "mobile Fetch lane; it does not need its own phone pairing."
+        )
+        return
     if is_pairing_configured():
         _inbox_module().enable_delivery_for_future_starts()
         print_info("Fetch: already configured")

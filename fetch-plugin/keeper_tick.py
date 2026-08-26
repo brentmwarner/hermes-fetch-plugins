@@ -38,7 +38,15 @@ def _load(module_name: str, filename: str):
 def main() -> int:
     runtime = _load("fetch_plugin_runtime", "_runtime.py")
     if not runtime.keeper_should_run():
-        print("gate closed (tunnel disabled or unpaired); nothing to keep")
+        policy = runtime.owner_policy_status()
+        if not policy.get("is_owner"):
+            print(
+                "gate closed "
+                f"(profile={policy.get('current_profile')} is passive; "
+                f"Fetch owner={policy.get('owner_profile')}); nothing to keep"
+            )
+        else:
+            print("gate closed (tunnel disabled or unpaired); nothing to keep")
         return 0
     relay_status = runtime.ensure_relay_runtime()
     computer = _load("fetch_plugin_computer_runtime", "_computer_runtime.py")

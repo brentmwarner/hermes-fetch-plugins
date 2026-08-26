@@ -109,7 +109,17 @@ _FETCH_COMPUTER_HANDOFF_HINT = (
     "hidden or minimized window or another virtual desktop/Space. Use native "
     "computer_use capture and input actions for work the person should watch, "
     "capture the exact app/window before acting, and verify state-changing "
-    "actions with capture_after=true. To move or resize a window, first use "
+    "actions with capture_after=true. On Fedora/KDE Wayland, use the installed "
+    "`computer-use-linux` MCP for host desktop capture and input, not cua-driver. "
+    "The Fetch Watch computer is separate: on Linux it is a private Ubuntu "
+    "desktop in Docker, while Hermes remains on the host. If the person asks to "
+    "enable or repair it and Docker is missing, give the exact host command: "
+    "Ubuntu/Debian: `sudo apt-get update && sudo apt-get install -y docker.io`; "
+    "Fedora: `sudo dnf install -y moby-engine`; then on either system: "
+    "`sudo systemctl enable --now docker`. After Docker is ready, run "
+    "`~/.hermes/plugins/fetch/linux-computer/manage-computer.sh bootstrap` only "
+    "after the person has approved the system-level install. "
+    "To move or resize a window, first use "
     "computer_use action=list_windows, then call fetch_window_control with the "
     "exact pid and window_id; do not simulate a title-bar drag. After a "
     "successful window move, capture the visible desktop so the Fetch chat "
@@ -704,6 +714,8 @@ def _relay_runtime_dir(relay_client) -> Path:
 
 
 def _tunnel_start_reason() -> str | None:
+    if not _runtime.is_owner_profile():
+        return None
     configured = os.environ.get("HERMES_FETCH_TUNNEL_ENABLED")
     if configured is not None and configured.strip():
         if _truthy(configured):
@@ -742,7 +754,17 @@ def _spawn_tunnel() -> None:
     if the legacy env flag was not persisted. The tunnel module + its
     `websockets` dep are imported lazily here, so an unpaired host is unaffected.
     """
-    # Every long-lived host keeps the detached runtimes alive: a reconfigure
+    if not _runtime.is_owner_profile():
+        policy = _runtime.owner_policy_status()
+        log.info(
+            "Fetch tunnel passive in non-owner profile %r (owner=%r); "
+            "backend delivery remains routed through the owner lane",
+            policy.get("current_profile"),
+            policy.get("owner_profile"),
+        )
+        return
+
+    # Every long-lived owner host keeps the detached runtimes alive: a reconfigure
     # that stops them and loses its restart leg no longer strands the agent
     # offline until manual intervention. Started ahead of the pairing gate so
     # a host that loaded Fetch before first pairing still has keeper coverage
@@ -764,7 +786,10 @@ def _spawn_tunnel() -> None:
     # load the inbox adapter, so in-process keeper threads alone leave the
     # agent unprotected). Armed on every paired pass through registration.
     _runtime.ensure_keeper_units()
-    if _runtime.ensure_relay_runtime() in {"started", "already-running"}:
+    runtime_status = _runtime.ensure_relay_runtime()
+    if runtime_status in {"started", "already-running"}:
+        return
+    if runtime_status in {"non-owner", "foreign-listener"}:
         return
 
     def _run() -> None:
@@ -772,6 +797,20 @@ def _spawn_tunnel() -> None:
             tunnel = _load_sibling("fetch_plugin_tunnel", "_tunnel.py")
 
             async def _boot() -> None:
+                listener = _runtime.dashboard_listener_status()
+                if listener.get("state") not in {"not-listening", "compatible"}:
+                    log.error(_runtime.dashboard_listener_diagnostic(listener))
+                    return
+
+                async def _require_compatible_dashboard() -> None:
+                    status = await asyncio.to_thread(
+                        _runtime.dashboard_listener_status
+                    )
+                    if status.get("state") != "compatible":
+                        raise RuntimeError(
+                            _runtime.dashboard_listener_diagnostic(status)
+                        )
+
                 relay_client = _relay.relay_client()
                 creds = await relay_client._credentials()
                 # Loop so a reconfigure that re-mints the agent identity hands
@@ -779,6 +818,14 @@ def _spawn_tunnel() -> None:
                 # `superseded_by` set, we drop the old per-agent lock and
                 # re-acquire under the new id.
                 while True:
+                    if not _runtime.is_owner_profile():
+                        policy = _runtime.owner_policy_status()
+                        log.warning(
+                            "Fetch tunnel stopped because profile %r is no longer owner %r",
+                            policy.get("current_profile"),
+                            policy.get("owner_profile"),
+                        )
+                        return
                     owner = tunnel.TunnelOwnerLock(agent_id=creds.agent_id, lock_dir=_relay_runtime_dir(relay_client))
                     if not owner.acquire():
                         log.info(
@@ -795,6 +842,7 @@ def _spawn_tunnel() -> None:
                         agent_secret=creds.agent_secret,
                         dashboard_token=_dashboard_session_token(),
                         reload_credentials=relay_client._read_credentials,
+                        dashboard_check=_require_compatible_dashboard,
                     )
                     try:
                         await client.run_forever()

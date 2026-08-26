@@ -88,6 +88,30 @@ def test_badge_is_best_effort_when_relay_fails():
     assert res.json() == {"ok": True}
 
 
+def test_runtime_identity_exposes_non_secret_owner_proof(monkeypatch):
+    policy = {
+        "owner_profile": "default",
+        "current_profile": "default",
+        "is_owner": True,
+        "valid": True,
+        "error": None,
+        "setting": "HERMES_FETCH_OWNER_PROFILE",
+    }
+    monkeypatch.setattr(
+        api,
+        "_load_sibling",
+        lambda module_name, filename: types.SimpleNamespace(
+            owner_policy_status=lambda: policy
+        ),
+    )
+
+    response = _client(_FakeClient()).get("/runtime/identity")
+
+    assert response.status_code == 200
+    assert response.json() == {"schema": 1, **policy}
+    assert "token" not in response.text.lower()
+
+
 def test_attachment_download_supports_byte_ranges(monkeypatch, tmp_path):
     report = tmp_path / "report.pdf"
     report.write_bytes(b"0123456789")

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import json
 import logging
 import os
@@ -446,6 +447,7 @@ class AgentTunnel:
         local_ws_connect=None,
         http_client_factory=None,
         reload_credentials=None,
+        dashboard_check=None,
     ) -> None:
         self.relay_ws_url = _http_to_ws(relay_url).rstrip("/") + "/v1/tunnel/agent"
         self.agent_id = agent_id
@@ -462,6 +464,11 @@ class AgentTunnel:
         # the credentials it booted with. Returns an object with agent_id /
         # agent_secret (or None).
         self._reload_credentials = reload_credentials
+        # Optional owner-runtime proof. Production supplies an authenticated
+        # identity check for 127.0.0.1:9119; tests and standalone callers can
+        # omit it. It runs before the relay connects and before every new local
+        # REST/WebSocket forwarding path, so a replaced listener fails closed.
+        self._dashboard_check = dashboard_check
         self._consecutive_auth_rejects = 0
         # Set when disk credentials were re-minted under a NEW agent id: this
         # tunnel exits run_forever() and the owner re-acquires the (per-agent)
@@ -598,6 +605,7 @@ class AgentTunnel:
         return _CREDS_UNCHANGED
 
     async def _serve_once(self, *, on_connected: Callable[[], None] | None = None) -> None:
+        await self._require_compatible_dashboard()
         ws = await self._relay_connect(self.relay_ws_url, self._headers)
         if on_connected is not None:
             on_connected()
@@ -640,6 +648,7 @@ class AgentTunnel:
     async def _handle_rest(self, ws, frame: dict) -> None:
         cid, sid = frame.get("cid"), frame.get("sid")
         try:
+            await self._require_compatible_dashboard()
             if (frame.get("path") or "") == _LITE_SESSION_STARTS_PATH:
                 status, headers, body, is_b64 = await self._session_starts(frame)
             else:
@@ -708,6 +717,7 @@ class AgentTunnel:
         existing = self._sessions.get(cid)
         if existing is not None:
             return existing
+        await self._require_compatible_dashboard()
         if self._local_ws_health.unhealthy:
             await asyncio.sleep(_jittered_delay(1.0, unhealthy=True))
         conn = await self._local_ws_connect(self.dashboard_base, self.dashboard_token)
@@ -715,6 +725,15 @@ class AgentTunnel:
         self._sessions[cid] = sess
         sess.pump_task = asyncio.create_task(self._pump_local(ws, cid, sess))
         return sess
+
+    async def _require_compatible_dashboard(self) -> None:
+        if self._dashboard_check is None:
+            return
+        result = self._dashboard_check()
+        if inspect.isawaitable(result):
+            result = await result
+        if result is False:
+            raise RuntimeError("local dashboard ownership check failed")
 
     async def _handle_ws_frame(self, ws, frame: dict) -> None:
         cid = frame.get("cid")

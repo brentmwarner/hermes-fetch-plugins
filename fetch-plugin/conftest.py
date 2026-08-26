@@ -18,3 +18,4 @@ stub_agent_modules()
 # these explicitly.
 os.environ.setdefault("HERMES_FETCH_TUNNEL_DISABLE_DASHBOARD_AUTOSTART", "1")
 os.environ.setdefault("HERMES_FETCH_COMPUTER_DISABLE_AUTOSTART", "1")
+os.environ.setdefault("HERMES_FETCH_OWNER_PROFILE", "default")

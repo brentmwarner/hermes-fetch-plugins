@@ -461,6 +461,10 @@ def test_keeper_accepts_sibling_bot_display_ports(tmp_path, monkeypatch) -> None
     monkeypatch.setenv(computer_runtime.TARGET_ENV, "tcp://127.0.0.1:5902")
     monkeypatch.delenv(computer_runtime.LEGACY_TARGET_ENV, raising=False)
     monkeypatch.delenv("HERMES_FETCH_COMPUTER_HOST_OPT_IN", raising=False)
+    # The keeper compares all bridge settings. Clear any real host credentials
+    # inherited by pytest so this test isolates the sibling-display target rule.
+    for key in computer_runtime._KEEPER_PERSISTED_ENVS:
+        monkeypatch.delenv(key, raising=False)
     (tmp_path / ".env").write_text(
         f'{computer_runtime.TARGET_ENV}="tcp://127.0.0.1:5901"\n', encoding="utf-8"
     )

@@ -74,6 +74,18 @@ def test_hermes_home_honors_fetch_store_home(monkeypatch, tmp_path):
     assert relay._hermes_home() == tmp_path
 
 
+def test_specialist_relay_client_routes_to_owner_home(monkeypatch, tmp_path):
+    owner_home = tmp_path / "owner"
+    monkeypatch.delenv("HERMES_FETCH_STORE_HOME", raising=False)
+    monkeypatch.setattr(
+        relay,
+        "_owner_module",
+        lambda: type("Owner", (), {"delivery_home": staticmethod(lambda: owner_home)}),
+    )
+
+    assert relay._hermes_home() == owner_home
+
+
 def _patch_transport(monkeypatch, handler):
     transport = httpx.MockTransport(handler)
     real = httpx.AsyncClient

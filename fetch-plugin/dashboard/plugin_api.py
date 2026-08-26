@@ -120,6 +120,18 @@ class BadgeBody(BaseModel):
     count: int = Field(ge=0)
 
 
+@router.get("/runtime/identity")
+def runtime_identity() -> dict:
+    """Authenticated proof that the 9119 dashboard belongs to Fetch's owner.
+
+    The headless runtime queries this before attaching its relay tunnel.  The
+    response contains profile names only; the dashboard middleware verifies the
+    session token and no credential or token material is returned.
+    """
+    runtime = _load_sibling("fetch_plugin_runtime_identity_api", "_runtime.py")
+    return {"schema": 1, **runtime.owner_policy_status()}
+
+
 def _safe_attachment_path(raw_path: str) -> Path | None:
     try:
         from gateway.platforms.base import validate_media_delivery_path
@@ -300,8 +312,18 @@ def _relay_troubleshooting(
     owner_status: dict,
     pairing_status: dict,
     runtime_recovery: str | None = None,
+    owner_policy: dict | None = None,
 ) -> list[dict]:
     items: list[dict] = []
+    if owner_policy and not owner_policy.get("is_owner"):
+        items.append({
+            "code": "non_owner_profile",
+            "message": (
+                f"Hermes profile {owner_policy.get('current_profile')!r} is a passive Fetch bot; "
+                f"only owner profile {owner_policy.get('owner_profile')!r} may serve the mobile "
+                "dashboard and tunnel. Routed delivery still uses the owner's Fetch lane."
+            ),
+        })
     if owner_status.get("state") == "owned" and not owner_status.get("owner_current_process"):
         items.append({
             "code": "shared_tunnel_owner",
@@ -420,6 +442,7 @@ async def badge(body: BadgeBody) -> dict:
 async def diagnostics() -> dict:
     runtime = _load_sibling("fetch_plugin_runtime_api", "_runtime.py")
     tunnel = _load_sibling("fetch_plugin_tunnel_api", "_tunnel.py")
+    owner_policy = runtime.owner_policy_status()
     relay_state = {"configured": False, "owner_pid": None, "owner_current_process": False}
     try:
         relay_client = _relay.relay_client()
@@ -442,6 +465,7 @@ async def diagnostics() -> dict:
             "relay_url": creds.relay_url,
             "agent_id": creds.agent_id,
             "tunnel_enabled": runtime.truthy(os.environ.get(runtime.TUNNEL_ENABLED_ENV)),
+            "owner_policy": owner_policy,
             "runtime_pid": runtime._active_runtime_pid(),
             "runtime_recovery": runtime_recovery,
             "owner_pid": owner_status["owner_pid"],
@@ -452,6 +476,7 @@ async def diagnostics() -> dict:
                 owner_status,
                 pairing_status,
                 runtime_recovery,
+                owner_policy,
             ),
         }
     except Exception as exc:
@@ -461,6 +486,7 @@ async def diagnostics() -> dict:
         "relay": relay_state,
         "provider": _active_model_config(),
         "profiles": _profile_diagnostics(),
+        "fetch_owner": owner_policy,
     }
 
 
