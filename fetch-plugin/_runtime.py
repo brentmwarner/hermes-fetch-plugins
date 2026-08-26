@@ -715,6 +715,7 @@ def _keeper_unit_texts() -> dict[str, str]:
     policy = owner_policy_status()
     owner_profile = str(policy["owner_profile"])
     owner_home = str(_owner_module().owner_home())
+    store_home = str(_owner_module().delivery_home())
 
     def environment_line(name: str, value: str) -> str:
         # systemd.syntax double-quoted items use backslash escapes. Keep the
@@ -731,7 +732,7 @@ def _keeper_unit_texts() -> dict[str, str]:
         + environment_line(OWNER_PROFILE_ENV, owner_profile)
         + environment_line("HERMES_PROFILE", owner_profile)
         + environment_line("HERMES_HOME", owner_home)
-        + environment_line(STORE_HOME_ENV, owner_home)
+        + environment_line(STORE_HOME_ENV, store_home)
         + f"ExecStart={_child_python_executable()} {tick_script}\n"
     )
     timer = (
@@ -1055,11 +1056,13 @@ def ensure_relay_runtime(*, environment: dict[str, str] | None = None) -> str:
     env = dict(environment) if environment is not None else os.environ.copy()
     policy = owner_policy_status()
     owner_profile = str(policy["owner_profile"])
-    owner_home = _owner_module().owner_home()
+    owner_module = _owner_module()
+    owner_home = owner_module.owner_home()
+    store_home = owner_module.delivery_home()
     env[TUNNEL_ENABLED_ENV] = "1"
     env[AUTOSTART_RUNTIME_ENV] = "1"
     env[OWNER_PROFILE_ENV] = owner_profile
-    env[STORE_HOME_ENV] = str(owner_home)
+    env[STORE_HOME_ENV] = str(store_home)
     env["HERMES_PROFILE"] = owner_profile
     env["HERMES_HOME"] = str(owner_home)
     env["PYTHONPATH"] = _child_pythonpath()

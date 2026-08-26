@@ -1221,7 +1221,10 @@ def test_keeper_unit_pins_an_explicit_named_owner(monkeypatch, tmp_path) -> None
     fake_owner = type(
         "Owner",
         (),
-        {"owner_home": staticmethod(lambda: owner_home)},
+        {
+            "owner_home": staticmethod(lambda: owner_home),
+            "delivery_home": staticmethod(lambda: owner_home),
+        },
     )
     monkeypatch.setattr(
         runtime,
@@ -1240,6 +1243,52 @@ def test_keeper_unit_pins_an_explicit_named_owner(monkeypatch, tmp_path) -> None
     assert 'Environment="HERMES_PROFILE=researcher"' in service
     assert f'Environment="HERMES_HOME={owner_home}"' in service
     assert f'Environment="HERMES_FETCH_STORE_HOME={owner_home}"' in service
+
+
+def test_spawn_and_keeper_preserve_explicit_store_home_override(
+    tmp_path, monkeypatch
+) -> None:
+    owner_home = tmp_path / "owner"
+    routed_home = tmp_path / "mobile-owner"
+    fake_owner = type(
+        "Owner",
+        (),
+        {
+            "owner_home": staticmethod(lambda: owner_home),
+            "delivery_home": staticmethod(lambda: routed_home),
+        },
+    )
+    calls = []
+
+    def fake_popen(args, **kwargs):
+        calls.append(kwargs)
+        return FakeProcess()
+
+    monkeypatch.setattr(runtime, "_hermes_home", lambda: owner_home)
+    monkeypatch.setattr(runtime, "_active_runtime_pid", lambda **kwargs: None)
+    monkeypatch.setattr(runtime, "_child_pythonpath", lambda: "/tmp/hermes-agent")
+    monkeypatch.setattr(runtime, "_child_python_executable", lambda: "/tmp/hermes-venv/bin/python")
+    monkeypatch.setattr(runtime.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(runtime, "_owner_module", lambda: fake_owner)
+    monkeypatch.setattr(
+        runtime,
+        "owner_policy_status",
+        lambda: {
+            "owner_profile": "default",
+            "current_profile": "default",
+            "is_owner": True,
+        },
+    )
+    monkeypatch.delenv(runtime.DISABLE_AUTOSTART_ENV, raising=False)
+    monkeypatch.delenv(runtime.AUTOSTART_RUNTIME_ENV, raising=False)
+
+    assert runtime.ensure_relay_runtime() == "started"
+    assert calls[0]["env"][runtime.STORE_HOME_ENV] == str(routed_home)
+    assert calls[0]["env"]["HERMES_HOME"] == str(owner_home)
+
+    service = runtime._keeper_unit_texts()["fetch-runtime-keeper.service"]
+    assert f'Environment="HERMES_HOME={owner_home}"' in service
+    assert f'Environment="HERMES_FETCH_STORE_HOME={routed_home}"' in service
 
 
 def test_ensure_keeper_units_unsupported_off_linux(monkeypatch, tmp_path) -> None:
