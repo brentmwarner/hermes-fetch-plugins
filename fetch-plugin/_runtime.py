@@ -20,6 +20,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 log = logging.getLogger("fetch_plugin.runtime")
@@ -33,6 +35,10 @@ _CHILD_POLL_S = 5.0
 TUNNEL_ENABLED_ENV = "HERMES_FETCH_TUNNEL_ENABLED"
 AUTOSTART_RUNTIME_ENV = "HERMES_FETCH_TUNNEL_AUTOSTARTED_RUNTIME"
 DISABLE_AUTOSTART_ENV = "HERMES_FETCH_TUNNEL_DISABLE_DASHBOARD_AUTOSTART"
+OWNER_PROFILE_ENV = "HERMES_FETCH_OWNER_PROFILE"
+STORE_HOME_ENV = "HERMES_FETCH_STORE_HOME"
+DASHBOARD_TOKEN_ENV = "HERMES_DASHBOARD_SESSION_TOKEN"
+DASHBOARD_IDENTITY_PATH = "/api/plugins/fetch/runtime/identity"
 
 _PID_FILE = "fetch-relay-runtime.pid"
 _LOG_FILE = "fetch-relay-runtime.log"
@@ -43,6 +49,27 @@ _MODULE_STARTED_MONOTONIC = time.monotonic()
 
 def truthy(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _owner_module():
+    existing = sys.modules.get("fetch_plugin_owner")
+    if existing is not None:
+        return existing
+    path = Path(__file__).resolve().parent / "_owner.py"
+    spec = importlib.util.spec_from_file_location("fetch_plugin_owner", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def owner_policy_status() -> dict[str, object]:
+    return _owner_module().policy_status()
+
+
+def is_owner_profile() -> bool:
+    return bool(owner_policy_status().get("is_owner"))
 
 
 def _hermes_home() -> Path:
@@ -189,10 +216,13 @@ def _read_pid_record(path: Path) -> tuple[int | None, str | None]:
 
 
 def _write_pid_record(path: Path, pid: int) -> None:
+    policy = owner_policy_status()
     data = {
         "pid": pid,
         "role": _PID_ROLE,
         "created_at": time.time(),
+        "profile": policy.get("current_profile"),
+        "owner_profile": policy.get("owner_profile"),
     }
     path.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
 
@@ -285,6 +315,118 @@ def _dashboard_listening(host: str = DASHBOARD_HOST, port: int = DASHBOARD_PORT)
         return False
 
 
+def _dashboard_session_token() -> str | None:
+    try:
+        return _owner_module().owner_config_value(DASHBOARD_TOKEN_ENV)
+    except Exception:
+        log.debug("Fetch could not load the owner dashboard token", exc_info=True)
+        return None
+
+
+def dashboard_listener_status(
+    host: str = DASHBOARD_HOST,
+    port: int = DASHBOARD_PORT,
+    *,
+    timeout_s: float = 1.0,
+) -> dict[str, object]:
+    """Authenticate and identify the process already serving the Fetch port.
+
+    A TCP accept proves only that *something* owns 9119.  Compatibility
+    requires the current owner's dashboard session token plus the Fetch plugin
+    identity endpoint reporting the same normalized owner profile.
+    """
+    policy = owner_policy_status()
+    if not _dashboard_listening(host, port):
+        return {**policy, "state": "not-listening", "compatible": False}
+    if not policy.get("is_owner"):
+        return {**policy, "state": "non-owner-listener", "compatible": False}
+
+    token = _dashboard_session_token()
+    if not token:
+        return {
+            **policy,
+            "state": "unverified-listener",
+            "compatible": False,
+            "reason": f"{DASHBOARD_TOKEN_ENV} is unavailable",
+        }
+
+    request = urllib.request.Request(
+        f"http://{host}:{port}{DASHBOARD_IDENTITY_PATH}",
+        headers={"X-Hermes-Session-Token": token},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_s) as response:
+            status_code = int(getattr(response, "status", 200))
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        state = "unauthorized-listener" if exc.code in {401, 403} else "unverified-listener"
+        return {
+            **policy,
+            "state": state,
+            "compatible": False,
+            "http_status": exc.code,
+        }
+    except Exception as exc:
+        return {
+            **policy,
+            "state": "unverified-listener",
+            "compatible": False,
+            "reason": type(exc).__name__,
+        }
+
+    if status_code != 200 or not isinstance(payload, dict):
+        return {
+            **policy,
+            "state": "unverified-listener",
+            "compatible": False,
+            "http_status": status_code,
+        }
+    reported_owner = str(payload.get("owner_profile") or "")
+    reported_current = str(payload.get("current_profile") or "")
+    expected_owner = str(policy.get("owner_profile") or "")
+    if (
+        payload.get("schema") == 1
+        and payload.get("is_owner") is True
+        and reported_owner == expected_owner
+        and reported_current == expected_owner
+    ):
+        return {
+            **policy,
+            "state": "compatible",
+            "compatible": True,
+            "listener_profile": reported_current,
+        }
+    return {
+        **policy,
+        "state": "foreign-profile-listener",
+        "compatible": False,
+        "listener_profile": reported_current or None,
+        "listener_owner_profile": reported_owner or None,
+    }
+
+
+def dashboard_listener_diagnostic(status: dict[str, object]) -> str:
+    """Non-secret actionable explanation for a listener we refuse to use."""
+    state = str(status.get("state") or "unverified-listener")
+    listener_profile = status.get("listener_profile")
+    owner_profile = status.get("owner_profile") or "default"
+    if state == "not-listening":
+        return (
+            f"Fetch owner profile {owner_profile!r} found no compatible dashboard "
+            f"on {DASHBOARD_HOST}:{DASHBOARD_PORT}. Refusing to forward mobile "
+            "traffic until the owner dashboard is listening."
+        )
+    detail = f" profile={listener_profile!r}" if listener_profile else ""
+    return (
+        f"Fetch owner profile {owner_profile!r} found an incompatible listener on "
+        f"{DASHBOARD_HOST}:{DASHBOARD_PORT} (state={state}{detail}). Refusing to "
+        "attach the mobile tunnel or stop that process. Identify the listener, "
+        "stop it through its owning Hermes profile/service, then restart the "
+        "Fetch owner profile."
+    )
+
+
 def enable_tunnel_for_future_starts() -> None:
     """Persist tunnel enablement when the user completes Fetch relay setup."""
     os.environ[TUNNEL_ENABLED_ENV] = "1"
@@ -302,7 +444,7 @@ def _child_script() -> str:
     return f"""
 import json
 import os
-import socket
+import importlib.util
 import sys
 import threading
 import time
@@ -313,17 +455,10 @@ DASHBOARD_PORT = {DASHBOARD_PORT!r}
 TUNNEL_ENABLED_ENV = {TUNNEL_ENABLED_ENV!r}
 AUTOSTART_RUNTIME_ENV = {AUTOSTART_RUNTIME_ENV!r}
 PROJECT_ROOT = {project_root_text!r}
+RUNTIME_PATH = {str(Path(__file__).resolve())!r}
 PID_PATH = {str(_pid_path())!r}
 POLL_S = {_CHILD_POLL_S!r}
 MAX_START_FAILURES = 5
-
-
-def dashboard_listening():
-    try:
-        with socket.create_connection((DASHBOARD_HOST, DASHBOARD_PORT), timeout=0.25):
-            return True
-    except OSError:
-        return False
 
 
 def superseded():
@@ -362,6 +497,23 @@ load_hermes_dotenv()
 os.environ[AUTOSTART_RUNTIME_ENV] = "1"
 os.environ[TUNNEL_ENABLED_ENV] = "1"
 
+spec = importlib.util.spec_from_file_location("fetch_plugin_runtime", RUNTIME_PATH)
+if spec is None or spec.loader is None:
+    raise RuntimeError("Fetch runtime module is unavailable")
+runtime = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = runtime
+spec.loader.exec_module(runtime)
+
+# A replaced child should yield without probing whichever process now owns the
+# port. Otherwise authenticate + identify an existing listener BEFORE plugin
+# discovery can start a tunnel to it.
+if superseded():
+    sys.exit(0)
+listener = runtime.dashboard_listener_status(host=DASHBOARD_HOST, port=DASHBOARD_PORT)
+if listener["state"] not in {{"not-listening", "compatible"}}:
+    print(runtime.dashboard_listener_diagnostic(listener), file=sys.stderr)
+    sys.exit(2)
+
 from hermes_cli.plugins import discover_plugins
 discover_plugins()
 
@@ -383,9 +535,10 @@ threading.Thread(target=watch_superseded, daemon=True).start()
 
 consecutive_failures = 0
 while True:
-    if dashboard_listening():
+    listener = runtime.dashboard_listener_status(host=DASHBOARD_HOST, port=DASHBOARD_PORT)
+    if listener["state"] == "compatible":
         consecutive_failures = 0
-    else:
+    elif listener["state"] == "not-listening":
         try:
             from hermes_cli.web_server import start_server
             start_server(host=DASHBOARD_HOST, port=DASHBOARD_PORT, open_browser=False, allow_public=False)
@@ -399,6 +552,9 @@ while True:
                 # ensure_relay_runtime() boots a fresh process instead of
                 # this one squatting on the record as "already-running".
                 sys.exit(1)
+    else:
+        print(runtime.dashboard_listener_diagnostic(listener), file=sys.stderr)
+        sys.exit(2)
     time.sleep(POLL_S)
 """
 
@@ -424,13 +580,22 @@ def start_runtime_keeper(
     ``ensure_relay_runtime()`` again. Each long-lived host process ticks this
     keeper instead, so a stopped runtime is respawned within about a minute.
 
-    Ticks are cheap while healthy (a pid-file read). Concurrent keepers in
-    several processes are safe: the ensures are pid-file guarded and a
-    double-spawned runtime child exits on its own once the pid record names
-    its sibling. Returns False when this process already has a keeper.
+    Ticks are cheap while healthy (a pid-file read). Concurrent keepers inside
+    the owner profile are safe: the ensures are pid-file guarded and a
+    double-spawned runtime child exits once the pid record names its sibling.
+    Non-owner profiles never create a keeper. Returns False when passive or
+    when this process already has a keeper.
     """
     if not interval_s > 0.0:  # also rejects NaN
         raise ValueError("interval_s must be a positive number of seconds")
+    if not is_owner_profile():
+        policy = owner_policy_status()
+        log.info(
+            "Fetch runtime keeper passive in non-owner profile %r (owner=%r)",
+            policy.get("current_profile"),
+            policy.get("owner_profile"),
+        )
+        return False
     global _keeper_running, _keeper_stop_event
     with _keeper_lock:
         if _keeper_running:
@@ -443,7 +608,7 @@ def start_runtime_keeper(
         failing = False
         while not stop.wait(interval_s + random.uniform(0.0, max(0.0, jitter_s))):
             try:
-                if not should_run():
+                if not is_owner_profile() or not should_run():
                     continue
                 if ensure_relay_runtime() == "started":
                     log.info("Fetch keeper restarted the relay runtime; it was not running")
@@ -501,6 +666,8 @@ def keeper_should_run() -> bool:
     ``__init__``: an explicit HERMES_FETCH_TUNNEL_ENABLED wins; otherwise a
     paired agent keeps its runtimes alive.
     """
+    if not is_owner_profile():
+        return False
     configured = os.environ.get(TUNNEL_ENABLED_ENV)
     if configured is not None and configured.strip():
         return truthy(configured)
@@ -519,6 +686,9 @@ def start_default_runtime_keeper() -> bool:
     environment went stale after a disable/reconfigure elsewhere cannot
     resurrect the old bridge.
     """
+
+    if not is_owner_profile():
+        return False
 
     def _ensure_computer() -> str:
         computer = _sibling("fetch_plugin_computer_runtime", "_computer_runtime.py")
@@ -542,13 +712,28 @@ def _systemd_user_dir() -> Path:
 
 def _keeper_unit_texts() -> dict[str, str]:
     tick_script = Path(__file__).resolve().parent / _KEEPER_TICK_FILE
+    policy = owner_policy_status()
+    owner_profile = str(policy["owner_profile"])
+    owner_home = str(_owner_module().owner_home())
+    store_home = str(_owner_module().delivery_home())
+
+    def environment_line(name: str, value: str) -> str:
+        # systemd.syntax double-quoted items use backslash escapes. Keep the
+        # owner home intact even when a user name or custom path has spaces.
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'Environment="{name}={escaped}"\n'
+
     service = (
         "[Unit]\n"
         "Description=Fetch runtime keeper (respawn relay/computer runtimes)\n"
         "\n"
         "[Service]\n"
         "Type=oneshot\n"
-        f"ExecStart={_child_python_executable()} {tick_script}\n"
+        + environment_line(OWNER_PROFILE_ENV, owner_profile)
+        + environment_line("HERMES_PROFILE", owner_profile)
+        + environment_line("HERMES_HOME", owner_home)
+        + environment_line(STORE_HOME_ENV, store_home)
+        + f"ExecStart={_child_python_executable()} {tick_script}\n"
     )
     timer = (
         "[Unit]\n"
@@ -590,8 +775,10 @@ def ensure_keeper_units() -> str:
     adapter). A user-level timer survives every Hermes process, so a runtime
     stopped by an interrupted reconfigure heals within a minute regardless of
     which processes are running. Returns "installed", "unchanged",
-    "unsupported", or "failed".
+    "non-owner", "unsupported", or "failed".
     """
+    if not is_owner_profile():
+        return "non-owner"
     if sys.platform != "linux" or shutil.which("systemctl") is None:
         return "unsupported"
     unit_dir = _systemd_user_dir()
@@ -637,6 +824,24 @@ def restart_relay_runtime_for_reconfigure() -> dict:
     killed (that would tear down the user's sessions); its tunnel self-heals by
     reloading credentials from disk on the next auth rejection.
     """
+    if not is_owner_profile():
+        return {"status": "non-owner", "stopped": [], "left_running": []}
+
+    # Setup may be invoked precisely while another profile owns fixed port
+    # 9119. Never terminate any runtime/lock holder until that listener has
+    # authenticated as this owner. An old or foreign listener must be stopped
+    # through the profile/service that actually owns it.
+    listener = dashboard_listener_status()
+    if listener.get("state") not in {"not-listening", "compatible"}:
+        diagnostic = dashboard_listener_diagnostic(listener)
+        log.error(diagnostic)
+        return {
+            "status": "foreign-listener",
+            "stopped": [],
+            "left_running": [],
+            "diagnostic": diagnostic,
+        }
+
     stopped: list[int] = []
     left_running: list[int] = []
 
@@ -777,11 +982,26 @@ def ensure_relay_runtime(*, environment: dict[str, str] | None = None) -> str:
       - "started": spawned a background process.
       - "already-running": a previous runtime PID is still alive.
       - "self": this process is already the autostart child.
+      - "non-owner": this Hermes profile is deliberately passive.
+      - "foreign-listener": 9119 is owned by an unverified/incompatible process.
       - "disabled": autostart is explicitly disabled.
       - "failed": spawning failed; callers may fall back to inline tunnel start.
     """
+    if not is_owner_profile():
+        policy = owner_policy_status()
+        log.info(
+            "Fetch relay runtime passive in non-owner profile %r (owner=%r)",
+            policy.get("current_profile"),
+            policy.get("owner_profile"),
+        )
+        return "non-owner"
     if truthy(os.environ.get(DISABLE_AUTOSTART_ENV)):
         return "disabled"
+
+    listener = dashboard_listener_status()
+    if listener.get("state") not in {"not-listening", "compatible"}:
+        log.error(dashboard_listener_diagnostic(listener))
+        return "foreign-listener"
 
     is_runtime_child = truthy(os.environ.get(AUTOSTART_RUNTIME_ENV))
     runtime_pid = os.getpid() if is_runtime_child else _active_runtime_pid(reclaim_legacy=True)
@@ -834,8 +1054,17 @@ def ensure_relay_runtime(*, environment: dict[str, str] | None = None) -> str:
         return "failed"
 
     env = dict(environment) if environment is not None else os.environ.copy()
+    policy = owner_policy_status()
+    owner_profile = str(policy["owner_profile"])
+    owner_module = _owner_module()
+    owner_home = owner_module.owner_home()
+    store_home = owner_module.delivery_home()
     env[TUNNEL_ENABLED_ENV] = "1"
     env[AUTOSTART_RUNTIME_ENV] = "1"
+    env[OWNER_PROFILE_ENV] = owner_profile
+    env[STORE_HOME_ENV] = str(store_home)
+    env["HERMES_PROFILE"] = owner_profile
+    env["HERMES_HOME"] = str(owner_home)
     env["PYTHONPATH"] = _child_pythonpath()
     log_path = log_dir / _LOG_FILE
     try:

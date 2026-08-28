@@ -50,6 +50,7 @@ Optional environment variables:
 | `HERMES_FETCH_RELAY_URL` | Override the hosted Fetch push relay URL. |
 | `HERMES_FETCH_ENROLLMENT_TOKEN` | One-time setup code from the signed-in Fetch app. Usually pasted interactively during setup. |
 | `HERMES_FETCH_RELAY_REGISTRATION_TOKEN` | Operator/private relay registration token. Public Fetch users should not need this. |
+| `HERMES_FETCH_OWNER_PROFILE` | Select the one Hermes profile allowed to own Fetch's mobile tunnel/dashboard; defaults to `default`. Persist it in the root/default Hermes `.env` for multi-profile installs. |
 | `HERMES_FETCH_TUNNEL_ENABLED` | Enabled automatically by Fetch relay setup so the agent keeps a reverse tunnel to the hosted relay. |
 | `HERMES_FETCH_TUNNEL_DISABLE_DASHBOARD_AUTOSTART` | Opt out of Fetch's headless local dashboard/API autostart if you run that process yourself. |
 | `HERMES_FETCH_COMPUTER_TARGET` | Optional loopback-only VNC target for the Fetch computer viewer. Linux, Mac, and Windows default to the Ubuntu `fetch-computer` container at `tcp://127.0.0.1:5901`. See the plugin README. |
@@ -59,4 +60,5 @@ Optional environment variables:
 
 Delivery enablement and the home channel are configured for you by setup; see
 [`fetch-plugin/README.md`](fetch-plugin/README.md) for the advanced internal
-knobs (`HERMES_FETCH_HOME_CHANNEL`, `HERMES_FETCH_STORE_HOME`).
+knobs (`HERMES_FETCH_HOME_CHANNEL`, `HERMES_FETCH_STORE_HOME`) and the
+single-owner multi-bot migration/recovery procedure.

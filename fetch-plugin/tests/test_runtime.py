@@ -14,6 +14,24 @@ _spec = importlib.util.spec_from_file_location("fetch_plugin_runtime_test", _p)
 runtime = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = runtime
 _spec.loader.exec_module(runtime)
+_REAL_DASHBOARD_LISTENER_STATUS = runtime.dashboard_listener_status
+
+
+@pytest.fixture(autouse=True)
+def _avoid_host_dashboard_probe(monkeypatch):
+    """Runtime unit tests never inspect host dashboard or tunnel-owner state."""
+    monkeypatch.setattr(
+        runtime,
+        "dashboard_listener_status",
+        lambda *args, **kwargs: {
+            "state": "not-listening",
+            "compatible": False,
+            "owner_profile": "default",
+            "current_profile": "default",
+            "is_owner": True,
+        },
+    )
+    monkeypatch.setattr(runtime, "_current_tunnel_owner_status", lambda: None)
 
 
 class FakeProcess:
@@ -53,6 +71,8 @@ def test_ensure_relay_runtime_starts_child_with_tunnel_env(tmp_path, monkeypatch
     assert "superseded()" in args[2]
     assert kwargs["env"][runtime.TUNNEL_ENABLED_ENV] == "1"
     assert kwargs["env"][runtime.AUTOSTART_RUNTIME_ENV] == "1"
+    assert kwargs["env"][runtime.OWNER_PROFILE_ENV] == "default"
+    assert kwargs["env"]["HERMES_PROFILE"] == "default"
     assert kwargs["env"]["PYTHONPATH"] == "/tmp/hermes-agent"
     assert kwargs["stdin"] == runtime.subprocess.DEVNULL
     assert kwargs["stderr"] == runtime.subprocess.STDOUT
@@ -529,6 +549,170 @@ def test_ensure_relay_runtime_respects_disable_env(monkeypatch) -> None:
     assert runtime.ensure_relay_runtime() == "disabled"
 
 
+def test_specialist_with_stale_tunnel_state_cannot_own_or_reclaim_runtime(
+    tmp_path, monkeypatch
+) -> None:
+    """Regression: an ops profile may have creds/PID state but stays passive."""
+    specialist_home = tmp_path / "profiles" / "ops"
+    (specialist_home / "push").mkdir(parents=True)
+    (specialist_home / "push" / "fetch-relay.json").write_text(
+        json.dumps({"agent_id": "ops-agent", "agent_secret": "stale"}),
+        encoding="utf-8",
+    )
+    (specialist_home / "run").mkdir()
+    (specialist_home / "run" / "fetch-relay-runtime.pid").write_text(
+        json.dumps({"pid": 4242, "role": "fetch-relay-runtime"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(runtime.OWNER_PROFILE_ENV, "Default")
+    monkeypatch.setenv("HERMES_PROFILE", "OPS")
+    monkeypatch.setenv("HERMES_HOME", str(specialist_home))
+    monkeypatch.setenv(runtime.TUNNEL_ENABLED_ENV, "1")
+    monkeypatch.delenv(runtime.DISABLE_AUTOSTART_ENV, raising=False)
+    monkeypatch.setattr(runtime, "_hermes_home", lambda: specialist_home)
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "Popen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not spawn")),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_terminate_process",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not reclaim")),
+    )
+
+    assert runtime.owner_policy_status()["current_profile"] == "ops"
+    assert runtime.keeper_should_run() is False
+    assert runtime.start_default_runtime_keeper() is False
+    assert runtime.ensure_keeper_units() == "non-owner"
+    assert runtime.ensure_relay_runtime() == "non-owner"
+    assert runtime.restart_relay_runtime_for_reconfigure() == {
+        "status": "non-owner",
+        "stopped": [],
+        "left_running": [],
+    }
+
+
+def test_explicit_owner_profile_is_case_normalized(monkeypatch) -> None:
+    monkeypatch.setenv(runtime.OWNER_PROFILE_ENV, " ReSeArChEr ")
+    monkeypatch.setenv("HERMES_PROFILE", "RESEARCHER")
+
+    assert runtime.owner_policy_status() == {
+        "owner_profile": "researcher",
+        "current_profile": "researcher",
+        "is_owner": True,
+        "valid": True,
+        "error": None,
+        "setting": runtime.OWNER_PROFILE_ENV,
+    }
+
+
+def test_foreign_dashboard_listener_fails_closed_without_kill(monkeypatch) -> None:
+    foreign = {
+        "state": "foreign-profile-listener",
+        "compatible": False,
+        "owner_profile": "default",
+        "current_profile": "default",
+        "listener_profile": "ops",
+        "is_owner": True,
+    }
+    monkeypatch.setattr(runtime, "dashboard_listener_status", lambda: foreign)
+    monkeypatch.delenv(runtime.DISABLE_AUTOSTART_ENV, raising=False)
+    monkeypatch.delenv(runtime.AUTOSTART_RUNTIME_ENV, raising=False)
+    monkeypatch.setattr(
+        runtime,
+        "_terminate_process",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not kill listener")),
+    )
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "Popen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not spawn")),
+    )
+
+    assert runtime.ensure_relay_runtime() == "foreign-listener"
+
+
+def test_reconfigure_never_kills_an_unverified_listener_or_lock_holder(
+    monkeypatch,
+) -> None:
+    foreign = {
+        "state": "unverified-listener",
+        "compatible": False,
+        "owner_profile": "default",
+        "current_profile": "default",
+        "is_owner": True,
+    }
+    monkeypatch.setattr(runtime, "dashboard_listener_status", lambda: foreign)
+    monkeypatch.setattr(
+        runtime,
+        "_active_runtime_pid",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("must not inspect a runtime before listener proof")
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_terminate_process",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("must not kill an unverified listener")
+        ),
+    )
+
+    result = runtime.restart_relay_runtime_for_reconfigure()
+
+    assert result["status"] == "foreign-listener"
+    assert result["stopped"] == []
+    assert result["left_running"] == []
+    assert "Refusing to attach" in result["diagnostic"]
+
+
+def test_bare_tcp_listener_is_not_dashboard_owner_health(monkeypatch) -> None:
+    listener, port = _free_port_listener()
+    monkeypatch.setattr(runtime, "_dashboard_session_token", lambda: "expected-owner-token")
+    # Bypass the autouse status stub to exercise the real proof request.
+    try:
+        status = _REAL_DASHBOARD_LISTENER_STATUS(
+            host="127.0.0.1", port=port, timeout_s=0.05
+        )
+    finally:
+        listener.close()
+
+    assert status["state"] == "unverified-listener"
+    assert status["compatible"] is False
+
+
+def test_authenticated_specialist_dashboard_is_still_a_foreign_listener(monkeypatch) -> None:
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {
+                    "schema": 1,
+                    "owner_profile": "default",
+                    "current_profile": "ops",
+                    "is_owner": False,
+                }
+            ).encode()
+
+    monkeypatch.setattr(runtime, "_dashboard_listening", lambda *args, **kwargs: True)
+    monkeypatch.setattr(runtime, "_dashboard_session_token", lambda: "expected-owner-token")
+    monkeypatch.setattr(runtime.urllib.request, "urlopen", lambda *args, **kwargs: Response())
+
+    status = _REAL_DASHBOARD_LISTENER_STATUS()
+
+    assert status["state"] == "foreign-profile-listener"
+    assert status["listener_profile"] == "ops"
+    assert status["compatible"] is False
+
+
 def test_enable_tunnel_for_future_starts_sets_current_env(monkeypatch) -> None:
     monkeypatch.delenv(runtime.TUNNEL_ENABLED_ENV, raising=False)
 
@@ -748,6 +932,35 @@ def test_child_script_exits_when_superseded(tmp_path, monkeypatch) -> None:
 
     assert result.returncode == 0  # exited instead of sleeping forever
     assert not marker.exists()  # never fought the live dashboard for the port
+
+
+def test_child_script_fails_closed_on_unverified_existing_listener(
+    tmp_path, monkeypatch
+) -> None:
+    marker = tmp_path / "served.txt"
+    stub_root = tmp_path / "proj"
+    _stub_hermes_cli(stub_root, marker)
+    listener, port = _free_port_listener()
+    monkeypatch.setattr(runtime, "_hermes_project_root", lambda: stub_root)
+    monkeypatch.setattr(runtime, "_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(runtime, "DASHBOARD_PORT", port)
+    monkeypatch.setattr(runtime, "_CHILD_POLL_S", 0.05)
+    monkeypatch.setenv(runtime.DASHBOARD_TOKEN_ENV, "owner-token")
+    (tmp_path / "run").mkdir()
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", runtime._child_script()],
+            capture_output=True,
+            timeout=10,
+        )
+    finally:
+        listener.close()
+
+    assert result.returncode == 2
+    assert b"incompatible listener" in result.stderr
+    assert b"Refusing to attach" in result.stderr
+    assert not marker.exists()  # discovery/server start never ran
 
 
 def test_child_script_takes_over_when_dashboard_is_down_then_yields(tmp_path, monkeypatch) -> None:
@@ -987,6 +1200,10 @@ def test_ensure_keeper_units_installs_then_unchanged(monkeypatch, tmp_path) -> N
     service = (unit_dir / "fetch-runtime-keeper.service").read_text(encoding="utf-8")
     assert "keeper_tick.py" in service
     assert "/venv/bin/python" in service
+    assert 'Environment="HERMES_FETCH_OWNER_PROFILE=default"' in service
+    assert 'Environment="HERMES_PROFILE=default"' in service
+    assert 'Environment="HERMES_HOME=' in service
+    assert 'Environment="HERMES_FETCH_STORE_HOME=' in service
     timer = (unit_dir / "fetch-runtime-keeper.timer").read_text(encoding="utf-8")
     assert "OnUnitActiveSec=60" in timer
     assert ["systemctl", "--user", "daemon-reload"] in calls
@@ -997,6 +1214,81 @@ def test_ensure_keeper_units_installs_then_unchanged(monkeypatch, tmp_path) -> N
     # No content change: enable stays (idempotent) but no daemon-reload churn.
     assert ["systemctl", "--user", "daemon-reload"] not in calls
     assert ["systemctl", "--user", "enable", "--now", "fetch-runtime-keeper.timer"] in calls
+
+
+def test_keeper_unit_pins_an_explicit_named_owner(monkeypatch, tmp_path) -> None:
+    owner_home = tmp_path / "Hermes Owner" / "researcher"
+    fake_owner = type(
+        "Owner",
+        (),
+        {
+            "owner_home": staticmethod(lambda: owner_home),
+            "delivery_home": staticmethod(lambda: owner_home),
+        },
+    )
+    monkeypatch.setattr(
+        runtime,
+        "owner_policy_status",
+        lambda: {
+            "owner_profile": "researcher",
+            "current_profile": "researcher",
+            "is_owner": True,
+        },
+    )
+    monkeypatch.setattr(runtime, "_owner_module", lambda: fake_owner)
+
+    service = runtime._keeper_unit_texts()["fetch-runtime-keeper.service"]
+
+    assert 'Environment="HERMES_FETCH_OWNER_PROFILE=researcher"' in service
+    assert 'Environment="HERMES_PROFILE=researcher"' in service
+    assert f'Environment="HERMES_HOME={owner_home}"' in service
+    assert f'Environment="HERMES_FETCH_STORE_HOME={owner_home}"' in service
+
+
+def test_spawn_and_keeper_preserve_explicit_store_home_override(
+    tmp_path, monkeypatch
+) -> None:
+    owner_home = tmp_path / "owner"
+    routed_home = tmp_path / "mobile-owner"
+    fake_owner = type(
+        "Owner",
+        (),
+        {
+            "owner_home": staticmethod(lambda: owner_home),
+            "delivery_home": staticmethod(lambda: routed_home),
+        },
+    )
+    calls = []
+
+    def fake_popen(args, **kwargs):
+        calls.append(kwargs)
+        return FakeProcess()
+
+    monkeypatch.setattr(runtime, "_hermes_home", lambda: owner_home)
+    monkeypatch.setattr(runtime, "_active_runtime_pid", lambda **kwargs: None)
+    monkeypatch.setattr(runtime, "_child_pythonpath", lambda: "/tmp/hermes-agent")
+    monkeypatch.setattr(runtime, "_child_python_executable", lambda: "/tmp/hermes-venv/bin/python")
+    monkeypatch.setattr(runtime.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(runtime, "_owner_module", lambda: fake_owner)
+    monkeypatch.setattr(
+        runtime,
+        "owner_policy_status",
+        lambda: {
+            "owner_profile": "default",
+            "current_profile": "default",
+            "is_owner": True,
+        },
+    )
+    monkeypatch.delenv(runtime.DISABLE_AUTOSTART_ENV, raising=False)
+    monkeypatch.delenv(runtime.AUTOSTART_RUNTIME_ENV, raising=False)
+
+    assert runtime.ensure_relay_runtime() == "started"
+    assert calls[0]["env"][runtime.STORE_HOME_ENV] == str(routed_home)
+    assert calls[0]["env"]["HERMES_HOME"] == str(owner_home)
+
+    service = runtime._keeper_unit_texts()["fetch-runtime-keeper.service"]
+    assert f'Environment="HERMES_HOME={owner_home}"' in service
+    assert f'Environment="HERMES_FETCH_STORE_HOME={routed_home}"' in service
 
 
 def test_ensure_keeper_units_unsupported_off_linux(monkeypatch, tmp_path) -> None:

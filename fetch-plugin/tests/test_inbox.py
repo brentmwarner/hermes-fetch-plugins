@@ -32,6 +32,7 @@ def _load_inbox():
 def test_seed_creates_fetch_alias(tmp_path, monkeypatch):
     inbox = _load_inbox()
     monkeypatch.setattr(inbox, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(inbox, "_store_home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_FETCH_HOME_CHANNEL", "default")
 
     inbox.seed_channel_alias()
@@ -45,6 +46,7 @@ def test_seed_preserves_other_platform_aliases(tmp_path, monkeypatch):
     are left exactly as they were."""
     inbox = _load_inbox()
     monkeypatch.setattr(inbox, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(inbox, "_store_home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_FETCH_HOME_CHANNEL", "default")
     existing = {"telegram": {"6927549812": "Brent"}}
     (tmp_path / ALIASES).write_text(json.dumps(existing), encoding="utf-8")
@@ -64,6 +66,7 @@ def test_seed_prunes_stale_fetch_home_alias_after_home_channel_change(tmp_path, 
     (value != "Fetch") are preserved."""
     inbox = _load_inbox()
     monkeypatch.setattr(inbox, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(inbox, "_store_home", lambda: tmp_path)
     monkeypatch.setenv("HERMES_FETCH_HOME_CHANNEL", "default")
     existing = {"fetch": {"leads": "Fetch", "custom": "My Phone"}}
     (tmp_path / ALIASES).write_text(json.dumps(existing), encoding="utf-8")
@@ -194,10 +197,14 @@ def test_standalone_send_reports_oversized_attachment(tmp_path, monkeypatch):
     }
 
 
-def test_media_delivery_fails_closed_without_hermes_validator(tmp_path):
+def test_media_delivery_fails_closed_without_hermes_validator(tmp_path, monkeypatch):
     inbox = _load_inbox()
     report = tmp_path / "report.pdf"
     report.write_bytes(b"%PDF")
+    # The installed Hermes runtime may supply the validator; remove it to
+    # exercise the older-runtime fail-closed path this test covers.
+    base = sys.modules["gateway.platforms.base"]
+    monkeypatch.delattr(base, "validate_media_delivery_path", raising=False)
 
     with pytest.raises(ValueError, match="could not deliver"):
         inbox._content_with_media("Ready.", [(str(report), False)])
@@ -281,8 +288,8 @@ def test_adapter_get_chat_info_returns_basic_descriptor(monkeypatch):
     default = asyncio.run(adapter.get_chat_info("fetch"))
     researcher = asyncio.run(adapter.get_chat_info("fetch:researcher"))
 
-    assert default == {"name": "Fetch", "type": "dm"}
-    assert researcher == {"name": "Researcher", "type": "dm"}
+    assert default == {"name": "Fetch", "type": "dm", "chat_id": "default"}
+    assert researcher == {"name": "Researcher", "type": "dm", "chat_id": "researcher"}
 
 
 def test_adapter_connect_accepts_reconnect_keyword():
@@ -305,8 +312,8 @@ def test_adapter_get_chat_info_preserves_title_for_custom_home_channel(monkeypat
     home = asyncio.run(adapter.get_chat_info("fetch"))
     researcher = asyncio.run(adapter.get_chat_info("fetch:researcher"))
 
-    assert home == {"name": "Fetch", "type": "dm"}
-    assert researcher == {"name": "Researcher", "type": "dm"}
+    assert home == {"name": "Fetch", "type": "dm", "chat_id": "leads"}
+    assert researcher == {"name": "Researcher", "type": "dm", "chat_id": "researcher"}
 
 
 def test_standalone_send_titles_home_cron_delivery_from_job_name(monkeypatch):
@@ -410,6 +417,28 @@ def test_deliver_to_inbox_uses_store_home_override(monkeypatch, tmp_path):
     inbox.deliver_to_inbox(channel="researcher", content="hi", title="Researcher")
 
     assert opened == [relay_home / "state.db"]
+
+
+def test_specialist_delivery_automatically_uses_owner_mobile_lane(monkeypatch, tmp_path):
+    inbox = _load_inbox()
+    owner_home = tmp_path / "owner"
+    opened = []
+    monkeypatch.delenv("HERMES_FETCH_STORE_HOME", raising=False)
+    monkeypatch.setattr(
+        inbox,
+        "_load_owner",
+        lambda: type("Owner", (), {"delivery_home": staticmethod(lambda: owner_home)}),
+    )
+    monkeypatch.setattr(
+        inbox,
+        "SessionDB",
+        lambda **kw: opened.append(kw.get("db_path")) or _FakeDB(),
+    )
+    monkeypatch.setattr(inbox, "_notify_proactive", lambda **kw: None)
+
+    inbox.deliver_to_inbox(channel="researcher", content="done", title="Researcher")
+
+    assert opened == [owner_home / "state.db"]
 
 
 def test_deliver_to_inbox_routes_home_cron_delivery_to_job_thread(monkeypatch):

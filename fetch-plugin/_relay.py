@@ -17,9 +17,11 @@ per-agent ``agent_id`` + ``agent_secret`` minted on first use.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import logging
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -40,6 +42,19 @@ _DEDUPE_WINDOW_S = 10.0
 _SYSTEM_INBOX_AGENT_SLUGS = {"default"}
 _NEUTRAL_AGENT_ID = "default"
 _NEUTRAL_AGENT_NAME = "Fetch"
+
+
+def _owner_module():
+    existing = sys.modules.get("fetch_plugin_owner")
+    if existing is not None:
+        return existing
+    path = Path(__file__).resolve().parent / "_owner.py"
+    spec = importlib.util.spec_from_file_location("fetch_plugin_owner", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def _clean_agent_slug(value: object) -> str:
@@ -158,15 +173,9 @@ def _with_agent_identity(
 def _hermes_home(hermes_home: Path | None = None) -> Path:
     if hermes_home is not None:
         return Path(hermes_home).expanduser()
-    store_home = os.environ.get("HERMES_FETCH_STORE_HOME", "").strip()
-    if store_home:
-        return Path(os.path.expanduser(store_home))
-    try:
-        from hermes_cli.config import get_hermes_home
-
-        return Path(get_hermes_home())
-    except Exception:
-        return Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
+    # Pushes from specialist bots use the one mobile owner's relay identity.
+    # HERMES_FETCH_STORE_HOME remains an explicit compatibility override.
+    return _owner_module().delivery_home()
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:

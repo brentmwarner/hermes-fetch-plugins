@@ -75,6 +75,20 @@ def test_hint_documents_computer_handoff(registered_platform):
     assert "Do not imply every Mac agent lives on the host desktop" in hint
 
 
+def test_hint_documents_linux_fetch_computer_and_native_mcp(registered_platform):
+    """Fetch sessions must know the isolated Linux path and current input tool."""
+    hint = registered_platform["platform_hint"]
+    assert "Docker" in hint
+    assert "Ubuntu/Debian" in hint
+    assert "sudo apt-get update && sudo apt-get install -y docker.io" in hint
+    assert "Fedora" in hint
+    assert "sudo dnf install -y moby-engine" in hint
+    assert "private Ubuntu desktop" in hint
+    assert "manage-computer.sh bootstrap" in hint
+    assert "computer-use-linux" in hint
+    assert "not cua-driver" in hint
+
+
 def test_hint_documents_card_fence_syntax(registered_platform):
     hint = registered_platform["platform_hint"]
     assert "```card" in hint, "must show the ```card fence language"

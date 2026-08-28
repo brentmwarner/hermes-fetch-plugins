@@ -260,6 +260,40 @@ async def test_rest_error_returns_502():
     assert ws.sent[0]["status"] == 502
 
 
+async def test_rest_forwarding_fails_closed_when_dashboard_owner_changes():
+    forwarded = []
+
+    def handler(request):
+        forwarded.append(request.url.path)
+        return httpx.Response(200, json={"ok": True})
+
+    async def reject_foreign_listener():
+        raise RuntimeError(
+            "incompatible listener on 127.0.0.1:9119; refusing to attach"
+        )
+
+    t = _client(
+        dashboard_check=reject_foreign_listener,
+        http_client_factory=_http_factory(handler),
+    )
+    ws = FakeRelayWS()
+
+    await t._handle_rest(
+        ws,
+        {
+            "t": "rest-req",
+            "cid": "c1",
+            "sid": 4,
+            "method": "GET",
+            "path": "/api/status",
+        },
+    )
+
+    assert forwarded == []
+    assert ws.sent[0]["status"] == 502
+    assert "incompatible listener" in ws.sent[0]["error"]
+
+
 async def test_rest_only_does_not_open_local_websocket():
     calls = {"local": 0}
 
@@ -303,6 +337,24 @@ async def test_ws_open_pumps_local_frames_back():
     assert frames[0]["data"]["params"]["type"] == "gateway.ready"
     await t._close_session("c1")
     assert fake.closed
+
+
+async def test_ws_open_fails_closed_before_connecting_to_foreign_dashboard():
+    local_calls = []
+
+    async def local_connect(base, token):
+        local_calls.append((base, token))
+        return FakeLocalConn()
+
+    t = _client(
+        dashboard_check=lambda: False,
+        local_ws_connect=local_connect,
+    )
+
+    with pytest.raises(RuntimeError, match="ownership check failed"):
+        await t._ensure_session(FakeRelayWS(), "c1")
+
+    assert local_calls == []
 
 
 async def test_multiple_fetch_app_clients_share_one_agent_tunnel():
@@ -362,6 +414,24 @@ async def test_run_forever_exits_when_stopped():
     t = _client()
     t.stop()
     await asyncio.wait_for(t.run_forever(), timeout=1)
+
+
+async def test_relay_connection_waits_for_compatible_dashboard():
+    relay_calls = []
+
+    async def relay_connect(url, headers):
+        relay_calls.append((url, headers))
+        raise AssertionError("must not connect the relay to a foreign dashboard")
+
+    t = _client(
+        dashboard_check=lambda: False,
+        relay_connect=relay_connect,
+    )
+
+    with pytest.raises(RuntimeError, match="ownership check failed"):
+        await t._serve_once()
+
+    assert relay_calls == []
 
 
 # --- stale-credential self-heal (reconfigure recovery) ---

@@ -153,6 +153,39 @@ class _FakeRelayClient:
         return self.status
 
 
+def test_interactive_setup_keeps_non_owner_profile_unpaired(monkeypatch, capsys) -> None:
+    attempted = []
+    monkeypatch.setattr(
+        pairing,
+        "_owner_module",
+        lambda: type(
+            "Owner",
+            (),
+            {
+                "policy_status": staticmethod(
+                    lambda: {
+                        "current_profile": "ops",
+                        "owner_profile": "default",
+                        "is_owner": False,
+                    }
+                )
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        pairing,
+        "_try_build_relay_pairing",
+        lambda: attempted.append(1) or None,
+    )
+
+    pairing.interactive_setup()
+
+    assert attempted == []
+    output = capsys.readouterr().out
+    assert "passive Fetch bot" in output
+    assert "does not need its own phone pairing" in output
+
+
 def test_interactive_setup_hides_link_when_tunnel_not_online(monkeypatch, capsys, tmp_path) -> None:
     link = "https://tryfetchapp.com/setup?agent=a1&pairing=p1"
     monkeypatch.setattr(pairing, "_hermes_home", lambda: tmp_path)

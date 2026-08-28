@@ -32,3 +32,7 @@ def _dont_boot_real_docker_from_plugin_load(monkeypatch):
     """
 
     monkeypatch.setenv("HERMES_FETCH_COMPUTER_DISABLE_AUTOSTART", "1")
+    # Ownership tests override these explicitly. All other tests run as the
+    # backwards-compatible default owner and never inherit host profile state.
+    monkeypatch.setenv("HERMES_FETCH_OWNER_PROFILE", "default")
+    monkeypatch.delenv("HERMES_PROFILE", raising=False)

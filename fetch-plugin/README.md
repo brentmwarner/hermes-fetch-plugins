@@ -51,6 +51,44 @@ to Apple. This host only ever stores an anonymous, per-agent `agent_id` +
 `agent_secret` (in `~/.hermes/push/fetch-relay.json`), minted automatically on
 first use.
 
+### One mobile owner, many backend bots
+
+Fetch has one phone identity and one loopback dashboard port per Hermes
+installation. It is not a separate mobile account for every Hermes profile.
+Exactly one profile is the **Fetch owner**:
+
+- `HERMES_FETCH_OWNER_PROFILE` selects it. Profile ids are trimmed and
+  normalized to lowercase with Hermes' profile rules. With no setting, the
+  owner is `default`, preserving single-profile behavior.
+- Put the durable setting in the root/default Hermes environment file
+  (`~/.hermes/.env` in a standard install), not only in a named profile's
+  `.env`. Named profiles explicitly read that root policy. If the value is
+  supplied by a service/process environment instead, supply the same value to
+  every Hermes profile process.
+- Only the owner may start, keep, reclaim, or connect the Fetch relay runtime,
+  reverse tunnel, and `127.0.0.1:9119` dashboard. A specialist remains passive
+  even if its old home still contains Fetch credentials, a runtime PID file,
+  pairing state, or `HERMES_FETCH_TUNNEL_ENABLED=1`.
+- The supervised keeper unit is written with the normalized owner profile and
+  owner home pinned into its environment. This keeps an explicitly named owner
+  durable across logouts/reboots instead of letting the global user timer fall
+  back to `default`.
+- Specialist profiles remain normal backend bots and do not need phone
+  pairing. Their `fetch` delivery sessions and relay pushes automatically use
+  the owner home's state DB and credentials. The originating profile remains
+  represented in Fetch notification/session metadata, so routed and proactive
+  results still arrive through the one mobile lane.
+
+For the standard `default` owner, the explicit policy is:
+
+```dotenv
+HERMES_FETCH_OWNER_PROFILE=default
+```
+
+An explicit named owner is supported (for example `researcher`), but that
+profile must exist and must be the only profile paired to Fetch. Configure the
+same normalized value machine-wide before starting any profile processes.
+
 ## Install (per user)
 
 ```bash
@@ -321,6 +359,106 @@ connected Fetch setup by themselves. The setup status is based on the relay
 pairing stored at `~/.hermes/push/fetch-relay.json`, because that is the state
 the phone actually needs to reach the agent.
 
+### Diagnose and recover a multi-profile 9119 collision
+
+The historical failure had an exact chain: a shared/symlinked plugin was loaded
+by `default`, `researcher`, `coder`, `watcher`, and `ops`; each profile had an
+independent PID/credential home, while every runtime used fixed port 9119. An
+`ops` runtime bound 9119. The default runtime treated a bare TCP listener as
+healthy and connected the default relay identity and dashboard token to that
+ops dashboard. Fetch iOS then reported **“Unauthorized — check your session
+token or login”**, and the relay could enter a rapid reconnect loop.
+
+Current code never uses TCP liveness as ownership proof. Before plugin discovery
+can open a tunnel to an existing listener—and before each new tunneled REST or
+WebSocket forwarding path—it calls the authenticated
+`/api/plugins/fetch/runtime/identity` endpoint and verifies that both the
+listener profile and configured owner match. A missing endpoint, wrong session
+token, malformed response, or different profile is an incompatible listener.
+Runtime reconfiguration performs the same proof before it stops any managed
+process. The owner exits/fails closed with a diagnostic; it does not attach,
+hijack, or kill the other process.
+
+Recovery after upgrading the plugin (none of these commands prints a token or
+relay credential):
+
+1. Confirm the intended owner and add exactly one policy line to the root
+   environment file shown by
+   `HERMES_HOME="$HOME/.hermes" hermes config env-path` (substitute the root
+   Hermes home on a custom installation):
+
+   ```dotenv
+   HERMES_FETCH_OWNER_PROFILE=default
+   ```
+
+2. Inventory the collision without reading `.env` or `fetch-relay.json`:
+
+   ```bash
+   hermes gateway list
+   hermes dashboard --status
+   ss -ltnp '( sport = :9119 )'   # Linux; use lsof -nP -iTCP:9119 -sTCP:LISTEN on macOS
+   ```
+
+3. Restart specialist gateways so they load the new passive-owner gate. Stop
+   any separately managed specialist dashboard/service through the profile or
+   supervisor that owns it:
+
+   ```bash
+   HERMES_HOME="$HOME/.hermes/profiles/researcher" hermes gateway restart
+   HERMES_HOME="$HOME/.hermes/profiles/coder" hermes gateway restart
+   HERMES_HOME="$HOME/.hermes/profiles/watcher" hermes gateway restart
+   HERMES_HOME="$HOME/.hermes/profiles/ops" hermes gateway restart
+   ```
+
+   Do **not** use `hermes dashboard --stop` for collision recovery: it stops all
+   Hermes web-server processes, not just the foreign listener. If 9119 is still
+   listed, use the PID reported by `ss` and `hermes dashboard --status` to
+   identify it. On Linux, replace `12345` below with that PID; the environment
+   filter prints only the non-secret home/profile policy fields:
+
+   ```bash
+   fetch_listener_pid=12345
+   ps -o pid=,ppid=,lstart=,args= -p "$fetch_listener_pid"
+   tr '\0' '\n' < "/proc/$fetch_listener_pid/environ" \
+     | sed -n '/^HERMES_\(HOME\|PROFILE\|FETCH_OWNER_PROFILE\)=/p'
+   ```
+
+   After those values prove which specialist profile/service owns the PID,
+   stop it through that supervisor. For an orphaned legacy runtime with no
+   supervisor, terminate only the verified PID with
+   `kill -TERM "$fetch_listener_pid"`, then rerun the `ss` inventory command.
+   On macOS, use the `lsof` result plus `ps -o pid=,ppid=,lstart=,command= -p
+   12345`, then stop the identified service (or that verified PID). Do not
+   delete PID files or terminate an unverified process.
+
+4. Start/restart only the owner lane, then verify one listener remains:
+
+   ```bash
+   hermes gateway restart
+   hermes dashboard --status
+   ss -ltnp '( sport = :9119 )'
+   ```
+
+   The owner gateway/plugin may start its headless dashboard automatically; a
+   separately managed owner dashboard is also valid if it has reloaded the
+   owner's dashboard session token and current Fetch plugin.
+
+   For an explicitly named owner, scope both commands to that home (example):
+
+   ```bash
+   HERMES_HOME="$HOME/.hermes/profiles/researcher" hermes gateway restart
+   HERMES_HOME="$HOME/.hermes/profiles/researcher" hermes dashboard --status
+   ```
+
+5. Run `hermes setup` from the owner profile and choose Fetch. Setup waits for
+   relay tunnel readiness. Scan the newly shown setup link only if the app is
+   still using a rotated/stale pairing. Do not pair the specialist profiles.
+
+Old specialist `fetch-relay.json` files and tunnel-enable flags may be left in
+place: current code ignores them outside the owner. They can be archived later
+during deliberate maintenance, but deleting them is not part of collision
+recovery.
+
 ## Configuration
 
 Most users set nothing — Fetch setup configures delivery and the tunnel for you.
@@ -335,6 +473,7 @@ All env vars are `HERMES_FETCH_*`; there is no separate inbox product.
 | `HERMES_FETCH_RELAY_URL` | hosted relay (`https://push.tryfetchapp.com`) | Point at a different / local relay. |
 | `HERMES_FETCH_ENROLLMENT_TOKEN` | _(none)_ | One-time setup code from the signed-in Fetch app. Usually pasted interactively during setup. |
 | `HERMES_FETCH_RELAY_REGISTRATION_TOKEN` | _(none)_ | Operator/private relay registration token. Public Fetch users should not need this. |
+| `HERMES_FETCH_OWNER_PROFILE` | `default` | The one normalized Hermes profile allowed to own the Fetch mobile relay tunnel and dashboard. Persist in the root/default Hermes `.env` so every profile sees one policy. |
 | `HERMES_FETCH_TUNNEL_ENABLED` | auto after Fetch relay setup | Keep the agent-side reverse tunnel active for relay pairing. Set `0`/`false` only to force-disable it. |
 | `HERMES_FETCH_TUNNEL_DISABLE_DASHBOARD_AUTOSTART` | _(unset)_ | Opt out if you manage the local Hermes dashboard/API process yourself. |
 | `HERMES_FETCH_COMPUTER_TARGET` | _(unset)_ | Enable computer viewing with a loopback-only VNC target, normally `tcp://127.0.0.1:5901` for the default Ubuntu container. Opt-in host desktops (Mac Screen Sharing, UltraVNC, physical Xorg) use `tcp://127.0.0.1:5900`. Fetch rejects LAN/public targets. |
@@ -350,7 +489,7 @@ dashboard route; rarely set by hand):
 | --- | --- | --- |
 | `HERMES_FETCH_DELIVERY_ENABLED` | set by Fetch setup | Enable Fetch as a cron/webhook delivery target. |
 | `HERMES_FETCH_HOME_CHANNEL` | `default` | Default Fetch channel used by bare `--deliver fetch`. |
-| `HERMES_FETCH_STORE_HOME` | running profile home | Relay-paired Hermes home whose `state.db` receives delivery sessions (multi-profile setups). |
+| `HERMES_FETCH_STORE_HOME` | configured owner home | Advanced compatibility override for the Hermes home whose `state.db` and relay credentials back the one mobile lane. Normally leave unset; owner routing is automatic. |
 
 For local development, run the relay from `server/push-relay/` and set
 `HERMES_FETCH_RELAY_URL=http://127.0.0.1:8787`.
