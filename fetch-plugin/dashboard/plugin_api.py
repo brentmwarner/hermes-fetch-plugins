@@ -100,6 +100,23 @@ _MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024
 _ATTACHMENT_ENDPOINT_HEADER = {"X-Fetch-Attachment-Endpoint": "1"}
 
 
+class EnsureBotProtocolBody(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    all: bool = False
+
+
+@router.post("/bots/ensure-protocol")
+def ensure_bot_protocol(body: EnsureBotProtocolBody):
+    inbox = _load_inbox()
+    try:
+        return inbox._load_botmode().ensure_protocol(
+            inbox._store_home(), name=body.name, all_profiles=body.all,
+            db_factory=inbox.SessionDB,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 class RegisterBody(BaseModel):
     token: str = Field(min_length=1, max_length=512)
     platform: str = Field(default="ios", max_length=32)

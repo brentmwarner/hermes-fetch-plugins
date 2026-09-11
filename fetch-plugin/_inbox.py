@@ -4,10 +4,8 @@ Fetch is the single visible Hermes platform. This module gives that platform its
 send-only delivery behavior: persist a message into Hermes' session database,
 then send a proactive Fetch push for the created thread.
 
-``inbox`` survives only as an internal wire tag — the session ``source`` column
-value and the ``inbox_<slug>`` session-id prefix the iOS app keys its inbox off.
-The user never sees it: the platform, the delivery target, and every env var are
-``fetch``.
+Profile DMs use the exact Bot Chat registry with source=fetch. The inbox wire
+source and inbox_<slug> ids remain available for separate automation threads.
 """
 
 from __future__ import annotations
@@ -42,10 +40,8 @@ _LEGACY_STORE_HOME_ENV = "HERMES_INBOX_STORE_HOME"
 DEFAULT_CHANNEL = "default"
 DEFAULT_TITLE = "Fetch"
 CHANNEL_LABEL = "Fetch"
-# When set, delivery sessions are persisted into THIS home's state.db instead of
-# the running process's HERMES_HOME. The Fetch app pairs with ONE home over the
-# relay; a delivery that runs under a worker profile (`hermes -p researcher`)
-# would otherwise write to the researcher's profile db, invisible to Fetch.
+# Pairing anchors relay credentials, automation storage, and Bot Chat profile
+# resolution here, independent of the sending worker's HERMES_HOME.
 STORE_HOME_ENV = "HERMES_FETCH_STORE_HOME"
 
 _relay_module = None
@@ -139,6 +135,33 @@ def _load_owner():
     spec.loader.exec_module(module)
     _owner_module_cache = module
     return module
+
+
+_botmode_module = None
+
+
+def _load_botmode():
+    global _botmode_module
+    if _botmode_module is None:
+        spec = importlib.util.spec_from_file_location(
+            "fetch_plugin_botmode", Path(__file__).with_name("_botmode.py")
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _botmode_module = module
+    return _botmode_module
+
+
+def _bot_profile(channel: str) -> str | None:
+    """Known profiles are DMs; other channel names remain automation inboxes."""
+    clean = _strip_platform_prefix(channel)
+    if clean == DEFAULT_CHANNEL:
+        return "default"
+    try:
+        _load_botmode().profile_home(_store_home(), clean)
+    except ValueError:
+        return None
+    return clean
 
 
 class FetchInboxAdapter(BasePlatformAdapter):
@@ -255,6 +278,11 @@ def env_enablement(*, force: bool = False) -> dict[str, Any] | None:
 
 def enable_delivery_for_future_starts() -> None:
     """Persist Fetch delivery defaults for future Hermes processes (pairing)."""
+    from hermes_cli.config import save_env_value
+
+    store_home = str(_store_home().expanduser().resolve())
+    save_env_value(STORE_HOME_ENV, store_home)
+    os.environ[STORE_HOME_ENV] = store_home
     set_delivery_enabled(True, channel=_home_channel())
 
 
@@ -324,12 +352,16 @@ async def standalone_send(
         content=content,
         thread_id=thread_id,
     )
-    delivery = deliver_to_inbox(
-        channel=resolved_channel,
-        content=content,
-        title=title,
-        thread_id=thread_id,
-    )
+    try:
+        delivery = deliver_to_inbox(
+            channel=resolved_channel,
+            content=content,
+            title=title,
+            thread_id=thread_id,
+        )
+    except Exception as exc:
+        logger.exception("Fetch delivery failed")
+        return {"success": False, "error": str(exc)}
     return {"success": True, "message_id": str(delivery.message_id), "session_id": delivery.session_id}
 
 
@@ -399,15 +431,11 @@ def deliver_to_inbox(
     thread_id: str | None = None,
     cron_job_id: str | None = None,
 ) -> InboxDelivery:
-    """Persist one Fetch inbox message and notify iOS devices.
+    """Append profile DMs to Bot Chat; retain inboxes for automation threads.
 
-    ``channel`` maps to a stable Hermes session, so repeated deliveries to the
-    same channel land in the same app thread. Per-agent channels
-    (``fetch:researcher``) produce per-agent sessions (``inbox_researcher``) so
-    each agent gets its own Fetch DM instead of one pooled ``inbox_default``
-    thread. ``cron_job_id`` (from the scheduler's send metadata) routes a home
-    delivery into its per-job thread even when ``cron.wrap_response`` is off
-    and the content lacks the "Cronjob Response" header.
+    The legacy function name remains for existing plugin callers. Known profile
+    channels resolve the exact Bot Chat title inside that profile's state.db.
+    Home cron jobs and explicit thread ids remain separate automation inboxes.
     """
     if _is_gateway_control_notice(content):
         logger.debug("Fetch dropped a gateway lifecycle notice (control-flow, not a message)")
@@ -421,17 +449,29 @@ def deliver_to_inbox(
         thread_id=thread_id,
         cron_job_id=cron_job_id,
     )
-    clean_title = _title_for_channel(clean_channel, content=content, proposed=title)
+    profile = _bot_profile(clean_channel) if not thread_id else None
+    clean_title = (
+        "Bot Chat" if profile is not None
+        else _title_for_channel(clean_channel, content=content, proposed=title)
+    )
     session_id = _session_id_for_channel(clean_channel)
     body = content.strip()
     if not body:
         raise ValueError("Fetch cannot deliver an empty message")
 
-    db = SessionDB(db_path=_store_home() / "state.db")
+    home = (
+        _load_botmode().profile_home(_store_home(), profile)
+        if profile is not None else _store_home()
+    )
+    db_path = home / "state.db"
+    db = SessionDB(db_path=db_path)
     try:
-        db.create_session(session_id=session_id, source="inbox", user_id=clean_channel)
+        if profile is not None:
+            session_id = _load_botmode().canonical_session(db_path, profile, db)
+        else:
+            db.create_session(session_id=session_id, source="inbox", user_id=clean_channel)
+            _set_title_if_possible(db, session_id, clean_title)
         db.reopen_session(session_id)
-        _set_title_if_possible(db, session_id, clean_title)
         message_id = db.append_message(
             session_id=session_id,
             role="assistant",
@@ -442,7 +482,10 @@ def deliver_to_inbox(
     finally:
         db.close()
 
-    _notify_proactive(session_id=session_id, title=clean_title, body=body)
+    _notify_proactive(
+        session_id=session_id, title=clean_title, body=body,
+        source="fetch" if profile is not None else "inbox", profile=profile,
+    )
     return InboxDelivery(session_id=session_id, message_id=int(message_id or 0))
 
 
@@ -530,7 +573,10 @@ def _load_preview():
     return _preview_module
 
 
-def _notify_proactive(*, session_id: str, title: str, body: str) -> None:
+def _notify_proactive(
+    *, session_id: str, title: str, body: str,
+    source: str = "inbox", profile: str | None = None,
+) -> None:
     try:
         notification_body = _load_preview().notification_body(
             body,
@@ -541,11 +587,8 @@ def _notify_proactive(*, session_id: str, title: str, body: str) -> None:
             session_id=session_id,
             title=(title or "")[:120],
             body=notification_body,
-            # Stamp source="inbox" so the device routes the push into the
-            # phone-owned inbox (it's in the app's inboxSources allowlist).
-            # Without this the iOS push gate skips the push and the thread
-            # only appears via the session-list refresh, not the push.
-            source="inbox",
+            source=source,
+            data={"agent_id": profile} if profile is not None else None,
         )
     except Exception:
         logger.debug("Fetch proactive push failed", exc_info=True)
@@ -603,13 +646,7 @@ def _is_home_channel(channel: str) -> bool:
 
 
 def _store_home() -> Path:
-    """Resolve which Hermes home's state.db delivery sessions persist into.
-
-    Defaults to the running process's HERMES_HOME. When
-    ``HERMES_FETCH_STORE_HOME`` is set, deliveries persist into THAT home's db
-    instead — so a delivery run under a worker profile still lands in the
-    relay-paired home the Fetch app reads.
-    """
+    """Paired owner home for automation storage and profile-tree resolution."""
     return _load_owner().delivery_home()
 
 
@@ -635,8 +672,8 @@ def _channel_from_chat_id(chat_id) -> str:
 def _strip_platform_prefix(channel: str) -> str:
     """Strip a leading `fetch:` platform prefix from direct calls.
 
-    Direct callers passing `fetch:researcher` must land in `inbox_researcher`
-    instead of creating a platform-prefixed duplicate thread.
+    Direct callers passing `fetch:researcher` resolve the same profile as the
+    gateway-split target `researcher`.
     """
     raw = str(channel or "").strip()
     prefix = f"{PLATFORM_NAME}:"
@@ -663,7 +700,7 @@ def _delivery_channel(
     clean_channel = _normalize_channel(_strip_platform_prefix(channel))
     if thread_id:
         return _thread_channel(clean_channel, thread_id)
-    if _is_home_channel(clean_channel):
+    if _is_home_channel(clean_channel) and clean_channel == DEFAULT_CHANNEL:
         cron_channel = _cron_channel_from_job_id(cron_job_id) or _cron_channel_from_content(content)
         if cron_channel:
             return cron_channel

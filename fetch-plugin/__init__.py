@@ -29,7 +29,7 @@ registration is handled by the dashboard half (``dashboard/plugin_api.py``).
 
 The platform's app control path is the reverse tunnel above, selected by the
 app's relay pairing, not a gateway inbound adapter. The same ``fetch`` platform
-also owns send-only inbox delivery so Hermes setup, cron delivery, and
+also owns Bot Chat and automation delivery so Hermes setup, cron delivery, and
 ``send_message`` expose one user-facing Fetch entry instead of a separate
 ``Fetch Inbox`` platform.
 
@@ -617,12 +617,14 @@ def _block_fetch_self_delivery(args: dict, session_id: str) -> dict | None:
         return None
     if not _is_fetch_app_session(session_id or None):
         return None
+    # An explicit recipient is the supported cross-bot delivery surface.
+    if str(args.get("target") or "").partition(":")[2].strip():
+        return None
     return {
         "action": "block",
         "message": (
-            "Do not use send_message to send a Fetch message from inside a Fetch "
-            "chat. Reply in the current thread instead; using Fetch as the "
-            "delivery target creates a duplicate inbox message for the same user."
+            "Reply in the current thread; using bare fetch as the delivery "
+            "target duplicates your reply. Use fetch:<profile> for a teammate."
         ),
     }
 

@@ -489,36 +489,55 @@ dashboard route; rarely set by hand):
 | --- | --- | --- |
 | `HERMES_FETCH_DELIVERY_ENABLED` | set by Fetch setup | Enable Fetch as a cron/webhook delivery target. |
 | `HERMES_FETCH_HOME_CHANNEL` | `default` | Default Fetch channel used by bare `--deliver fetch`. |
-| `HERMES_FETCH_STORE_HOME` | configured owner home | Advanced compatibility override for the Hermes home whose `state.db` and relay credentials back the one mobile lane. Normally leave unset; owner routing is automatic. |
+| `HERMES_FETCH_STORE_HOME` | configured owner home | Persisted by pairing. Anchors relay credentials, automation storage, and the profile tree used for Bot Chat delivery; workers also read it from owner config. |
 
 For local development, run the relay from `server/push-relay/` and set
 `HERMES_FETCH_RELAY_URL=http://127.0.0.1:8787`.
 
-## Inbox delivery and thread affinity
+## Bot Chat delivery and automation inboxes
 
-Fetch is the canonical Hermes delivery surface for proactive and cron output:
+`send_message(target="fetch:researcher", ...)` and
+`hermes cron create ... --deliver fetch:researcher` append to the existing
+**Bot Chat** in the researcher's profile, creating it if absent. The exact title
+is the identity; the plugin does not pin a session id or pick the latest Fetch
+row. Deliveries and pushes carry `source=fetch`, with the recipient profile in
+push `data.agent_id`. Compression continuations receive deliveries at the live
+tip while the exact-title root remains the registry.
 
-```bash
-hermes cron create "every 15m" "Summarize the World Cup" --deliver fetch:world-cup
-```
+Hermes enforces unique titles per database, so each bot uses its own profile's
+`state.db`, as read by `/api/profiles/sessions?profile=<slug>`. Pairing persists
+`HERMES_FETCH_STORE_HOME`; workers read the owner configuration even when their
+own environment file does not inherit it. This anchors profile lookup and relay
+credentials to the paired tree, rather than pooling several Bot Chats in one DB.
 
-Delivery channels are normalized before persistence: `fetch:world-cup` resolves
-to the deterministic Hermes session `inbox_world-cup`, so repeated deliveries to
-the same channel append to the same app thread. Bare `--deliver fetch` uses
-`HERMES_FETCH_HOME_CHANNEL` (default `default`). Cron responses delivered to the
-home channel are split by cron job id (`inbox_cron-<job-id>`) so each scheduled
-job gets a stable thread instead of all proactive output collapsing into one
-thread. The job id comes from the scheduler's send metadata (`{"job_id": ...}`)
-first, with the wrapped `Cronjob Response:` content header as fallback — so the
-split survives `cron.wrap_response: false`.
+Bare `fetch` uses `HERMES_FETCH_HOME_CHANNEL` (default `default`). Ordinary
+home delivery opens the default Bot Chat. Cron jobs sent to that default channel
+keep per-job `inbox_cron-<id>` automation threads. A named profile remains a Bot
+Chat even when configured as the home channel. Explicit thread ids and custom
+channels that are not profile names remain `source=inbox`; they are not bot home
+conversations. Existing inbox history is preserved.
 
-(`inbox` here is an internal wire tag — the session `source` value and
-`inbox_<slug>` session-id prefix the iOS app keys its inbox off. The user only
-ever sees and targets `fetch`.)
+Fetch chats may use explicit `fetch:<profile>` targets for teammate delivery.
+Bare self-delivery remains blocked to avoid duplicating an ordinary reply.
+These are visible transcript deliveries, not agent wake-ups. Use the backend's
+`message_agent` tool for teammate work; older Hermes uses the SOUL CLI fallback.
 
-This channel-thread affinity is enforced in the plugin because Fetch owns the
-phone-side inbox UX; end users should not need to manually pick Hermes thread ids
-or understand profile-specific platform names.
+### Companion protocol endpoint
+
+`POST /api/fetch/bots/ensure-protocol` accepts `{"name":"researcher"}` or
+`{"all":true}`. The authenticated relay tunnel maps it to the dashboard plugin
+route `/api/plugins/fetch/bots/ensure-protocol`. It installs an idempotent managed
+SOUL section, preserves existing personality and profile metadata, adds
+`ui_meta.hermes-bots`, and ensures the canonical hidden Fetch Bot Chat. Invalid
+or missing profiles and ambiguous requests return HTTP 400. Success returns
+`{"ok":true,"bots":[{"name":"researcher","session_id":"...","title":"Bot Chat","source":"fetch"}]}`.
+No profile is created implicitly, and no legacy session-id pin is written.
+
+The iOS half must still create/resume with `profile`, `title:"Bot Chat"`,
+`source:"fetch"`, and `hidden:true`; restore by title or `canonical_session`
+including hidden rows; route `/new` and `/reset` to compaction; and associate
+proactive Fetch pushes with the recipient bot. Full `message_agent`, relay, and
+group behavior depends on Hermes core capabilities, not this delivery plugin.
 
 ## Fetch as a messaging channel
 

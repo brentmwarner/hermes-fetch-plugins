@@ -6,6 +6,9 @@ import os
 import sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+from types import SimpleNamespace
+
+import pytest
 
 # Load _pairing.py by path the same way the plugin does.
 _p = Path(__file__).resolve().parent.parent / "_pairing.py"
@@ -13,6 +16,15 @@ _spec = importlib.util.spec_from_file_location("fetch_plugin_pairing_test", _p)
 pairing = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = pairing
 _spec.loader.exec_module(pairing)
+
+
+@pytest.fixture(autouse=True)
+def no_host_computer_bootstrap(monkeypatch):
+    # Pairing tests must not start Docker or wait on the developer's engine.
+    # Computer guidance tests replace this boundary with their own scenarios.
+    monkeypatch.setattr(pairing, "_linux_computer_module", lambda: SimpleNamespace(
+        computer_readiness=lambda: {"state": "ready"},
+    ))
 
 
 def _query(link: str) -> dict:
