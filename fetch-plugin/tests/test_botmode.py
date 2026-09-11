@@ -168,6 +168,41 @@ def test_protocol_all_and_validation(delivery):
     assert [bot["name"] for bot in result["bots"]] == ["default", "researcher", "writer"]
 
 
+def test_protocol_all_rejects_before_partial_writes(delivery):
+    _, root, _ = delivery
+    researcher = root / "profiles/researcher"
+    writer = root / "profiles/writer"
+    (researcher / "SOUL.md").write_text("# Researcher\n")
+    (writer / "SOUL.md").write_text(f"{botmode._START}\nno end marker\n")
+    with pytest.raises(ValueError, match="Incomplete"):
+        botmode.ensure_protocol(root, name=None, all_profiles=True, db_factory=SQLiteSessionDB)
+    assert botmode._START not in (researcher / "SOUL.md").read_text()
+    assert not (researcher / "state.db").exists()
+    assert not (root / "SOUL.md").exists()
+
+
+def test_canonical_session_invalidates_stale_source_cache(delivery):
+    import sys
+
+    plugin_spec = importlib.util.spec_from_file_location(
+        "fetch_plugin_cache_test", Path(__file__).parents[1] / "__init__.py"
+    )
+    plugin = importlib.util.module_from_spec(plugin_spec)
+    sys.modules[plugin_spec.name] = plugin
+    sys.modules["fetch_plugin"] = plugin
+    plugin_spec.loader.exec_module(plugin)
+
+    inbox, root, _ = delivery
+    home = root / "profiles/researcher"
+    db = SQLiteSessionDB(db_path=home / "state.db")
+    db.create_session(session_id="canonical", source="cli", user_id="researcher")
+    db.set_session_title("canonical", "Bot Chat")
+    db.close()
+    plugin._SESSION_SOURCE_CACHE["canonical"] = "cli"
+    inbox.deliver_to_inbox(channel="researcher", content="hi")
+    assert "canonical" not in plugin._SESSION_SOURCE_CACHE
+
+
 def test_protocol_rejects_symlink_profile(delivery):
     _, root, _ = delivery
     (root / "profiles/alias").symlink_to(root / "profiles/researcher", target_is_directory=True)

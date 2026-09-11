@@ -157,6 +157,13 @@ _SESSION_SOURCE_CACHE: dict[str, str] = {}
 _SESSION_SOURCE_CACHE_MAX = 512
 
 
+def invalidate_session_source_cache(*session_ids: str) -> None:
+    """Drop cached session sources after an out-of-band ``sessions.source`` rewrite."""
+    for session_id in session_ids:
+        if session_id:
+            _SESSION_SOURCE_CACHE.pop(session_id, None)
+
+
 def _session_source(session_id: str | None) -> str | None:
     """Look up a session's ``source`` channel from the agent's state.db.
 
