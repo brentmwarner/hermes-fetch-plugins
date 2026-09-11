@@ -90,6 +90,16 @@ def test_existing_bot_chat_wins_over_newer_fetch_and_old_inbox(delivery):
     assert pushes[0]["data"] == {"agent_id": "researcher"}
 
 
+def test_mixed_case_profile_target_routes_to_bot_chat(delivery):
+    inbox, root, pushes = delivery
+    inbox.deliver_to_inbox(channel="Researcher", content="hello")
+    home = root / "profiles/researcher"
+    assert rows(home)[0]["title"] == "Bot Chat"
+    assert rows(home, "messages")[0]["session_id"] == rows(home)[0]["id"]
+    assert pushes[0]["source"] == "fetch"
+    assert pushes[0]["data"] == {"agent_id": "researcher"}
+
+
 def test_profile_deliveries_share_title_but_not_database(delivery, monkeypatch):
     inbox, root, pushes = delivery
     monkeypatch.setenv("HERMES_HOME", str(root / "profiles/writer"))

@@ -155,13 +155,17 @@ def _load_botmode():
 def _bot_profile(channel: str) -> str | None:
     """Known profiles are DMs; other channel names remain automation inboxes."""
     clean = _strip_platform_prefix(channel)
-    if clean == DEFAULT_CHANNEL:
-        return "default"
+    if clean.casefold() == DEFAULT_CHANNEL:
+        return DEFAULT_CHANNEL
     try:
-        _load_botmode().profile_home(_store_home(), clean)
+        slug = _load_owner().normalize_profile_name(clean)
     except ValueError:
         return None
-    return clean
+    try:
+        _load_botmode().profile_home(_store_home(), slug)
+    except ValueError:
+        return None
+    return slug
 
 
 class FetchInboxAdapter(BasePlatformAdapter):
