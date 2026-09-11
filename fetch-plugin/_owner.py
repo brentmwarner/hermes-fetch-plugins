@@ -165,7 +165,7 @@ def owner_home() -> Path:
 
 def delivery_home() -> Path:
     """Explicit legacy routing override, otherwise the configured owner home."""
-    configured = os.environ.get(STORE_HOME_ENV, "").strip()
+    configured = str(owner_config_value(STORE_HOME_ENV, "") or "").strip()
     if configured:
         return Path(os.path.expanduser(configured))
     return owner_home()

@@ -168,7 +168,7 @@ def test_other_warning_messages_still_deliver(monkeypatch):
     db, relay_calls = _wire_fake_db_and_relay(monkeypatch, inbox)
 
     result = asyncio.run(
-        inbox.standalone_send(None, "default", "⚠️ Disk almost full on the build machine.")
+        inbox.standalone_send(None, "alerts", "⚠️ Disk almost full on the build machine.")
     )
 
     assert result["success"] is True

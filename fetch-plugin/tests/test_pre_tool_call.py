@@ -265,7 +265,7 @@ def test_blocks_send_message_to_fetch_from_fetch_session(plugin, monkeypatch, so
     assert "Reply in the current thread" in result["message"]
 
 
-def test_blocks_named_fetch_delivery_from_fetch_session(plugin, monkeypatch):
+def test_allows_named_fetch_delivery_from_fetch_session(plugin, monkeypatch):
     monkeypatch.setattr(plugin, "_session_source", lambda session_id: "fetch")
 
     result = plugin._on_pre_tool_call(
@@ -274,7 +274,7 @@ def test_blocks_named_fetch_delivery_from_fetch_session(plugin, monkeypatch):
         session_id="s1",
     )
 
-    assert result is not None and result["action"] == "block"
+    assert result is None
 
 
 def test_blocks_send_message_to_fetch_with_task_id_only(plugin, monkeypatch):

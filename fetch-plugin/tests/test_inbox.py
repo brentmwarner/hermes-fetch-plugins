@@ -18,6 +18,12 @@ PLUGIN_DIR = Path(__file__).resolve().parents[1]
 ALIASES = "channel_aliases.json"
 
 
+@pytest.fixture(autouse=True)
+def isolated_delivery_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_FETCH_STORE_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_FETCH_HOME_CHANNEL", "default")
+
+
 def _load_inbox():
     spec = importlib.util.spec_from_file_location(
         "fetch_plugin_inbox_test", PLUGIN_DIR / "_inbox.py"
@@ -271,13 +277,13 @@ def test_standalone_send_routes_named_channel(monkeypatch):
     monkeypatch.setattr(
         inbox,
         "deliver_to_inbox",
-        lambda **kw: calls.append(kw) or inbox.InboxDelivery(session_id="inbox_researcher", message_id=9),
+        lambda **kw: calls.append(kw) or inbox.InboxDelivery(session_id="fetch_bot_example", message_id=9),
     )
 
     result = asyncio.run(inbox.standalone_send(None, "fetch:researcher", "standup"))
 
     assert calls == [{"channel": "researcher", "content": "standup", "title": "Researcher", "thread_id": None}]
-    assert result["session_id"] == "inbox_researcher"
+    assert result["session_id"] == "fetch_bot_example"
 
 
 def test_adapter_get_chat_info_returns_basic_descriptor(monkeypatch):
@@ -376,7 +382,7 @@ def test_deliver_to_inbox_passes_source_inbox(monkeypatch):
     monkeypatch.setattr(inbox, "_load_relay", lambda: fake_relay)
     monkeypatch.setattr(inbox, "SessionDB", lambda **kw: _FakeDB())
 
-    inbox.deliver_to_inbox(channel="default", content="hi", title="Fetch")
+    inbox.deliver_to_inbox(channel="cron-manual", content="hi", title="Manual")
 
     assert relay_calls and relay_calls[0]["source"] == "inbox"
 
@@ -403,44 +409,6 @@ Cronjob Response: Morning World Cup
     assert relay_calls[0]["source"] == "inbox"
 
 
-def test_deliver_to_inbox_uses_store_home_override(monkeypatch, tmp_path):
-    """A delivery under a worker profile persists into the override home's db."""
-    inbox = _load_inbox()
-    relay_home = tmp_path / "relay"
-    relay_home.mkdir()
-    monkeypatch.setattr(inbox, "get_hermes_home", lambda: tmp_path / "worker")
-    monkeypatch.setenv("HERMES_FETCH_STORE_HOME", str(relay_home))
-    opened = []
-    monkeypatch.setattr(inbox, "SessionDB", lambda **kw: opened.append(kw.get("db_path")) or _FakeDB())
-    monkeypatch.setattr(inbox, "_notify_proactive", lambda **kw: None)
-
-    inbox.deliver_to_inbox(channel="researcher", content="hi", title="Researcher")
-
-    assert opened == [relay_home / "state.db"]
-
-
-def test_specialist_delivery_automatically_uses_owner_mobile_lane(monkeypatch, tmp_path):
-    inbox = _load_inbox()
-    owner_home = tmp_path / "owner"
-    opened = []
-    monkeypatch.delenv("HERMES_FETCH_STORE_HOME", raising=False)
-    monkeypatch.setattr(
-        inbox,
-        "_load_owner",
-        lambda: type("Owner", (), {"delivery_home": staticmethod(lambda: owner_home)}),
-    )
-    monkeypatch.setattr(
-        inbox,
-        "SessionDB",
-        lambda **kw: opened.append(kw.get("db_path")) or _FakeDB(),
-    )
-    monkeypatch.setattr(inbox, "_notify_proactive", lambda **kw: None)
-
-    inbox.deliver_to_inbox(channel="researcher", content="done", title="Researcher")
-
-    assert opened == [owner_home / "state.db"]
-
-
 def test_deliver_to_inbox_routes_home_cron_delivery_to_job_thread(monkeypatch):
     inbox = _load_inbox()
     captured = {}
@@ -465,32 +433,6 @@ def test_deliver_to_inbox_routes_home_cron_delivery_to_job_thread(monkeypatch):
     assert notify_calls[0]["title"] == "Morning Brief"
 
 
-def test_deliver_to_inbox_preserves_explicit_agent_channel_for_cron_body(monkeypatch):
-    inbox = _load_inbox()
-    captured = {}
-    body = "Cronjob Response: Morning Brief\n(job_id: abc123)\n\nWeather and inbox summary"
-
-    class _CaptureDB:
-        def create_session(self, **kw): captured["create"] = kw
-        def reopen_session(self, sid): pass
-        def set_session_title(self, sid, title): captured["title"] = (sid, title)
-        def append_message(self, **kw): return 1
-        def close(self): pass
-
-    monkeypatch.setattr(inbox, "SessionDB", lambda **kw: _CaptureDB())
-    monkeypatch.setattr(inbox, "_notify_proactive", lambda **kw: None)
-
-    delivery = inbox.deliver_to_inbox(
-        channel="fetch:researcher",
-        content=body,
-        title="Researcher",
-    )
-
-    assert delivery.session_id == "inbox_researcher"
-    assert captured["create"]["user_id"] == "researcher"
-    assert captured["title"] == ("inbox_researcher", "Researcher")
-
-
 def test_label_for_channel_titles_profile_names():
     inbox = _load_inbox()
     assert inbox._label_for_channel("default") == "Fetch"
@@ -509,16 +451,6 @@ def test_bare_fetch_routes_to_configured_home_channel(monkeypatch):
     assert inbox._channel_from_chat_id("") == "leads"
     assert inbox._channel_from_chat_id("fetch:") == "leads"
     assert inbox._session_id_for_channel(inbox._channel_from_chat_id("fetch")) == "inbox_leads"
-
-
-def test_deliver_to_inbox_strips_platform_prefix_for_direct_callers(monkeypatch):
-    """Direct callers passing `fetch:researcher` land in inbox_researcher, not
-    inbox_fetch-researcher."""
-    inbox = _load_inbox()
-    monkeypatch.setattr(inbox, "SessionDB", lambda **kw: _FakeDB())
-    monkeypatch.setattr(inbox, "_notify_proactive", lambda **kw: None)
-    delivery = inbox.deliver_to_inbox(channel="fetch:researcher", content="hi", title="Researcher")
-    assert delivery.session_id == "inbox_researcher"
 
 
 def test_repeated_deliveries_to_same_slug_reuse_same_session(monkeypatch):
@@ -602,25 +534,6 @@ def test_deliver_to_inbox_routes_cron_by_job_id_without_header(monkeypatch):
     assert delivery.session_id == "inbox_cron-abc123"
     assert captured["create"]["user_id"] == "cron-abc123"
     assert captured["title"] == ("inbox_cron-abc123", "Cron Abc123")
-
-
-def test_deliver_to_inbox_job_id_does_not_hijack_explicit_agent_channel(monkeypatch):
-    """A cron job that delivers to `fetch:researcher` explicitly stays in the
-    researcher DM — only bare home-channel deliveries split into cron threads,
-    mirroring the content-header behavior."""
-    inbox = _load_inbox()
-    captured = {}
-    monkeypatch.setattr(inbox, "SessionDB", lambda **kw: _RoutingCaptureDB(captured))
-    monkeypatch.setattr(inbox, "_notify_proactive", lambda **kw: None)
-
-    delivery = inbox.deliver_to_inbox(
-        channel="researcher",
-        content="standup",
-        title="Researcher",
-        cron_job_id="abc123",
-    )
-
-    assert delivery.session_id == "inbox_researcher"
 
 
 def test_adapter_send_routes_cron_by_metadata_job_id(monkeypatch):

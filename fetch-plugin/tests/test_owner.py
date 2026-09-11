@@ -73,3 +73,12 @@ def test_invalid_owner_setting_fails_closed(monkeypatch) -> None:
     assert status["valid"] is False
     assert status["is_owner"] is False
     assert "invalid Fetch owner profile" in str(status["error"])
+
+
+def test_worker_reads_durable_store_home_without_inherited_env(monkeypatch, tmp_path):
+    paired = tmp_path / "paired-store"
+    (tmp_path / ".env").write_text(f'HERMES_FETCH_STORE_HOME="{paired}"\n')
+    monkeypatch.delenv(owner.STORE_HOME_ENV, raising=False)
+    monkeypatch.setenv("HERMES_PROFILE", "researcher")
+    monkeypatch.setattr(owner, "owner_home", lambda: tmp_path)
+    assert owner.delivery_home() == paired
