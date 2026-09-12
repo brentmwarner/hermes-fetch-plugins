@@ -4,7 +4,8 @@ Fetch is the single visible Hermes platform. This module gives that platform its
 send-only delivery behavior: persist a message into Hermes' session database,
 then send a proactive Fetch push for the created thread.
 
-Profile DMs use the exact Bot Chat registry with source=fetch. The inbox wire
+Profile DMs land in the exact Bot Chat registry of that profile (adopted by
+title whatever client minted it, minted once as source=fetch). The inbox wire
 source and inbox_<slug> ids remain available for separate automation threads.
 """
 
@@ -469,9 +470,14 @@ def deliver_to_inbox(
     )
     db_path = home / "state.db"
     db = SessionDB(db_path=db_path)
+    push_source = "inbox"
     try:
         if profile is not None:
-            session_id = _load_botmode().canonical_session(db_path, profile, db)
+            # Adopt the profile's Bot Chat by exact title, whatever client
+            # minted it, and mint one only when none exists. Core owns the
+            # row's source/hidden flags; the push carries the actual source.
+            resolved = _load_botmode().resolve_bot_chat(db_path, profile, db)
+            session_id, push_source = resolved.session_id, resolved.source
         else:
             db.create_session(session_id=session_id, source="inbox", user_id=clean_channel)
             _set_title_if_possible(db, session_id, clean_title)
@@ -488,7 +494,7 @@ def deliver_to_inbox(
 
     _notify_proactive(
         session_id=session_id, title=clean_title, body=body,
-        source="fetch" if profile is not None else "inbox", profile=profile,
+        source=push_source, profile=profile,
     )
     return InboxDelivery(session_id=session_id, message_id=int(message_id or 0))
 
