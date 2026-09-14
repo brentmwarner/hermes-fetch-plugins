@@ -274,3 +274,113 @@ def test_session_source_does_not_cache_lookup_miss(sent, monkeypatch):
     assert plugin._session_source("sess-2") is None
     rows["sess-2"] = {"source": "fetch"}
     assert plugin._session_source("sess-2") == "fetch"
+
+
+# --- Bot Chat lineage: a bot's canonical chat pushes whatever client minted it
+
+
+def _install_lineage(monkeypatch, rows):
+    """Stub ``hermes_state.SessionDB`` over ``rows`` (id -> session row) and count opens."""
+    import hermes_state
+
+    class _LineageDB:
+        opens = 0
+
+        def __init__(self, *a, **kw):
+            _LineageDB.opens += 1
+
+        def get_session(self, session_id):
+            row = rows.get(session_id)
+            return dict(row) if row else None
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(hermes_state, "SessionDB", _LineageDB)
+    return _LineageDB
+
+
+def _row(session_id, *, title="", source="cli", parent=None, end_reason=None):
+    return {"id": session_id, "title": title, "source": source,
+            "parent_session_id": parent, "end_reason": end_reason}
+
+
+def test_desktop_minted_bot_chat_reply_pushes_with_its_own_source(sent, monkeypatch):
+    """Hermes Desktop stamps source=desktop on the Bot Chats it mints. The phone
+    still owns that conversation, so the reply pushes, and the push carries the
+    row's real source rather than a rewritten `fetch`."""
+    plugin, captured = sent
+    _set_source(monkeypatch, plugin, "desktop")
+    _install_lineage(monkeypatch, {"bot": _row("bot", title="Bot Chat", source="desktop")})
+    plugin._on_post_llm_call(session_id="bot", assistant_response="On it.")
+    assert [(c["kind"], c["session_id"], c["source"]) for c in captured.calls] == [
+        ("replies", "bot", "desktop")]
+
+
+def test_blank_source_bot_chat_reply_pushes(sent, monkeypatch):
+    """The TUI leaves source blank; a blank-source Bot Chat is still the bot's chat."""
+    plugin, captured = sent
+    _set_source(monkeypatch, plugin, "")
+    _install_lineage(monkeypatch, {"bot": _row("bot", title="Bot Chat", source="")})
+    plugin._on_post_llm_call(session_id="bot", assistant_response="Done.")
+    assert [c["source"] for c in captured.calls] == [""]
+
+
+def test_compression_tip_of_bot_chat_pushes(sent, monkeypatch):
+    """After compaction the live session is a child whose parent chain ends at the
+    exact-title root through compression edges only."""
+    plugin, captured = sent
+    _set_source(monkeypatch, plugin, "cli")
+    _install_lineage(monkeypatch, {
+        "root": _row("root", title="Bot Chat", end_reason="compression"),
+        "mid": _row("mid", parent="root", end_reason="compression"),
+        "tip": _row("tip", parent="mid"),
+    })
+    plugin._on_post_llm_call(session_id="tip", assistant_response="Continuing.")
+    assert [c["session_id"] for c in captured.calls] == ["tip"]
+
+
+def test_delegate_child_of_live_bot_chat_does_not_push(sent, monkeypatch):
+    """A delegate child also carries parent_session_id, but its parent is live
+    (no compression end_reason), so it is not the bot's conversation."""
+    plugin, captured = sent
+    _set_source(monkeypatch, plugin, "cli")
+    _install_lineage(monkeypatch, {
+        "root": _row("root", title="Bot Chat"),
+        "delegate": _row("delegate", parent="root"),
+    })
+    plugin._on_post_llm_call(session_id="delegate", assistant_response="Subtask done.")
+    assert captured.calls == []
+
+
+def test_untitled_cli_session_still_does_not_push(sent, monkeypatch):
+    plugin, captured = sent
+    _set_source(monkeypatch, plugin, "cli")
+    _install_lineage(monkeypatch, {"s1": _row("s1")})
+    plugin._on_post_llm_call(session_id="s1", assistant_response="hi")
+    assert captured.calls == []
+
+
+def test_bot_chat_lineage_caches_positive_answer(sent, monkeypatch):
+    plugin, captured = sent
+    _set_source(monkeypatch, plugin, "desktop")
+    db = _install_lineage(monkeypatch, {"bot": _row("bot", title="Bot Chat", source="desktop")})
+    plugin._on_post_llm_call(session_id="bot", assistant_response="one")
+    plugin._on_post_llm_call(session_id="bot", assistant_response="two")
+    assert db.opens == 1, "a confirmed Bot Chat lineage is memoized"
+    assert len(captured.calls) == 2
+
+
+def test_bot_chat_lineage_does_not_cache_negative_answer(sent, monkeypatch):
+    """Hermes applies a pending title after the first prompt, so an untitled row
+    may become the Bot Chat on a later turn: misses are re-read every time."""
+    plugin, captured = sent
+    _set_source(monkeypatch, plugin, "cli")
+    rows = {"late": _row("late")}
+    db = _install_lineage(monkeypatch, rows)
+    plugin._on_post_llm_call(session_id="late", assistant_response="first")
+    assert captured.calls == []
+    rows["late"]["title"] = "Bot Chat"
+    plugin._on_post_llm_call(session_id="late", assistant_response="second")
+    assert db.opens == 2
+    assert [c["session_id"] for c in captured.calls] == ["late"]

@@ -768,22 +768,3 @@ def test_lock_process_alive_treats_zombie_child_as_dead() -> None:
         assert tunnel._process_alive(pid) is False
     finally:
         os.waitpid(pid, 0)
-
-
-async def test_bot_protocol_companion_route_preserves_auth_method_and_body():
-    def handler(request):
-        assert request.url.path == "/api/plugins/fetch/bots/ensure-protocol"
-        assert request.method == "POST"
-        assert request.headers["X-Hermes-Session-Token"] == "tok"
-        assert json.loads(request.content) == {"name": "researcher"}
-        return httpx.Response(200, json={"ok": True})
-
-    tunnel = _client(dashboard_token="tok", http_client_factory=_http_factory(handler))
-    ws = FakeRelayWS()
-    await tunnel._handle_rest(ws, {
-        "t": "rest-req", "cid": "c1", "sid": 9, "method": "POST",
-        "path": "/api/fetch/bots/ensure-protocol",
-        "headers": {"content-type": "application/json"},
-        "body": json.dumps({"name": "researcher"}),
-    })
-    assert ws.sent[0]["status"] == 200

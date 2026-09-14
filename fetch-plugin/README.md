@@ -500,9 +500,11 @@ For local development, run the relay from `server/push-relay/` and set
 `hermes cron create ... --deliver fetch:researcher` append to the existing
 **Bot Chat** in the researcher's profile, creating it if absent. The exact title
 is the identity; the plugin does not pin a session id or pick the latest Fetch
-row. Deliveries and pushes carry `source=fetch`, with the recipient profile in
-push `data.agent_id`. Compression continuations receive deliveries at the live
-tip while the exact-title root remains the registry.
+row. An adopted Bot Chat keeps whatever `source` and `hidden` flags its creator
+(Hermes Desktop, the TUI, or the app) gave it; only a freshly minted row is
+`source=fetch` and hidden. Pushes carry the row's actual `source`, with the
+recipient profile in push `data.agent_id`. Compression continuations receive
+deliveries at the live tip while the exact-title root remains the registry.
 
 Hermes enforces unique titles per database, so each bot uses its own profile's
 `state.db`, as read by `/api/profiles/sessions?profile=<slug>`. Pairing persists
@@ -520,24 +522,34 @@ conversations. Existing inbox history is preserved.
 Fetch chats may use explicit `fetch:<profile>` targets for teammate delivery.
 Bare self-delivery remains blocked to avoid duplicating an ordinary reply.
 These are visible transcript deliveries, not agent wake-ups. Use the backend's
-`message_agent` tool for teammate work; older Hermes uses the SOUL CLI fallback.
+`message_agent` tool for teammate work; Hermes core owns that protocol.
 
-### Companion protocol endpoint
+### Identity contract (core owns the protocol)
 
-`POST /api/fetch/bots/ensure-protocol` accepts `{"name":"researcher"}` or
-`{"all":true}`. The authenticated relay tunnel maps it to the dashboard plugin
-route `/api/plugins/fetch/bots/ensure-protocol`. It installs an idempotent managed
-SOUL section, preserves existing personality and profile metadata, adds
-`ui_meta.hermes-bots`, and ensures the canonical hidden Fetch Bot Chat. Invalid
-or missing profiles and ambiguous requests return HTTP 400. Success returns
-`{"ok":true,"bots":[{"name":"researcher","session_id":"...","title":"Bot Chat","source":"fetch"}]}`.
-No profile is created implicitly, and no legacy session-id pin is written.
+Hermes core owns the Bot Mode protocol: the `## Messaging other agents` prompt
+section, the `message_agent` tool, and the `Message from 🤖 Name (@slug): `
+wire format. The plugin writes no SOUL.md or profile.yaml, never restamps a
+row's `source` or `hidden` flags, and exposes no protocol endpoint.
 
-The iOS half must still create/resume with `profile`, `title:"Bot Chat"`,
-`source:"fetch"`, and `hidden:true`; restore by title or `canonical_session`
-including hidden rows; route `/new` and `/reset` to compaction; and associate
-proactive Fetch pushes with the recipient bot. Full `message_agent`, relay, and
-group behavior depends on Hermes core capabilities, not this delivery plugin.
+A bot's identity is `(profile, title "Bot Chat")`, resolved by the server on
+every open. The app stores no session-id pin and never picks the newest row:
+
+- `profiles.list {"include_sessions": true}` returns `bot_mode_protocol` and,
+  per profile, `canonical_session` (hidden rows included) plus
+  `ui_meta_revisions`; `ui_meta` is absent when empty.
+- `session.list {"profile": ..., "title": "Bot Chat", "include_hidden": true}`
+  is the exact-title lookup and also unarchives a recoverable Bot Chat.
+- `session.create {"profile": ..., "title": "Bot Chat", "hidden": true}` only
+  when both lookups come back empty; `session.resume` accepts the title.
+- `profiles.configure {"name": ..., "ui_meta": {"hermes-bots": {}},
+  "ui_meta_expected_revisions": {"hermes-bots": <revision>}}` turns core's
+  native `message_agent` on for a profile; on a revision conflict, refresh the
+  roster and retry once.
+
+The plugin delivers inbox messages to that row by exact title (at its live
+compression tip), mints a hidden `source=fetch` row only when none exists, and
+pushes replies from a Bot Chat lineage whatever the row's `source`. Delegate
+children of a live Bot Chat are not Bot Chats and do not push.
 
 ## Fetch as a messaging channel
 

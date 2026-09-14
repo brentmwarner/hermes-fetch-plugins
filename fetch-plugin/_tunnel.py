@@ -651,12 +651,6 @@ class AgentTunnel:
             await self._require_compatible_dashboard()
             if (frame.get("path") or "") == _LITE_SESSION_STARTS_PATH:
                 status, headers, body, is_b64 = await self._session_starts(frame)
-            elif (frame.get("path") or "") == "/api/fetch/bots/ensure-protocol":
-                # Keep the companion URL stable while retaining dashboard auth
-                # and FastAPI method/body validation on the plugin route.
-                status, headers, body, is_b64 = await self._rest_call({
-                    **frame, "path": "/api/plugins/fetch/bots/ensure-protocol",
-                })
             else:
                 status, headers, body, is_b64 = await self._rest_call(frame)
         except Exception as exc:

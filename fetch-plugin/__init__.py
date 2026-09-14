@@ -156,6 +156,16 @@ For token/usage reports, prefer a card with `stats` plus `chart` or `blocks` con
 _SESSION_SOURCE_CACHE: dict[str, str] = {}
 _SESSION_SOURCE_CACHE_MAX = 512
 
+# A bot's canonical "Bot Chat" is its one conversation whatever client minted
+# it (Hermes Desktop stamps source=desktop, the TUI leaves it blank), so the
+# post_llm_call push also checks the title lineage. Only positive answers are
+# memoized: a Bot Chat's lineage never changes, while an untitled row may still
+# become a Bot Chat on a later turn (Hermes applies pending titles lazily).
+BOT_CHAT_TITLE = "Bot Chat"
+_BOT_CHAT_LINEAGE_CACHE: dict[str, bool] = {}
+_BOT_CHAT_LINEAGE_CACHE_MAX = 512
+_BOT_CHAT_LINEAGE_MAX_HOPS = 32
+
 
 def invalidate_session_source_cache(*session_ids: str) -> None:
     """Drop cached session sources after an out-of-band ``sessions.source`` rewrite."""
@@ -220,6 +230,55 @@ def _is_fetch_app_session(session_id: str | None) -> bool:
     """
     source = _normalized_source(_session_source(session_id))
     return source in FETCH_APP_SOURCES
+
+
+def _is_bot_chat_session(session_id: str | None) -> bool:
+    """True when the session is a profile's Bot Chat or one of its compression tips.
+
+    Walks parent links only across compression edges (the parent ended with
+    ``end_reason == "compression"``), so delegate children spawned from a live
+    Bot Chat are not Bot Chats. Unknown rows and lookup failures fail closed.
+    """
+    if not session_id:
+        return False
+    if _BOT_CHAT_LINEAGE_CACHE.get(session_id):
+        return True
+    db = None
+    result = False
+    try:
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        row = db.get_session(session_id)
+        seen = {session_id}
+        for _ in range(_BOT_CHAT_LINEAGE_MAX_HOPS):
+            if not row:
+                break
+            if (row.get("title") or "") == BOT_CHAT_TITLE:
+                result = True
+                break
+            parent_id = row.get("parent_session_id")
+            if not parent_id or parent_id in seen:
+                break
+            seen.add(parent_id)
+            parent = db.get_session(parent_id)
+            if not parent or parent.get("end_reason") != "compression":
+                break
+            row = parent
+    except Exception:
+        log.debug("Fetch plugin Bot Chat lineage lookup failed", exc_info=True)
+        return False
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                log.debug("Fetch plugin could not close SessionDB", exc_info=True)
+    if result:
+        if len(_BOT_CHAT_LINEAGE_CACHE) >= _BOT_CHAT_LINEAGE_CACHE_MAX:
+            _BOT_CHAT_LINEAGE_CACHE.clear()
+        _BOT_CHAT_LINEAGE_CACHE[session_id] = True
+    return result
 
 
 def _platform_from_session_key(session_key: str) -> str | None:
@@ -321,9 +380,12 @@ def _on_post_llm_call(*, session_id: str = "", assistant_response: str = "", **_
     # must not ring the phone or create a Fetch inbox thread. Unknown or blank
     # sources fail closed: current Fetch iOS sessions are stamped `source=fetch`,
     # while a lookup miss is exactly the path that previously made background
-    # automation look like a first-party app reply.
+    # automation look like a first-party app reply. The one exception is a
+    # bot's canonical "Bot Chat": it is the bot's single conversation whatever
+    # client minted it, so a reply there always reaches the phone and the push
+    # carries the row's actual source.
     source = _normalized_source(_session_source(session_id or None))
-    if source not in FETCH_APP_SOURCES:
+    if source not in FETCH_APP_SOURCES and not _is_bot_chat_session(session_id or None):
         return
     body = _preview.notification_body(
         assistant_response,

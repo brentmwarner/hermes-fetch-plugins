@@ -6,7 +6,6 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-import yaml
 
 from test_inbox import _load_inbox
 
@@ -83,10 +82,11 @@ def test_existing_bot_chat_wins_over_newer_fetch_and_old_inbox(delivery):
     assert result["session_id"] == "canonical"
     assert rows(home, "messages")[0]["session_id"] == "canonical"
     by_id = {row["id"]: row for row in rows(home)}
-    assert by_id["canonical"]["source"] == "fetch"
-    assert by_id["canonical"]["hidden"] == 1
+    # Adoption never rewrites another client's row: source and hidden stay as minted.
+    assert by_id["canonical"]["source"] == "cli"
+    assert by_id["canonical"]["hidden"] == 0
     assert by_id["inbox_researcher"]["source"] == "inbox"
-    assert pushes[0]["source"] == "fetch"
+    assert pushes[0]["source"] == "cli"
     assert pushes[0]["data"] == {"agent_id": "researcher"}
 
 
@@ -140,70 +140,59 @@ def test_automation_threads_stay_in_inbox(delivery):
     assert pushes[0]["source"] == "inbox"
 
 
-def test_protocol_is_idempotent_and_preserves_identity(delivery):
-    inbox, root, _ = delivery
-    home = root / "profiles/researcher"
-    (home / "SOUL.md").write_text("# Researcher\nUser-authored personality.\n")
-    (home / "profile.yaml").write_text("model: custom\nui_meta:\n  other: untouched\n")
-    first = botmode.ensure_protocol(root, name="researcher", all_profiles=False, db_factory=SQLiteSessionDB)
-    contents = [(home / filename).read_text() for filename in ("SOUL.md", "profile.yaml")]
-    second = botmode.ensure_protocol(root, name="researcher", all_profiles=False, db_factory=SQLiteSessionDB)
-    assert first == second
-    assert contents == [(home / filename).read_text() for filename in ("SOUL.md", "profile.yaml")]
-    assert contents[0].startswith("# Researcher\nUser-authored personality.")
-    assert contents[0].count(botmode._START) == 1
-    meta = yaml.safe_load(contents[1])
-    assert meta == {"model": "custom", "ui_meta": {"other": "untouched", "hermes-bots": {}}}
-    assert inbox.deliver_to_inbox(channel="researcher", content="hi").session_id == first["bots"][0]["session_id"]
-    assert not (home / "sessions/bot-chat.title").exists()
-
-
-def test_protocol_all_and_validation(delivery):
-    _, root, _ = delivery
-    for name, all_profiles in [(None, False), ("researcher", True), ("../escape", False), ("missing", False)]:
-        with pytest.raises(ValueError):
-            botmode.ensure_protocol(root, name=name, all_profiles=all_profiles, db_factory=SQLiteSessionDB)
-    assert not (root / "SOUL.md").exists()
-    result = botmode.ensure_protocol(root, name=None, all_profiles=True, db_factory=SQLiteSessionDB)
-    assert [bot["name"] for bot in result["bots"]] == ["default", "researcher", "writer"]
-
-
-def test_protocol_all_rejects_before_partial_writes(delivery):
-    _, root, _ = delivery
-    researcher = root / "profiles/researcher"
-    writer = root / "profiles/writer"
-    (researcher / "SOUL.md").write_text("# Researcher\n")
-    (writer / "SOUL.md").write_text(f"{botmode._START}\nno end marker\n")
-    with pytest.raises(ValueError, match="Incomplete"):
-        botmode.ensure_protocol(root, name=None, all_profiles=True, db_factory=SQLiteSessionDB)
-    assert botmode._START not in (researcher / "SOUL.md").read_text()
-    assert not (researcher / "state.db").exists()
-    assert not (root / "SOUL.md").exists()
-
-
-def test_canonical_session_invalidates_stale_source_cache(delivery):
-    import sys
-
-    plugin_spec = importlib.util.spec_from_file_location(
-        "fetch_plugin_cache_test", Path(__file__).parents[1] / "__init__.py"
-    )
-    plugin = importlib.util.module_from_spec(plugin_spec)
-    sys.modules[plugin_spec.name] = plugin
-    sys.modules["fetch_plugin"] = plugin
-    plugin_spec.loader.exec_module(plugin)
-
-    inbox, root, _ = delivery
+def test_adopting_desktop_row_preserves_source_and_hidden_flags(delivery):
+    """Hermes Desktop mints Bot Chats as source=desktop, hidden=0. The plugin
+    adopts that row by title and leaves it byte-for-byte alone; the push carries
+    the row's real source so the phone never sees a rewritten `fetch`."""
+    inbox, root, pushes = delivery
     home = root / "profiles/researcher"
     db = SQLiteSessionDB(db_path=home / "state.db")
-    db.create_session(session_id="canonical", source="cli", user_id="researcher")
-    db.set_session_title("canonical", "Bot Chat")
+    db.create_session(session_id="desktop_bot", source="desktop", user_id="researcher")
+    db.set_session_title("desktop_bot", "Bot Chat")
     db.close()
-    plugin._SESSION_SOURCE_CACHE["canonical"] = "cli"
+    before = rows(home)
+    result = inbox.deliver_to_inbox(channel="researcher", content="hello")
+    assert result.session_id == "desktop_bot"
+    assert rows(home) == before
+    assert rows(home, "messages")[0]["session_id"] == "desktop_bot"
+    assert pushes[0]["session_id"] == "desktop_bot"
+    assert pushes[0]["source"] == "desktop"
+    assert pushes[0]["data"] == {"agent_id": "researcher"}
+
+
+def test_first_delivery_mints_hidden_fetch_bot_chat(delivery):
+    inbox, root, pushes = delivery
+    home = root / "profiles/researcher"
+    result = inbox.deliver_to_inbox(channel="researcher", content="hello")
+    (row,) = rows(home)
+    assert row["id"].startswith("fetch_bot_")
+    assert result.session_id == row["id"]
+    assert (row["title"], row["source"], row["hidden"], row["user_id"], row["profile_name"]) == (
+        "Bot Chat", "fetch", 1, "researcher", "researcher")
+    assert pushes[0]["source"] == "fetch"
+    resolved = botmode.resolve_bot_chat(home / "state.db", "researcher")
+    assert (resolved.root_id, resolved.session_id, resolved.source, resolved.minted) == (
+        row["id"], row["id"], "fetch", False)
+
+
+def test_delivery_never_writes_profile_yaml_or_soul(delivery):
+    """Core owns the Bot Mode protocol: no SOUL.md section, no ui_meta flag, no lock file."""
+    inbox, root, _ = delivery
+    home = root / "profiles/researcher"
+    soul = "# Researcher\nUser-authored personality.\n"
+    meta = "model: custom\nui_meta:\n  other: untouched\n"
+    (home / "SOUL.md").write_text(soul)
+    (home / "profile.yaml").write_text(meta)
     inbox.deliver_to_inbox(channel="researcher", content="hi")
-    assert "canonical" not in plugin._SESSION_SOURCE_CACHE
+    assert (home / "SOUL.md").read_text() == soul
+    assert (home / "profile.yaml").read_text() == meta
+    assert not hasattr(botmode, "ensure_protocol")
+    unexpected = [p.name for p in home.iterdir()
+                  if p.name not in {"SOUL.md", "profile.yaml"} and not p.name.startswith("state.db")]
+    assert unexpected == []
 
 
-def test_protocol_rejects_symlink_profile(delivery):
+def test_profile_home_rejects_symlink_profile(delivery):
     _, root, _ = delivery
     (root / "profiles/alias").symlink_to(root / "profiles/researcher", target_is_directory=True)
     with pytest.raises(ValueError):
@@ -244,20 +233,6 @@ def test_pairing_persists_store_home(delivery, monkeypatch):
     assert saved["HERMES_FETCH_DELIVERY_ENABLED"] == "1"
 
 
-def test_ensure_protocol_api_validates_and_creates_chat(delivery, monkeypatch):
-    from test_plugin_api import api, _client, _FakeClient
-    inbox, root, _ = delivery
-    monkeypatch.setattr(api, "_load_inbox", lambda: inbox)
-    client = _client(_FakeClient())
-    assert client.get("/bots/ensure-protocol").status_code == 405
-    for payload in ({}, {"name": "../outside"}, {"name": "missing"}, {"name": "writer", "all": True}):
-        assert client.post("/bots/ensure-protocol", json=payload).status_code == 400
-    response = client.post("/bots/ensure-protocol", json={"name": "researcher"})
-    assert response.status_code == 200
-    assert response.json()["bots"][0]["title"] == "Bot Chat"
-    assert client.post("/bots/ensure-protocol", json={"all": True}).status_code == 200
-
-
 def test_compression_tip_receives_delivery_without_moving_title(delivery, monkeypatch):
     inbox, root, pushes = delivery
     home = root / "profiles/researcher"
@@ -272,7 +247,9 @@ def test_compression_tip_receives_delivery_without_moving_title(delivery, monkey
     assert rows(home, "messages")[0]["session_id"] == "tip"
     by_id = {row["id"]: row for row in rows(home)}
     assert by_id["root"]["title"] == "Bot Chat"
-    assert by_id["tip"]["source"] == "fetch"
+    assert (by_id["root"]["source"], by_id["root"]["hidden"]) == ("cli", 0)
+    assert by_id["tip"]["source"] == "cli"
     assert by_id["delegate"]["source"] == "cli"
     assert pushes[0]["session_id"] == "tip"
     assert pushes[0]["title"] == "Bot Chat"
+    assert pushes[0]["source"] == "cli"
