@@ -343,3 +343,91 @@ def test_tolerates_missing_or_nondict_args(plugin):
     assert plugin._on_pre_tool_call(tool_name="kanban_create") is not None
     assert plugin._on_pre_tool_call(tool_name="kanban_create", args=None) is not None
     assert plugin._on_pre_tool_call(tool_name="kanban_create", args="oops") is not None
+
+
+# --- Bot Chat lineage: an adopted Bot Chat gets the same delivery gate as an
+# app-minted one. Its replies already reach the phone through the post_llm_call
+# lineage exception, so a bare `fetch` send_message duplicates them exactly the
+# same way.
+
+
+def _install_lineage(monkeypatch, rows):
+    """Stub ``hermes_state.SessionDB`` over ``rows`` (id -> session row)."""
+    import hermes_state
+
+    class _LineageDB:
+        def __init__(self, *a, **kw):
+            pass
+
+        def get_session(self, session_id):
+            row = rows.get(session_id)
+            return dict(row) if row else None
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(hermes_state, "SessionDB", _LineageDB)
+
+
+def _row(session_id, *, title="", source="cli", parent=None, end_reason=None):
+    return {"id": session_id, "title": title, "source": source,
+            "parent_session_id": parent, "end_reason": end_reason}
+
+
+@pytest.mark.parametrize("source", ["desktop", "cli", "tui", "", None])
+def test_blocks_bare_fetch_delivery_from_adopted_bot_chat(plugin, monkeypatch, source):
+    monkeypatch.setattr(plugin, "_session_source", lambda session_id: source)
+    _install_lineage(monkeypatch, {"bot": _row("bot", title="Bot Chat", source=source or "")})
+
+    result = plugin._on_pre_tool_call(
+        tool_name="send_message",
+        args={"target": "fetch", "message": "I finished."},
+        session_id="bot",
+    )
+
+    assert result is not None and result["action"] == "block"
+    assert "Reply in the current thread" in result["message"]
+
+
+def test_blocks_bare_fetch_delivery_from_bot_chat_compression_tip(plugin, monkeypatch):
+    monkeypatch.setattr(plugin, "_session_source", lambda session_id: "cli")
+    _install_lineage(monkeypatch, {
+        "root": _row("root", title="Bot Chat", source="desktop", end_reason="compression"),
+        "tip": _row("tip", parent="root"),
+    })
+
+    result = plugin._on_pre_tool_call(
+        tool_name="send_message",
+        args={"target": "fetch", "message": "Done."},
+        session_id="tip",
+    )
+
+    assert result is not None and result["action"] == "block"
+
+
+def test_allows_named_fetch_delivery_from_adopted_bot_chat(plugin, monkeypatch):
+    monkeypatch.setattr(plugin, "_session_source", lambda session_id: "desktop")
+    _install_lineage(monkeypatch, {"bot": _row("bot", title="Bot Chat", source="desktop")})
+
+    result = plugin._on_pre_tool_call(
+        tool_name="send_message",
+        args={"target": "fetch:researcher", "message": "For the researcher."},
+        session_id="bot",
+    )
+
+    assert result is None
+
+
+def test_allows_bare_fetch_delivery_from_ordinary_desktop_chat(plugin, monkeypatch):
+    """Only the Bot Chat lineage is the phone's conversation; any other desktop
+    chat may still deliver to the person's Fetch inbox."""
+    monkeypatch.setattr(plugin, "_session_source", lambda session_id: "desktop")
+    _install_lineage(monkeypatch, {"s1": _row("s1", title="Weekly plan", source="desktop")})
+
+    result = plugin._on_pre_tool_call(
+        tool_name="send_message",
+        args={"target": "fetch", "message": "Deliver this."},
+        session_id="s1",
+    )
+
+    assert result is None
