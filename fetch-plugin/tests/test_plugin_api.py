@@ -135,7 +135,7 @@ def test_attachment_download_rejects_unsafe_path(monkeypatch):
 
     res = _client(_FakeClient()).get(
         "/attachments/download",
-        params={"path": "/etc/passwd"},
+        params={"path": "/nonexistent/outside-plugin-root.txt"},
     )
 
     assert res.status_code == 403

@@ -190,7 +190,7 @@ def test_approval_always_pushes_with_platform_source(sent, monkeypatch):
     plugin, captured = sent
     # Approvals notify regardless of surface; source parsed from session_key.
     plugin._on_pre_approval_request(
-        command="rm -rf /", description="destructive",
+        command="rm -r ./scratch", description="destructive",
         session_key="agent:main:telegram:private:123456789",
     )
     assert len(captured.calls) == 1
