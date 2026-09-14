@@ -164,7 +164,16 @@ _SESSION_SOURCE_CACHE_MAX = 512
 BOT_CHAT_TITLE = "Bot Chat"
 _BOT_CHAT_LINEAGE_CACHE: dict[str, bool] = {}
 _BOT_CHAT_LINEAGE_CACHE_MAX = 512
-_BOT_CHAT_LINEAGE_MAX_HOPS = 32
+# Same defensive bound as core's ``SessionDB.get_compression_chain`` (100 hops):
+# past it core itself cannot resolve the chain tip, so the phone could not
+# resume the conversation either.
+_BOT_CHAT_LINEAGE_MAX_HOPS = 100
+# A child row continues a compression-ended parent only when it is not a
+# delegate/branch child. Mirrors core's ``_CHAIN_STEP_SQL`` (creation markers
+# in model_config, ``source='tool'``) plus the delegate ``source``, which core
+# also treats as a delegate marker (``FTS_TRIGRAM_SESSION_SQL``).
+_NON_CONTINUATION_SOURCES = frozenset({"subagent", "tool"})
+_FORK_MARKERS = ("_delegate_from", "_branched_from")
 
 
 def invalidate_session_source_cache(*session_ids: str) -> None:
@@ -232,12 +241,41 @@ def _is_fetch_app_session(session_id: str | None) -> bool:
     return source in FETCH_APP_SOURCES
 
 
+def _row_model_config(row: dict) -> dict:
+    """``model_config`` as a dict whether the row carries it parsed or as JSON text."""
+    config = row.get("model_config")
+    if isinstance(config, (str, bytes)):
+        try:
+            config = json.loads(config or "{}")
+        except (TypeError, ValueError):
+            return {}
+    return config if isinstance(config, dict) else {}
+
+
+def _continues_compression_parent(row: dict, parent: dict | None) -> bool:
+    """Core's continuation rule (``hermes_state_compression._CHAIN_STEP_SQL``).
+
+    ``row`` continues ``parent`` only when the parent ended by compression and
+    the row is neither a delegate/branch child (creation marker, delegate
+    source) nor a tool session. Delegate children spawned from a Bot Chat tip
+    that later compacts also hang off a compression-ended parent, so the
+    parent's ``end_reason`` alone cannot tell them apart.
+    """
+    if not parent or parent.get("end_reason") != "compression":
+        return False
+    if _normalized_source(row.get("source")) in _NON_CONTINUATION_SOURCES:
+        return False
+    config = _row_model_config(row)
+    return not any(config.get(marker) is not None for marker in _FORK_MARKERS)
+
+
 def _is_bot_chat_session(session_id: str | None) -> bool:
     """True when the session is a profile's Bot Chat or one of its compression tips.
 
-    Walks parent links only across compression edges (the parent ended with
-    ``end_reason == "compression"``), so delegate children spawned from a live
-    Bot Chat are not Bot Chats. Unknown rows and lookup failures fail closed.
+    Walks parent links only across compression edges as core defines them (see
+    ``_continues_compression_parent``), checking the title of every row it
+    loads, so delegate and branch children are never Bot Chats. Unknown rows
+    and lookup failures fail closed.
     """
     if not session_id:
         return False
@@ -251,18 +289,18 @@ def _is_bot_chat_session(session_id: str | None) -> bool:
         db = SessionDB()
         row = db.get_session(session_id)
         seen = {session_id}
-        for _ in range(_BOT_CHAT_LINEAGE_MAX_HOPS):
-            if not row:
-                break
+        hops = 0
+        while row:
             if (row.get("title") or "") == BOT_CHAT_TITLE:
                 result = True
                 break
             parent_id = row.get("parent_session_id")
-            if not parent_id or parent_id in seen:
+            if not parent_id or parent_id in seen or hops >= _BOT_CHAT_LINEAGE_MAX_HOPS:
                 break
             seen.add(parent_id)
+            hops += 1
             parent = db.get_session(parent_id)
-            if not parent or parent.get("end_reason") != "compression":
+            if not _continues_compression_parent(row, parent):
                 break
             row = parent
     except Exception:
@@ -279,6 +317,17 @@ def _is_bot_chat_session(session_id: str | None) -> bool:
             _BOT_CHAT_LINEAGE_CACHE.clear()
         _BOT_CHAT_LINEAGE_CACHE[session_id] = True
     return result
+
+
+def _is_fetch_conversation(session_id: str | None) -> bool:
+    """True when a reply in this session reaches the phone.
+
+    Either an app-sourced session or a profile's Bot Chat lineage, whichever
+    client minted it. The push gate and the bare-``fetch`` delivery gate share
+    this one definition so they cannot drift apart: a session whose replies
+    already push must not also deliver them to the Fetch inbox.
+    """
+    return _is_fetch_app_session(session_id) or _is_bot_chat_session(session_id)
 
 
 def _platform_from_session_key(session_key: str) -> str | None:
@@ -384,9 +433,9 @@ def _on_post_llm_call(*, session_id: str = "", assistant_response: str = "", **_
     # bot's canonical "Bot Chat": it is the bot's single conversation whatever
     # client minted it, so a reply there always reaches the phone and the push
     # carries the row's actual source.
-    source = _normalized_source(_session_source(session_id or None))
-    if source not in FETCH_APP_SOURCES and not _is_bot_chat_session(session_id or None):
+    if not _is_fetch_conversation(session_id or None):
         return
+    source = _normalized_source(_session_source(session_id or None))
     body = _preview.notification_body(
         assistant_response,
         fallback="Finished working.",
@@ -684,7 +733,10 @@ def _send_message_target_platform(args: dict) -> str:
 def _block_fetch_self_delivery(args: dict, session_id: str) -> dict | None:
     if _send_message_target_platform(args) != "fetch":
         return None
-    if not _is_fetch_app_session(session_id or None):
+    # Same definition as the push gate: an adopted (Desktop/TUI-minted) Bot
+    # Chat already pushes its replies to the phone, so a bare fetch delivery
+    # from it duplicates them exactly like one from an app-minted session.
+    if not _is_fetch_conversation(session_id or None):
         return None
     # An explicit recipient is the supported cross-bot delivery surface.
     if str(args.get("target") or "").partition(":")[2].strip():

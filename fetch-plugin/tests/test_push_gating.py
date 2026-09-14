@@ -384,3 +384,90 @@ def test_bot_chat_lineage_does_not_cache_negative_answer(sent, monkeypatch):
     plugin._on_post_llm_call(session_id="late", assistant_response="second")
     assert db.opens == 2
     assert [c["session_id"] for c in captured.calls] == ["late"]
+
+
+# --- Continuation discriminator mirrors core (hermes_state_compression._CHAIN_STEP_SQL):
+# a row continues a compression-ended parent only when it is not a delegate/branch
+# child (creation marker in model_config, or a subagent/tool source).
+
+
+def _compacted_bot_chat(rows=None, **extra):
+    """Bot Chat root + a tip that itself compacted after spawning children."""
+    rows = {
+        "root": _row("root", title="Bot Chat", source="fetch", end_reason="compression"),
+        "tip": _row("tip", source="fetch", parent="root", end_reason="compression"),
+    }
+    rows.update(extra)
+    return rows
+
+
+@pytest.mark.parametrize(
+    "child",
+    [
+        pytest.param({"source": "subagent", "model_config": '{"_delegate_from": "tip"}'}, id="delegate-marker-json"),
+        pytest.param({"source": "subagent", "model_config": {"_delegate_from": "tip"}}, id="delegate-marker-dict"),
+        pytest.param({"source": "cli", "model_config": '{"_delegate_from": "tip"}'}, id="delegate-marker-only"),
+        pytest.param({"source": "subagent", "model_config": None}, id="subagent-source-only"),
+        pytest.param({"source": "tool", "model_config": None}, id="tool-source"),
+        pytest.param({"source": "tui", "model_config": '{"_branched_from": "tip"}'}, id="branch-marker"),
+    ],
+)
+def test_delegate_child_of_compacted_bot_chat_does_not_push(sent, monkeypatch, child):
+    plugin, captured = sent
+    _set_source(monkeypatch, plugin, child["source"])
+    row = _row("child", source=child["source"], parent="tip")
+    row["model_config"] = child["model_config"]
+    _install_lineage(monkeypatch, _compacted_bot_chat(child=row))
+
+    plugin._on_post_llm_call(session_id="child", assistant_response="delegate result")
+
+    assert captured.calls == []
+
+
+def test_continuation_of_compacted_bot_chat_tip_still_pushes(sent, monkeypatch):
+    plugin, captured = sent
+    _set_source(monkeypatch, plugin, "tui")
+    rows = _compacted_bot_chat(next=_row("next", source="tui", parent="tip"))
+    rows["next"]["model_config"] = '{"model": "x"}'
+    _install_lineage(monkeypatch, rows)
+
+    plugin._on_post_llm_call(session_id="next", assistant_response="after two compactions")
+
+    assert [c["session_id"] for c in captured.calls] == ["next"]
+
+
+def _compression_chain(depth):
+    """Bot Chat root with ``depth`` compaction continuations; returns (rows, tip id)."""
+    rows = {"root": _row("root", title="Bot Chat", source="fetch", end_reason="compression")}
+    parent = "root"
+    for i in range(1, depth + 1):
+        sid = f"c{i}"
+        rows[sid] = _row(sid, source="tui", parent=parent, end_reason="compression" if i < depth else None)
+        parent = sid
+    return rows, parent
+
+
+@pytest.mark.parametrize("depth", [32, 33, 60, 100])
+def test_bot_chat_pushes_after_many_compactions(sent, monkeypatch, depth):
+    plugin, captured = sent
+    _set_source(monkeypatch, plugin, "tui")
+    rows, tip = _compression_chain(depth)
+    _install_lineage(monkeypatch, rows)
+
+    plugin._on_post_llm_call(session_id=tip, assistant_response="still the bot chat")
+
+    assert [c["session_id"] for c in captured.calls] == [tip]
+
+
+def test_lineage_walk_terminates_on_parent_cycle(sent, monkeypatch):
+    plugin, captured = sent
+    _set_source(monkeypatch, plugin, "tui")
+    rows = {
+        "a": _row("a", source="tui", parent="b", end_reason="compression"),
+        "b": _row("b", source="tui", parent="a", end_reason="compression"),
+    }
+    _install_lineage(monkeypatch, rows)
+
+    plugin._on_post_llm_call(session_id="a", assistant_response="loop")
+
+    assert captured.calls == []
